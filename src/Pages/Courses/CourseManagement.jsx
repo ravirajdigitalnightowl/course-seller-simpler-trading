@@ -587,6 +587,12 @@ const CourseManagement = () => {
     }
   }, [token, logout, navigate, itemsPerPage]);
 
+
+
+  const handleViewRecordings = (courseId) => {
+    navigate(`/courses/${courseId}/recordings`);
+  };
+
   useEffect(() => {
     fetchCourses();
   }, [fetchCourses]);
@@ -866,6 +872,7 @@ const CourseManagement = () => {
                   onView={handleView}
                   onManageContent={handleManageContent}
                   onManageLiveClasses={handleManageLiveClasses}
+                  onViewRecordings={handleViewRecordings}
                   loading={actionLoading}
                 />
               </div>

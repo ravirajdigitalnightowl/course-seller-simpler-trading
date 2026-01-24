@@ -10,6 +10,8 @@ import {
 import { SiSpeakerdeck } from "react-icons/si";
 import { useNavigate } from "react-router-dom";
 import { toast } from "react-toastify";
+import { BiVideoRecording } from "react-icons/bi";
+
 import { useAuth } from "../contexts/AuthContext";
 
 const Sidebar = ({ activePage, onMobileClose, isCollapsed, onToggle }) => {
@@ -46,6 +48,12 @@ const Sidebar = ({ activePage, onMobileClose, isCollapsed, onToggle }) => {
       text: "My Students",
       path: "/enrolled",
     },
+//     {
+//       icon: <BiVideoRecording />
+// ,
+//       text: "My Recordings",
+//       path: "/recordings/all",
+//     },
     // {
     //   icon: <FaUser />,
     //   text: "Profile",

@@ -110,6 +110,8 @@ const [viewerCameras, setViewerCameras] = useState(new Map()); // active viewer 
   const isMountedRef = useRef(true);
   const sendTransportRef = useRef(null);
   const recvTransportRef = useRef(null);
+  const [recordingStream, setRecordingStream] = useState(null);
+const [isRecordingStopping, setIsRecordingStopping] = useState(false);
     // ✅ SIMPLIFIED AUDIO REFS
   const audioElementsRef = useRef(new Map());
   const pendingAudioQueueRef = useRef(new Map());

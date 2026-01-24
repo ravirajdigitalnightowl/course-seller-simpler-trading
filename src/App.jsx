@@ -12,6 +12,8 @@ import CourseManagement from "./Pages/Courses/CourseManagement";
 import EnrolledStudents from "./Pages/EnrolledStudents/EnrolledStudents";
 import LiveSession from "./Pages/LiveSession/LiveSession";
 import { ForgotPassword } from "./Pages/ForgotPassword/ForgotPassword";
+import CourseRecordingsPage from "./Pages/CourseRecording/CourseRecordingPage";
+import AllCourseRecordingsPage from "./Pages/AllCourseRecordings/AllCourseRecordingsPage";
 function App() {
   return (
     <>
@@ -66,6 +68,14 @@ function App() {
                   <LiveSession />
                 </PrivateRoute>
               } />
+
+              <Route path="/courses/:courseId/recordings" element={
+                <PrivateRoute>
+                  <CourseRecordingsPage />
+                </PrivateRoute>
+              } />
+
+              <Route path="/recordings/all" element={<AllCourseRecordingsPage />} />
 
               {/* Fallback route */}
               <Route path="*" element={
