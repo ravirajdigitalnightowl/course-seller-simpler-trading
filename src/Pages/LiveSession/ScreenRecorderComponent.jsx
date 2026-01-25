@@ -98,7 +98,7 @@ const ScreenRecorderComponent = ({
       const screenStream = await navigator.mediaDevices.getDisplayMedia({
         video: {
           cursor: "always",
-          frameRate: 30,
+          frameRate: 60,
         },
         audio: true,
       }).catch(error => {

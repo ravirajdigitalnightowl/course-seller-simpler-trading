@@ -676,298 +676,7 @@ const startScreenShareForParticipants = async (screenStream) => {
     // Recording continue rahegi, bas sharing fail hua
   }
 };
-// ✅ FUNCTION 4: MediaRecorder setup (common function)
-// const startMediaRecorder = (recordingStream, screenStream, micStream_UNUSED) => {
-//   // MediaRecorder options
-//   const options = {
-//     mimeType: 'video/webm;codecs=vp9,opus',
-//     videoBitsPerSecond: 2500000,
-//     audioBitsPerSecond: 128000
-//   };
 
-//   // Browser support check for mimeType
-//   if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-//     console.warn(`${options.mimeType} is not supported, trying default`);
-//     delete options.mimeType; // Fallback to browser default
-//   }
-
-//   const mediaRecorder = new MediaRecorder(recordingStream, options);
-
-//   const chunks = [];
-//   setRecordingChunks(chunks);
-
-//   // Data handling
-//   mediaRecorder.ondataavailable = (event) => {
-//     if (event.data.size > 0) {
-//       chunks.push(event.data);
-//       setRecordingChunks([...chunks]);
-//     }
-//   };
-
-//   // Stop handling (Upload & Cleanup)
-//   mediaRecorder.onstop = async () => {
-//     const blob = new Blob(chunks, { type: 'video/webm' });
-    
-//     // Upload logic
-//     await uploadRecordingToServer(blob);
-    
-//     // ✅ SAFE CLEANUP Logic
-//     // Sirf 'recordingStream' ke tracks stop karein.
-//     // Kyunki humne mic track CLONE kiya tha, isko stop karne se
-//     // aapka main camera/mic band nahi hoga.
-//     if (recordingStream) {
-//       recordingStream.getTracks().forEach(track => track.stop());
-//     }
-    
-//     // States reset
-//     setRecordingStream(null);
-//     setRecordingChunks([]);
-//     setIsRecordingStopping(false);
-    
-//     addDebugLog('✅ Recording saved and uploaded');
-//   };
-
-//   mediaRecorder.onerror = (error) => {
-//     console.error('MediaRecorder error:', error);
-//     toast.error('Recording error occurred');
-//     setIsRecording(false);
-//     stopRecordingTimer();
-//   };
-
-//   // Start recording
-//   mediaRecorder.start(1000); // 1 second chunks
-//   setRecorder(mediaRecorder);
-// };
-
-
-
-// const startMediaRecorder = (recordingStream, screenStream, micStream_UNUSED) => {
-//   // ✅ OPTIMIZATION 1: Get track constraints safely
-//   const videoTrack = recordingStream.getVideoTracks()[0];
-  
-//   // High Bitrate aur 60FPS browser ko slow kar deta hai. 
-//   // Isliye hum Standard Quality (720p/30fps) use karenge jo smooth chalta hai.
-  
-//   const options = {
-//     // VP8 CPU par VP9 se kam load dalta hai
-//     mimeType: 'video/webm;codecs=vp8,opus', 
-//     videoBitsPerSecond: 2500000, // ✅ Reduced to 2.5 Mbps (Enough for 720p)
-//     audioBitsPerSecond: 128000,  // Standard Audio Quality
-//   };
-
-//   // Browser support check
-//   const mimeTypes = [
-//     'video/webm;codecs=vp8,opus', // Preferred for performance
-//     'video/webm;codecs=h264,opus', // Hardware accelerated mostly
-//     'video/webm;codecs=vp9,opus', // Use only if above fail
-//     'video/webm'
-//   ];
-  
-//   let selectedMimeType = options.mimeType;
-//   for (const mime of mimeTypes) {
-//     if (MediaRecorder.isTypeSupported(mime)) {
-//       selectedMimeType = mime;
-//       break;
-//     }
-//   }
-  
-//   // ✅ OPTIMIZATION 2: Lower Constraints
-//   // 1080p/60fps se 720p/30fps par shift karein taki video slow na ho
-//   if (videoTrack) {
-//     try {
-//       videoTrack.applyConstraints({
-//         frameRate: { ideal: 30, max: 30 }, // ✅ Locked to 30fps for smoothness
-//         width: { ideal: 1280, max: 1920 }, // ✅ Prefer 720p
-//         height: { ideal: 720, max: 1080 }
-//       }).then(() => {
-//         console.log(`✅ Recording optimized to 30fps/720p`);
-//       }).catch(err => {
-//         console.warn('Cannot apply constraints:', err);
-//       });
-//     } catch (e) {
-//       console.warn('Error applying constraints:', e);
-//     }
-//   }
-
-//   const mediaRecorder = new MediaRecorder(recordingStream, {
-//     ...options,
-//     mimeType: selectedMimeType
-//   });
-
-//   const chunks = [];
-//   setRecordingChunks(chunks);
-
-//   mediaRecorder.ondataavailable = (event) => {
-//     if (event.data.size > 0) {
-//       chunks.push(event.data);
-//       // React state update ko thoda optimize karein (Optional)
-//       setRecordingChunks((prev) => [...prev, event.data]); 
-//     }
-//   };
-
-//   mediaRecorder.onstop = async () => {
-//     const blob = new Blob(chunks, { type: 'video/webm' });
-//     await uploadRecordingToServer(blob);
-    
-//     if (recordingStream) {
-//       recordingStream.getTracks().forEach(track => track.stop());
-//     }
-    
-//     setRecordingStream(null);
-//     setRecordingChunks([]);
-//     setIsRecordingStopping(false);
-    
-//     addDebugLog(`✅ Recording saved successfully`);
-//   };
-
-//   mediaRecorder.onerror = (error) => {
-//     console.error('MediaRecorder error:', error);
-//     toast.error('Recording error occurred');
-//     setIsRecording(false);
-//     stopRecordingTimer();
-//   };
-
-//   // ✅ OPTIMIZATION 3: Increase TimeSlice
-//   // 500ms bahot fast hai, isse CPU busy rehta hai. 
-//   // 2000ms (2 seconds) karne se performance improve hogi.
-//   mediaRecorder.start(2000); 
-//   setRecorder(mediaRecorder);
-// };
-
-// const startMediaRecorder = (recordingStream, screenStream, micStream_UNUSED) => {
-//   try {
-//     const videoTrack = recordingStream.getVideoTracks()[0];
-
-//     // ✅ 1. GPU Acceleration & Codec Selection
-//     // Priority: H.264 (GPU) -> VP8 (CPU Light) -> VP9 (CPU Heavy)
-//     const mimeTypes = [
-//       'video/webm;codecs=h264,opus', // 🚀 Best for Laptops (GPU Accelerated)
-//       'video/webm;codecs=vp8,opus',  // Good Balance
-//       'video/webm;codecs=vp9,opus',  // High Quality but Laggy
-//       'video/webm'                   // Fallback
-//     ];
-
-//     let selectedMimeType = '';
-    
-//     // Check which codec is supported by the browser
-//     for (const mime of mimeTypes) {
-//       if (MediaRecorder.isTypeSupported(mime)) {
-//         selectedMimeType = mime;
-//         console.log(`✅ Recording Codec Selected: ${mime}`);
-//         break;
-//       }
-//     }
-
-//     // Fallback if nothing found
-//     if (!selectedMimeType) {
-//       selectedMimeType = 'video/webm';
-//       console.warn('⚠️ No specific codec supported, using default video/webm');
-//     }
-
-//     // ✅ 2. Recording Options (Bitrate optimized for 720p)
-//     const options = {
-//       mimeType: selectedMimeType,
-//       videoBitsPerSecond: 2500000, // 2.5 Mbps (Perfect for 720p, low CPU usage)
-//       audioBitsPerSecond: 128000,  // 128 Kbps Audio
-//     };
-
-//     // ✅ 3. Constraint Optimization (Force 720p @ 30fps)
-//     // 60fps causes lag, so we lock it to 30fps.
-//     if (videoTrack) {
-//       try {
-//         videoTrack.applyConstraints({
-//           frameRate: { ideal: 30, max: 30 },
-//           width: { ideal: 1280, max: 1920 },
-//           height: { ideal: 720, max: 1080 },
-//           resizeMode: "crop-and-scale" // helps performance
-//         }).then(() => {
-//           console.log(`✅ Recording Constraints Applied: 720p @ 30fps`);
-//         }).catch(err => {
-//           console.warn('⚠️ Could not apply optimal recording constraints:', err);
-//         });
-//       } catch (e) {
-//         console.warn('Error accessing video track constraints:', e);
-//       }
-//     }
-
-//     // ✅ 4. Initialize Recorder
-//     const mediaRecorder = new MediaRecorder(recordingStream, options);
-//     const chunks = [];
-//     setRecordingChunks(chunks);
-
-//     // ✅ 5. Handle Data Handling
-//     mediaRecorder.ondataavailable = (event) => {
-//       if (event.data && event.data.size > 0) {
-//         chunks.push(event.data);
-//         // Using functional update for state to be safe
-//         setRecordingChunks((prev) => [...prev, event.data]);
-//       }
-//     };
-
-//     // ✅ 6. Stop & Save Logic
-//     mediaRecorder.onstop = async () => {
-//       try {
-//         const blob = new Blob(chunks, { type: 'video/webm' });
-        
-//         // Ensure backend upload logic exists
-//         if (typeof uploadRecordingToServer === 'function') {
-//           await uploadRecordingToServer(blob);
-//         } else {
-//           console.warn("uploadRecordingToServer function not found, saving locally as fallback");
-//           const url = URL.createObjectURL(blob);
-//           const a = document.createElement('a');
-//           a.style.display = 'none';
-//           a.href = url;
-//           a.download = `recording_${Date.now()}.webm`;
-//           document.body.appendChild(a);
-//           a.click();
-//           window.URL.revokeObjectURL(url);
-//         }
-
-//         // Cleanup Tracks
-//         if (recordingStream) {
-//           recordingStream.getTracks().forEach(track => track.stop());
-//         }
-
-//         // Reset States
-//         setRecordingStream(null);
-//         setRecordingChunks([]);
-//         setIsRecordingStopping(false);
-
-//         addDebugLog(`✅ Recording processing complete using ${selectedMimeType}`);
-        
-//       } catch (err) {
-//         console.error("Error in recording stop handler:", err);
-//         toast.error("Error saving recording");
-//         setIsRecordingStopping(false);
-//       }
-//     };
-
-//     // ✅ 7. Error Handling
-//     mediaRecorder.onerror = (error) => {
-//       console.error('MediaRecorder error:', error);
-//       toast.error('Recording failed due to a browser error');
-//       setIsRecording(false);
-//       stopRecordingTimer();
-//     };
-
-//     // ✅ 8. Start Recording with 2000ms Interval (Crucial for Performance)
-//     // Giving the CPU 2 seconds buffer instead of 500ms prevents freezing.
-//     mediaRecorder.start(2000);
-//     setRecorder(mediaRecorder);
-
-//     addDebugLog(`🎬 Recorder started with ${selectedMimeType} @ 2.5Mbps`);
-
-//   } catch (error) {
-//     console.error("Failed to start MediaRecorder:", error);
-//     toast.error("Could not start recording. Check camera/mic permissions.");
-//     setIsRecording(false);
-//     setIsRecordingLoading(false);
-//   }
-// };
-
-
-// ✅ UPDATED: startMediaRecorder with GPU Acceleration (H.264)
 const startMediaRecorder = (recordingStream, screenStream, micStream_UNUSED) => {
   try {
     const videoTrack = recordingStream.getVideoTracks()[0];
@@ -1000,7 +709,7 @@ const startMediaRecorder = (recordingStream, screenStream, micStream_UNUSED) => 
     if (videoTrack) {
       try {
         videoTrack.applyConstraints({
-          frameRate: { ideal: 30, max: 30 }, // 60fps causes lag, use 30
+          frameRate: { ideal: 60, max: 70 }, // 60fps causes lag, use 30
           width: { ideal: 1280, max: 1920 }, // 720p is efficient
           height: { ideal: 720, max: 1080 },
           resizeMode: "crop-and-scale"
@@ -2511,7 +2220,7 @@ const startScreenShare = useCallback(async () => {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: {
           cursor: "always",
-          frameRate: { ideal: 40, max: 70 },
+          frameRate: { ideal: 60, max: 70 },
           width: { ideal: 1280 },
           height: { ideal: 720 },
         },
@@ -3076,7 +2785,7 @@ const initializeCamera = async () => {
       video: {
         width: { ideal: 1280 },
         height: { ideal: 720 },
-        frameRate: { ideal: 40, max: 70 },
+        frameRate: { ideal: 60, max: 70 },
       },
       audio: audioConstraints  // ✅ OPTIMIZED AUDIO CONSTRAINTS
     };
@@ -3228,7 +2937,7 @@ const initializeWithFallbackConstraints = async () => {
       video: {
         width: { ideal: 640 },
         height: { ideal: 480 },
-        frameRate: { ideal: 24 },
+        frameRate: { ideal: 60 },
         facingMode: 'user'
       },
       audio: {
