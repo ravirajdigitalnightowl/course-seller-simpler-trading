@@ -789,15 +789,14 @@ const stopScreenShare = useCallback(() => {
   });
   
 }, [isRecording, socket, activeScreenShare, screenCaptureActive, sessionId, roomCode, user]);
-
 const uploadRecordingToServer = async (blob) => {
   try {
     addDebugLog('📤 Uploading recording to backend (NEW API)...');
     
-    // Generate filename with session info
+    // ✅ Generate filename with session info
     const fileName = `recording_${sessionId}_${new Date().toISOString().replace(/[:.]/g, '-')}.webm`;
     
-    // Get pre-signed URL
+    // ✅ Step 1: Get pre-signed URL from NEW API
     const presignedData = await getRecordingUploadUrl(
       sessionId,
       fileName,
@@ -811,7 +810,7 @@ const uploadRecordingToServer = async (blob) => {
     
     addDebugLog(`📁 Uploading to S3: ${fileName} (${formatFileSize(blob.size)})`);
     
-    // Upload to S3
+    // ✅ Step 2: Upload to S3 using presigned URL
     const uploadResponse = await fetch(presignedData.uploadUrl, {
       method: 'PUT',
       headers: {
@@ -821,12 +820,13 @@ const uploadRecordingToServer = async (blob) => {
     });
     
     if (!uploadResponse.ok) {
-      throw new Error(`S3 upload failed: ${uploadResponse.status}`);
+      const errorText = await uploadResponse.text();
+      throw new Error(`S3 upload failed: ${uploadResponse.status} - ${errorText}`);
     }
     
     addDebugLog('✅ Recording uploaded to S3 successfully');
     
-    // Save recording metadata
+    // ✅ Step 3: Save recording metadata to NEW API
     const saveData = {
       fileUrl: presignedData.fileUrl,
       fileName: fileName,
@@ -834,20 +834,25 @@ const uploadRecordingToServer = async (blob) => {
       duration: recordingTimer,
       fileSize: blob.size,
       s3Key: presignedData.fileKey || presignedData.fileUrl,
-      thumbnailUrl: '',
-      recordingTitle: `Final Recording - Session ${sessionId}`,
-      description: `Recording of session ${sessionId} (ended by streamer)`,
+      thumbnailUrl: '', // You can add thumbnail generation later
+      recordingTitle: `Recording ${new Date().toLocaleDateString()}`,
+      description: `Recording of session ${sessionId}`,
       recordedAt: new Date().toISOString()
     };
     
     const saveResponse = await saveRecordingMetadata(sessionId, saveData);
     
     if (saveResponse.success) {
-      const recordingId = saveResponse.data?.recording?._id || Date.now().toString();
+      addDebugLog(`✅ Recording saved to database via new API: ${fileName}`);
+      
+      // Get the recording ID from response
+      const recordingId = saveResponse.data?.recording?._id || 
+                         saveResponse.data?.id || 
+                         Date.now().toString();
       
       toast.success(`🎉 Recording saved successfully! (${formatRecordingTime(recordingTimer)})`);
       
-      // Emit socket event if socket is still connected
+      // Emit socket event
       const socket = getSocket();
       if (socket) {
         socket.emit('recording_completed', {
@@ -859,9 +864,16 @@ const uploadRecordingToServer = async (blob) => {
         });
       }
       
+      // ✅ Reset states
+      setIsRecording(false);
+      setRecorder(null);
+      setRecordedBlob(null);
+      resetRecordingTimer();
+      
       return { success: true, recordingId };
+      
     } else {
-      throw new Error('Failed to save recording metadata');
+      throw new Error('Failed to save recording metadata via new API');
     }
     
   } catch (error) {
@@ -869,6 +881,7 @@ const uploadRecordingToServer = async (blob) => {
     
     // Try local fallback
     try {
+      addDebugLog('⚠️ Upload failed, attempting local save...');
       const localSuccess = saveRecordingLocally(blob);
       if (localSuccess) {
         toast.warning('Recording saved locally (backend upload failed)');
@@ -884,15 +897,6 @@ const uploadRecordingToServer = async (blob) => {
     }
   } finally {
     setIsRecordingStopping(false);
-    
-    // 🔥 IMPORTANT: Clear recording states
-    setIsRecording(false);
-    setRecorder(null);
-    setRecordingStream(null);
-    setRecordingChunks([]);
-    resetRecordingTimer();
-    
-    addDebugLog('🔄 Recording states cleared after upload');
   }
 };
 // Helper function for local fallback
@@ -2119,79 +2123,28 @@ useEffect(() => {
     }
   };
 
-const endStreaming = async () => {
-  // Check if recording is active
-  if (isRecording) {
-    const confirmEnd = window.confirm(
-      `Recording is in progress (${formatRecordingTime(recordingTimer)}).\n` +
-      'Recording will be stopped and uploaded before ending the session.\n\n' +
-      'Are you sure you want to end the session?'
-    );
-    
-    if (!confirmEnd) return;
-    
-    try {
-      // Step 1: Stop recording first
-      toast.info('Stopping recording before ending session...');
-      await stopRecording();
-      
-      // Step 2: Wait for recording to complete upload
-      // You can show a loading state here
-      const uploadPromise = new Promise((resolve) => {
-        const checkUploadComplete = () => {
-          if (!isRecording && !isRecordingStopping) {
-            resolve(true);
-          } else {
-            setTimeout(checkUploadComplete, 500);
-          }
-        };
-        checkUploadComplete();
-      });
-      
-      // Wait for upload to complete (max 30 seconds)
-      await Promise.race([
-        uploadPromise,
-        new Promise(resolve => setTimeout(() => resolve(false), 30000))
-      ]);
-      
-      // Step 3: Now end the session
-      proceedWithSessionEnd();
-      
-    } catch (error) {
-      console.error('Error stopping recording before session end:', error);
-      const proceed = window.confirm(
-        'Recording stop failed. Do you still want to end the session?'
-      );
-      if (proceed) {
-        proceedWithSessionEnd();
-      }
-    }
-  } else {
-    // No recording active, directly end session
-    proceedWithSessionEnd();
-  }
-};
-
-// Separate function to actually end the session
-const proceedWithSessionEnd = async () => {
+  const endStreaming = async () => {
   if (window.confirm('Are you sure you want to end the session for all participants?')) {
     
-    // Send socket event to end session
+    // Agar recording chal rahi hai to pehle stop karen
+    // if (isRecording) {
+    //   const stopSuccess = await stopRecordingAPI();
+    //   if (!stopSuccess) {
+    //     // Agar recording stop nahi hui to user ko confirm karen
+    //     const proceed = window.confirm('Recording stop failed. Still end session?');
+    //     if (!proceed) return;
+    //   }
+    // }
+    
+    // Phir session end karen
     emitSocketEvent('streamer_control', { 
       sessionId: sessionId || roomCode, 
       status: 'ENDED', 
       emitEvent: 'session_ended' 
     });
-    
-    // Cleanup local media
-    cleanupBeforeExit();
-    
-    // Navigate after a delay to ensure cleanup completes
-    setTimeout(() => {
-      navigate('/dashboard');
-    }, 1000);
   }
 };
+
  const toggleAudio = () => {
   if (mediaStream) {
     const audioTrack = mediaStream.getAudioTracks()[0];
@@ -5285,7 +5238,7 @@ return (
 
 };
 
-export default LiveSession; 
+export default LiveSession;  
 
 
 
