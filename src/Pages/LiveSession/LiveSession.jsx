@@ -595,7 +595,7 @@ const startMediaRecorder = (recordingStream, screenStream, micStream_UNUSED) => 
     if (videoTrack) {
       try {
         videoTrack.applyConstraints({
-          frameRate: { ideal: 60, max: 70 }, // 60fps causes lag, use 30
+          frameRate: { ideal: 40, max: 60 }, // 60fps causes lag, use 30
           width: { ideal: 1280, max: 1920 }, // 720p is efficient
           height: { ideal: 720, max: 1080 },
           resizeMode: "crop-and-scale"
