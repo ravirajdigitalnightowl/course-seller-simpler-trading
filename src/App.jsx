@@ -14,6 +14,7 @@ import LiveSession from "./Pages/LiveSession/LiveSession";
 import { ForgotPassword } from "./Pages/ForgotPassword/ForgotPassword";
 import CourseRecordingsPage from "./Pages/CourseRecording/CourseRecordingPage";
 import AllCourseRecordingsPage from "./Pages/AllCourseRecordings/AllCourseRecordingsPage";
+import ScreenRecorderApp from "./Pages/LiveSessionNew/ScreenRecorderApp";
 function App() {
   return (
     <>
@@ -76,6 +77,8 @@ function App() {
               } />
 
               <Route path="/recordings/all" element={<AllCourseRecordingsPage />} />
+              <Route path="/screen-recorder" element={<ScreenRecorderApp />} />
+
 
               {/* Fallback route */}
               <Route path="*" element={

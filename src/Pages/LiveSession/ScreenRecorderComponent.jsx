@@ -22,7 +22,7 @@ const ScreenRecorderComponent = ({
   roomCode, 
   user, 
   onClose,
-  autoStart = false // New prop for auto-starting recording
+  autoStart = false
 }) => {
   // Main states
   const [isRecording, setIsRecording] = useState(false);
@@ -110,8 +110,6 @@ const ScreenRecorderComponent = ({
         throw error;
       });
 
-      // If we get here, user has selected a screen to share
-      // Get microphone audio
       const micStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
