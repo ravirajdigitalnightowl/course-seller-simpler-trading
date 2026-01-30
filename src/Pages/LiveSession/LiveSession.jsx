@@ -2127,14 +2127,14 @@ useEffect(() => {
   if (window.confirm('Are you sure you want to end the session for all participants?')) {
     
     // Agar recording chal rahi hai to pehle stop karen
-    if (isRecording) {
-      const stopSuccess = await stopRecordingAPI();
-      if (!stopSuccess) {
-        // Agar recording stop nahi hui to user ko confirm karen
-        const proceed = window.confirm('Recording stop failed. Still end session?');
-        if (!proceed) return;
-      }
-    }
+    // if (isRecording) {
+    //   const stopSuccess = await stopRecordingAPI();
+    //   if (!stopSuccess) {
+    //     // Agar recording stop nahi hui to user ko confirm karen
+    //     const proceed = window.confirm('Recording stop failed. Still end session?');
+    //     if (!proceed) return;
+    //   }
+    // }
     
     // Phir session end karen
     emitSocketEvent('streamer_control', { 
