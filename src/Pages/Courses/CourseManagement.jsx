@@ -93,7 +93,7 @@ const ViewModal = ({ course, onClose }) => {
   const generateShareLink = (liveClass) => {
     if (!liveClass) return '';
     
-    const baseUrl = 'https://simpler-trading.digitalnightowl.shop';
+    const baseUrl = 'https://learnntrade.com';
     // const baseUrl = 'http://localhost:5174';
 
     const sessionId = liveClass.sessionId || liveClass._id;
@@ -432,7 +432,7 @@ const ViewModal = ({ course, onClose }) => {
                 <div className="text-xs text-gray-500 dark:text-gray-400">
                   <p className="mb-1">• This link is for viewers to join the live class</p>
                   <p className="mb-1">• Hosts should use the "Join Live Class" button</p>
-                  <p>• Link format: https://simpler-trading.digitalnightowl.shop/live-session/[sessionId]/[roomCode]</p>
+                  <p>• Link format: https://learnntrade.com/live-session/[sessionId]/[roomCode]</p>
                 </div>
               </div>
               
