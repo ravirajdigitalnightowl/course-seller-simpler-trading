@@ -489,64 +489,182 @@ const startNewScreenShareWithRecording = async () => {
   }
 };
 
+// const startScreenShareForParticipants = async (screenStream) => {
+//   if (!sendTransportRef.current || !user) return;
+  
+//   try {
+//     // ✅ DIRECT TRACK - NO CLONING
+//     const videoTrack = screenStream.getVideoTracks()[0];
+//     if (!videoTrack) return;
+    
+//     // ✅ ORIGINAL TRACK PE HI CONTENT HINT LAGAO
+//     if ('contentHint' in videoTrack) {
+//       videoTrack.contentHint = 'motion';
+//       addDebugLog("✅ Screen video track: Applied contentHint 'motion'");
+//     }
+    
+//     // ✅ USE ORIGINAL TRACK DIRECTLY - NO CLONING
+//     const videoProducer = await sendTransportRef.current.produce({
+//       track: videoTrack, // ✅ Original track directly
+//       appData: {
+//         source: "screen",
+//         userId: user.id,
+//         userName: user.name || "Streamer",
+//       },
+//     });
+
+//     addDebugLog(`✅ Screen share video producer created: ${videoProducer.id}`);
+    
+//     // Audio track भी direct - NO CLONING
+//     const audioTrack = screenStream.getAudioTracks()[0];
+//     if (audioTrack) {
+//       // ✅ ORIGINAL AUDIO TRACK PE HI OPTIMIZATION
+//       if ('contentHint' in audioTrack) {
+//         audioTrack.contentHint = 'music';
+//         addDebugLog("✅ Screen audio track: Applied contentHint 'music'");
+//       }
+      
+//       // ✅ USE ORIGINAL AUDIO TRACK DIRECTLY - NO CLONING
+//       const audioProducer = await sendTransportRef.current.produce({
+//         track: audioTrack, // ✅ Original track directly
+//         appData: {
+//           source: "screen-audio",
+//           userId: user.id,
+//           userName: user.name || "Streamer",
+//         },
+//       });
+      
+//       addDebugLog(`✅ Screen share audio producer created: ${audioProducer.id}`);
+//     }
+
+//     // ✅ Screen share stream के लिए original stream ही use करें
+//     // No need to create new MediaStream - use the existing one
+//     setActiveScreenShare({
+//       userId: user.id,
+//       userName: user.name || "Streamer",
+//       stream: screenStream, // ✅ Original stream directly
+//       source: "streamer",
+//     });
+
+//     // Notify server
+//     if (socket) {
+//       socket.emit("screen-share-started", {
+//         sessionId: sessionId || roomCode,
+//         userId: user.id,
+//         userName: user.name || "Streamer",
+//         hasAudio: !!audioTrack,
+//         source: "screen",
+//       });
+//     }
+    
+//   } catch (error) {
+//     console.error('Error sharing screen with participants:', error);
+//     // Recording continue rahegi, bas sharing fail hua
+//   }
+// };
 const startScreenShareForParticipants = async (screenStream) => {
   if (!sendTransportRef.current || !user) return;
-  
+
   try {
-    // ✅ DIRECT TRACK - NO CLONING
     const videoTrack = screenStream.getVideoTracks()[0];
     if (!videoTrack) return;
-    
-    // ✅ ORIGINAL TRACK PE HI CONTENT HINT LAGAO
-    if ('contentHint' in videoTrack) {
-      videoTrack.contentHint = 'motion';
+
+    // ✅ Content hint (already in your code)
+    if ("contentHint" in videoTrack) {
+      videoTrack.contentHint = "motion";
       addDebugLog("✅ Screen video track: Applied contentHint 'motion'");
     }
-    
-    // ✅ USE ORIGINAL TRACK DIRECTLY - NO CLONING
-    const videoProducer = await sendTransportRef.current.produce({
-      track: videoTrack, // ✅ Original track directly
-      appData: {
-        source: "screen",
-        userId: user.id,
-        userName: user.name || "Streamer",
-      },
-    });
 
-    addDebugLog(`✅ Screen share video producer created: ${videoProducer.id}`);
-    
-    // Audio track भी direct - NO CLONING
+    // ✅ IMPORTANT: Mobile latency fix = cap FPS (and keep res stable)
+    try {
+      await videoTrack.applyConstraints({
+        frameRate: { ideal: 30, max: 30 },
+        width: { ideal: 1280, max: 1280 },
+        height: { ideal: 720, max: 720 },
+        resizeMode: "crop-and-scale",
+      });
+      addDebugLog("✅ Screen video constraints locked to 1280x720 @ 30fps");
+    } catch (e) {
+      addDebugLog(`⚠️ Screen constraint lock failed: ${e.message}`);
+    }
+
+    // =========================
+    // ✅ PRODUCE VIDEO (2-layer SIMULCAST)
+    // =========================
+    let videoProducer;
+    try {
+      videoProducer = await sendTransportRef.current.produce({
+        track: videoTrack,
+        appData: {
+          source: "screen",
+          userId: user.id,
+          userName: user.name || "Streamer",
+        },
+
+        // ✅ 2-LAYER SIMULCAST (low + high)
+        encodings: [
+          // LOW layer (mobile-friendly)
+          { maxBitrate: 350_000, scaleResolutionDownBy: 2 },
+          // HIGH layer (laptop/desktop)
+          { maxBitrate: 1_500_000, scaleResolutionDownBy: 1 },
+        ],
+
+        // ✅ Helps Chrome start faster at a stable bitrate
+        codecOptions: {
+          videoGoogleStartBitrate: 800, // kbps
+        },
+      });
+
+      addDebugLog(`✅ Screen share VIDEO producer (2-layer simulcast): ${videoProducer.id}`);
+    } catch (simulcastErr) {
+      // ✅ Fallback: some devices/browsers may not like simulcast for screen
+      addDebugLog(`⚠️ Simulcast failed, falling back to single layer: ${simulcastErr.message}`);
+
+      videoProducer = await sendTransportRef.current.produce({
+        track: videoTrack,
+        appData: {
+          source: "screen",
+          userId: user.id,
+          userName: user.name || "Streamer",
+        },
+        encodings: [{ maxBitrate: 900_000 }], // single layer cap
+        codecOptions: { videoGoogleStartBitrate: 600 },
+      });
+
+      addDebugLog(`✅ Screen share VIDEO producer (single layer fallback): ${videoProducer.id}`);
+    }
+
+    // =========================
+    // 🔊 PRODUCE AUDIO (same as your code, direct)
+    // =========================
     const audioTrack = screenStream.getAudioTracks()[0];
     if (audioTrack) {
-      // ✅ ORIGINAL AUDIO TRACK PE HI OPTIMIZATION
-      if ('contentHint' in audioTrack) {
-        audioTrack.contentHint = 'music';
+      if ("contentHint" in audioTrack) {
+        audioTrack.contentHint = "music";
         addDebugLog("✅ Screen audio track: Applied contentHint 'music'");
       }
-      
-      // ✅ USE ORIGINAL AUDIO TRACK DIRECTLY - NO CLONING
+
       const audioProducer = await sendTransportRef.current.produce({
-        track: audioTrack, // ✅ Original track directly
+        track: audioTrack,
         appData: {
           source: "screen-audio",
           userId: user.id,
           userName: user.name || "Streamer",
         },
       });
-      
-      addDebugLog(`✅ Screen share audio producer created: ${audioProducer.id}`);
+
+      addDebugLog(`✅ Screen share AUDIO producer: ${audioProducer.id}`);
     }
 
-    // ✅ Screen share stream के लिए original stream ही use करें
-    // No need to create new MediaStream - use the existing one
+    // ✅ keep original stream reference
     setActiveScreenShare({
       userId: user.id,
       userName: user.name || "Streamer",
-      stream: screenStream, // ✅ Original stream directly
+      stream: screenStream,
       source: "streamer",
     });
 
-    // Notify server
+    // notify server
     if (socket) {
       socket.emit("screen-share-started", {
         sessionId: sessionId || roomCode,
@@ -556,12 +674,12 @@ const startScreenShareForParticipants = async (screenStream) => {
         source: "screen",
       });
     }
-    
   } catch (error) {
-    console.error('Error sharing screen with participants:', error);
-    // Recording continue rahegi, bas sharing fail hua
+    console.error("Error sharing screen with participants:", error);
+    addDebugLog(`❌ startScreenShareForParticipants error: ${error.message}`);
   }
 };
+
 
 const startMediaRecorder = (recordingStream, screenStream, micStream_UNUSED) => {
   try {
