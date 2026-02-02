@@ -4370,12 +4370,12 @@ return (
         </div>
         
         {/* Participants Count */}
-        <div className="hidden md:flex items-center space-x-2 bg-gradient-to-r from-purple-600/50 to-blue-600/50 px-4 py-2 rounded-full backdrop-blur-sm">
+        {/* <div className="hidden md:flex items-center space-x-2 bg-gradient-to-r from-purple-600/50 to-blue-600/50 px-4 py-2 rounded-full backdrop-blur-sm">
           <FiUsers className="h-4 w-4 text-white" />
           <span className="text-sm font-medium">
             {participants.length} {participants.length === 1 ? 'Participant' : 'Participants'}
           </span>
-        </div>
+        </div> */}
 
         {/* Additional Recording Info (Optional) */}
         {isRecording && (
@@ -4386,7 +4386,7 @@ return (
         )}
 
         {/* Notification Badge for Pending Requests */}
-        {(viewerAudioRequests.length > 0 || screenShareRequests.length > 0 || viewerVideoRequests.length > 0) && (
+        {/* {(viewerAudioRequests.length > 0 || screenShareRequests.length > 0 || viewerVideoRequests.length > 0) && (
           <div className="relative">
             <button className="bg-yellow-500 p-3 rounded-full animate-pulse shadow-lg hover:bg-yellow-600 transition-colors">
               <FiAlertCircle className="h-5 w-5 text-white" />
@@ -4395,7 +4395,7 @@ return (
               {viewerAudioRequests.length + screenShareRequests.length + viewerVideoRequests.length}
             </span>
           </div>
-        )}
+        )} */}
 
         {/* Sidebar Toggle Button */}
         <button
