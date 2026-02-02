@@ -4386,7 +4386,7 @@ return (
         )}
 
         {/* Notification Badge for Pending Requests */}
-        {/* {(viewerAudioRequests.length > 0 || screenShareRequests.length > 0 || viewerVideoRequests.length > 0) && (
+        {(viewerAudioRequests.length > 0 || screenShareRequests.length > 0 || viewerVideoRequests.length > 0) && (
           <div className="relative">
             <button className="bg-yellow-500 p-3 rounded-full animate-pulse shadow-lg hover:bg-yellow-600 transition-colors">
               <FiAlertCircle className="h-5 w-5 text-white" />
@@ -4395,7 +4395,7 @@ return (
               {viewerAudioRequests.length + screenShareRequests.length + viewerVideoRequests.length}
             </span>
           </div>
-        )} */}
+        )}
 
         {/* Sidebar Toggle Button */}
         <button
@@ -5111,7 +5111,7 @@ return (
       handleViewerVideoResponse={handleViewerVideoResponse}
     />
 
-    <ProducerStatus producersState={producersState} />
+    {/* <ProducerStatus producersState={producersState} /> */}
 
     {/* Remove Audio Confirmation Modal */}
     {audioRemoveTarget && (
