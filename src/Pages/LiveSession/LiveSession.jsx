@@ -2611,15 +2611,47 @@ try {
 //   appData: { source: 'camera', userId: user?.id }   // 🔥 add userId
 // });
 
+// const videoProducer = await transport.produce({
+//   track: videoTrack,
+//   appData: { source: "camera", userId: user?.id },
+//   encodings: [
+//     { maxBitrate: 600_000 }, // 640x360 @ 40fps ke liye good starting point
+//   ],
+//   codecOptions: {
+//     videoGoogleStartBitrate: 600, // kbps
+//   },
+// });
+
 const videoProducer = await transport.produce({
   track: videoTrack,
   appData: { source: "camera", userId: user?.id },
+  
+  // ✅ 2-Layer Simulcast ADD करें (screen share जैसा)
   encodings: [
-    { maxBitrate: 600_000 }, // 640x360 @ 40fps ke liye good starting point
+    // Layer 0: Mobile/weak network
+    { 
+      maxBitrate: 250_000,
+      scaleResolutionDownBy: 2,
+      scalabilityMode: "L1T2"
+    },
+    // Layer 1: Desktop/good network  
+    { 
+      maxBitrate: 600_000,
+      scaleResolutionDownBy: 1,
+      scalabilityMode: "L1T3"
+    }
   ],
+  
+  // ✅ Content Hint ADD करें
+  // (produce से पहले track पर apply करें)
+  
+  // ✅ Better codec options
   codecOptions: {
-    videoGoogleStartBitrate: 600, // kbps
-  },
+    videoGoogleStartBitrate: 400,    // कम करें 600 से 400
+    videoGoogleMinBitrate: 150,
+    videoGoogleMaxBitrate: 700,
+    videoCodingMode: "realtime"
+  }
 });
 
   producers.current.set(videoProducer.id, videoProducer);
