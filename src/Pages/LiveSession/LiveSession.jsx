@@ -2611,48 +2611,15 @@ try {
 //   appData: { source: 'camera', userId: user?.id }   // 🔥 add userId
 // });
 
-// const videoProducer = await transport.produce({
-//   track: videoTrack,
-//   appData: { source: "camera", userId: user?.id },
-//   encodings: [
-//     { maxBitrate: 600_000 }, // 640x360 @ 40fps ke liye good starting point
-//   ],
-//   codecOptions: {
-//     videoGoogleStartBitrate: 600, // kbps
-//   },
-// });
-
-
 const videoProducer = await transport.produce({
   track: videoTrack,
   appData: { source: "camera", userId: user?.id },
-  
-  // ✅ 2-Layer Simulcast ADD करें (screen share जैसा)
   encodings: [
-    // Layer 0: Mobile/weak network
-    { 
-      maxBitrate: 250_000,
-      scaleResolutionDownBy: 2,
-      scalabilityMode: "L1T2"
-    },
-    // Layer 1: Desktop/good network  
-    { 
-      maxBitrate: 600_000,
-      scaleResolutionDownBy: 1,
-      scalabilityMode: "L1T3"
-    }
+    { maxBitrate: 600_000 }, // 640x360 @ 40fps ke liye good starting point
   ],
-  
-  // ✅ Content Hint ADD करें
-  // (produce से पहले track पर apply करें)
-  
-  // ✅ Better codec options
   codecOptions: {
-    videoGoogleStartBitrate: 400,    // कम करें 600 से 400
-    videoGoogleMinBitrate: 150,
-    videoGoogleMaxBitrate: 700,
-    videoCodingMode: "realtime"
-  }
+    videoGoogleStartBitrate: 600, // kbps
+  },
 });
 
   producers.current.set(videoProducer.id, videoProducer);
@@ -5121,7 +5088,7 @@ return (
         disabled={isRecordingLoading}
       >
         <FiPause className="text-xl mb-1" />
-        <span className="text-xs font-medium">Pauses</span>
+        <span className="text-xs font-medium">Pause</span>
       </button>
     )}
     
