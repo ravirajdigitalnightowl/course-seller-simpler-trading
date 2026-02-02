@@ -117,14 +117,14 @@ const MobileChatView = ({
       <div className="p-3 bg-gray-800 border-t border-gray-700">
         <div className="flex items-end space-x-2">
           {/* File Attachment Button */}
-          <button
+          {/* <button
             onClick={() => fileInputRef.current?.click()}
             disabled={uploadingFile}
             className="flex-shrink-0 p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded-lg transition-colors disabled:opacity-50"
             title="Attach file"
           >
             <FiImage className="h-5 w-5" />
-          </button>
+          </button> */}
 
           {/* Emoji Picker Button */}
           <button
@@ -136,13 +136,13 @@ const MobileChatView = ({
           </button>
 
           {/* Hidden File Input */}
-          <input
+          {/* <input
             type="file"
             ref={fileInputRef}
             onChange={handleFileSelect}
             accept="image/jpeg,image/png,image/gif,image/webp,application/pdf,text/plain"
             className="hidden"
-          />
+          /> */}
 
           {/* Message Input */}
           <div className="flex-1 bg-gray-700 rounded-lg border border-gray-600 focus-within:border-blue-500 transition-colors">
@@ -169,9 +169,9 @@ const MobileChatView = ({
         </div>
 
         {/* File Type Hint */}
-        <div className="text-xs text-gray-400 mt-2 text-center">
+        {/* <div className="text-xs text-gray-400 mt-2 text-center">
           Supports: Images, PDF, Text files (Max 5MB)
-        </div>
+        </div> */}
       </div>
     </div>
   );

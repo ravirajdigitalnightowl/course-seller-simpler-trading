@@ -92,6 +92,8 @@ const {
 } = useRecordingTimer();
 
 const [isLandscape, setIsLandscape] = useState(false);
+const [showEndSessionRecordingModal, setShowEndSessionRecordingModal] = useState(false);
+
 
 const [recorder, setRecorder] = useState(null);
 const [recordedBlob, setRecordedBlob] = useState(null);
@@ -685,8 +687,6 @@ const startMediaRecorder = (recordingStream, screenStream, micStream_UNUSED) => 
   try {
     const videoTrack = recordingStream.getVideoTracks()[0];
 
-    // ✅ 1. GPU Acceleration Preference
-    // H.264 (Hardware Accelerated) -> VP8 (CPU Light) -> VP9 (CPU Heavy)
     const mimeTypes = [
       'video/webm;codecs=h264,opus', // 🚀 BEST: Uses GPU (Intel/Nvidia/Mobile)
       'video/webm;codecs=vp8,opus',  // Good Balance
@@ -1429,7 +1429,7 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
     setPendingAudioStreams(new Map(pendingAudioQueueRef.current));
     
     // Show permission modal if not already shown
-    if (!showAudioPermissionModal) {
+    if (!userInteracted && !showAudioPermissionModal) {
       setShowAudioPermissionModal(true);
     }
     
@@ -1447,6 +1447,19 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
   }
   }
 };
+
+const handleEndSession = async () => {
+
+  // 👉 Agar recording chal rahi hai
+  if (isRecording) {
+    setShowEndSessionRecordingModal(true);
+    return;   // ⛔ Direct session end mat karo — pehle modal dikhao
+  }
+
+  // 👉 Agar recording nahi chal rahi to normal end session
+  actuallyEndSession();
+};
+
 const handleEnableAudio = () => {
   addDebugLog('🎵 User manually enabled audio');
   setUserInteracted(true);
@@ -2606,22 +2619,6 @@ try {
   setMediaError(null);
   addDebugLog('✅ Using existing camera/microphone stream');
 
-//  const videoProducer = await transport.produce({
-//   track: videoTrack,
-//   appData: { source: 'camera', userId: user?.id }   // 🔥 add userId
-// });
-
-// const videoProducer = await transport.produce({
-//   track: videoTrack,
-//   appData: { source: "camera", userId: user?.id },
-//   encodings: [
-//     { maxBitrate: 600_000 }, // 640x360 @ 40fps ke liye good starting point
-//   ],
-//   codecOptions: {
-//     videoGoogleStartBitrate: 600, // kbps
-//   },
-// });
-
 const videoProducer = await transport.produce({
   track: videoTrack,
   appData: { source: "camera", userId: user?.id },
@@ -2642,10 +2639,6 @@ const videoProducer = await transport.produce({
     }
   ],
   
-  // ✅ Content Hint ADD करें
-  // (produce से पहले track पर apply करें)
-  
-  // ✅ Better codec options
   codecOptions: {
     videoGoogleStartBitrate: 400,    // कम करें 600 से 400
     videoGoogleMinBitrate: 150,
@@ -3957,6 +3950,12 @@ const handlePlayClick = async (e) => {
     setLocalPausedState(true);
   }
 };
+
+const actuallyEndSession = () => {
+  socket.emit("end-session", { sessionId });
+  navigate("/dashboard");
+};
+
 
   // 📷 Jab viewer camera request bhejta hai
 const handleViewerVideoRequest = useCallback((data) => {
@@ -5350,6 +5349,48 @@ return (
         </div>
       </div>
     )}
+
+    {showEndSessionRecordingModal && (
+  <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div className="bg-white rounded-xl p-6 w-[420px] text-center shadow-xl">
+
+      <h2 className="text-lg font-bold text-gray-800">
+        🎬 Recording is still ON
+      </h2>
+
+      <p className="mt-3 text-gray-600">
+        Do you want to save this recording before ending the session?
+      </p>
+
+      <div className="mt-5 flex justify-center gap-4">
+
+        <button
+          onClick={async () => {
+            await stopRecording();   // 👉 Pehle save & stop
+            setShowEndSessionRecordingModal(false);
+            actuallyEndSession();    // 👉 Ab session end
+          }}
+          className="bg-green-600 text-white px-5 py-2 rounded-lg"
+        >
+          ✅ Save & End
+        </button>
+
+        <button
+          onClick={() => {
+            setShowEndSessionRecordingModal(false);
+            actuallyEndSession();   // 👉 bina save kiye end
+          }}
+          className="bg-red-600 text-white px-5 py-2 rounded-lg"
+        >
+          ❌ End Without Saving
+        </button>
+
+      </div>
+
+    </div>
+  </div>
+)}
+
     
     {/* Screen Capture Status */}
     {(screenCaptureActive || activeScreenShare) && (
@@ -5384,11 +5425,12 @@ return (
   </div>
 </div>
   </div>
+  
 );
 
 };
 
-export default LiveSession; 
+export default LiveSession;   
 
 
 
