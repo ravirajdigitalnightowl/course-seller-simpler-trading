@@ -153,6 +153,7 @@ const [viewerCameras, setViewerCameras] = useState(new Map());
   const viewerAudiosRef = useRef(new Map());
   const userInteractedRef = useRef(false);
 const showAudioPermissionModalRef = useRef(false);
+const audioModalLockRef = useRef(false);
 
   const videoRef = useRef(null);
   const screenRef = useRef(null);
@@ -1421,40 +1422,11 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
 
   addDebugLog(`🎵 New audio consumer: ${userId} (${sourceType})`);
 
-  // ✅ If already have an audio element for this user, don't kill/recreate it unnecessarily
+  // ✅ If already have an audio element for this user, don't recreate it
   const existingAudioEl = audioElementsRef.current.get(userId);
-  if (existingAudioEl?.srcObject) {
-    // If an element already exists and is attached to some stream, just replace stream safely
-    // (Don't compare streams by reference here; you create a new MediaStream each time)
-    existingAudioEl.srcObject = audioStream;
 
-    if (userInteractedRef.current) {
-      existingAudioEl.play().catch(() => {});
-    } else {
-      // queue play till gesture
-      pendingAudioQueueRef.current.set(userId, {
-        userId,
-        userName,
-        audioStream,
-        sourceType,
-        producerInfo,
-        timestamp: Date.now(),
-      });
-      setPendingAudioStreams(new Map(pendingAudioQueueRef.current));
-
-      // ✅ Show modal only once UNTIL first user interaction (ref-based to avoid stale state)
-      if (!userInteractedRef.current && !showAudioPermissionModalRef.current) {
-        showAudioPermissionModalRef.current = true;
-        setShowAudioPermissionModal(true);
-      }
-    }
-    return;
-  }
-
-  // ✅ Normal flow
-  if (userInteractedRef.current) {
-    createAndPlayAudioElement(userId, audioStream, userName);
-  } else {
+  // Helper: queue stream until gesture
+  const queueUntilGesture = () => {
     pendingAudioQueueRef.current.set(userId, {
       userId,
       userName,
@@ -1466,13 +1438,46 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
 
     setPendingAudioStreams(new Map(pendingAudioQueueRef.current));
 
-    // ✅ Show modal only once UNTIL first user interaction (ref-based)
-    if (!userInteractedRef.current && !showAudioPermissionModalRef.current) {
-      showAudioPermissionModalRef.current = true; // instant guard (prevents double-open)
+    // ✅ Show modal ONLY once (until user enables audio)
+    // Once user has enabled audio, we keep lock true forever.
+    if (!userInteractedRef.current && !audioModalLockRef.current) {
+      audioModalLockRef.current = true; // lock immediately (prevents double-open)
       setShowAudioPermissionModal(true);
     }
 
     addDebugLog(`⏳ Audio queued for user interaction: ${userName}`);
+  };
+
+  // ✅ If element exists, just swap stream
+  if (existingAudioEl) {
+    existingAudioEl.srcObject = audioStream;
+
+    if (userInteractedRef.current) {
+      existingAudioEl.play().catch(() => {});
+    } else {
+      queueUntilGesture();
+    }
+
+    // ✅ If recording is active, add this audio into the live mix
+    if (isRecording && audioContextRef.current && audioDestinationRef.current) {
+      try {
+        const newStream = new MediaStream([audioTrack]);
+        const newSource = audioContextRef.current.createMediaStreamSource(newStream);
+        newSource.connect(audioDestinationRef.current);
+        addDebugLog(`➕ New viewer ${producerInfo.userId} added to active recording`);
+      } catch (err) {
+        console.warn("Failed to add new viewer to recording mix", err);
+      }
+    }
+
+    return;
+  }
+
+  // ✅ Normal flow
+  if (userInteractedRef.current) {
+    createAndPlayAudioElement(userId, audioStream, userName);
+  } else {
+    queueUntilGesture();
 
     // ✅ If recording is active, add this audio into the live mix
     if (isRecording && audioContextRef.current && audioDestinationRef.current) {
@@ -1487,6 +1492,7 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
     }
   }
 };
+
 
 
 const handleEndSession = async () => {
@@ -1504,16 +1510,22 @@ const handleEndSession = async () => {
 const handleEnableAudio = () => {
   addDebugLog('🎵 User manually enabled audio');
 
-  userInteractedRef.current = true;          // ✅ instant latest value
-  showAudioPermissionModalRef.current = false;
+  // ✅ 1) Mark interaction immediately (no stale state)
+  userInteractedRef.current = true;
 
+  // ✅ 2) Lock modal forever (so it never opens again)
+  audioModalLockRef.current = true;
+
+  // ✅ 3) Close modal + update state
   setUserInteracted(true);
   setShowAudioPermissionModal(false);
 
+  // ✅ 4) Play all queued audio after gesture
   setTimeout(() => {
     playAllAudio();
   }, 100);
 };
+
 
 
   const handleScreenShareRequest = useCallback((data) => {
@@ -2005,7 +2017,7 @@ const cleanupViewerAudio = (userId) => {
     // ✅ Step 7: Check if we need to hide the audio modal
     if (pendingAudioStreams.size === 0 && showAudioPermissionModal) {
       setTimeout(() => {
-        setShowAudioPermissionModal(false);
+        // setShowAudioPermissionModal(false);
         addDebugLog(`🔕 No more pending audio - hiding modal`);
       }, 300);
     }
