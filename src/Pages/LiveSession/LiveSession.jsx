@@ -151,6 +151,9 @@ const [viewerVideoRequests, setViewerVideoRequests] = useState([]);
 const [viewerCameras, setViewerCameras] = useState(new Map()); 
   const streamerMediaRef = useRef(new MediaStream());
   const viewerAudiosRef = useRef(new Map());
+  const userInteractedRef = useRef(false);
+const showAudioPermissionModalRef = useRef(false);
+
   const videoRef = useRef(null);
   const screenRef = useRef(null);
   const remoteVideosRef = useRef(new Map());
@@ -265,6 +268,14 @@ const audioDestinationRef = useRef(null);
   }
 };
 
+
+useEffect(() => {
+  userInteractedRef.current = userInteracted;
+}, [userInteracted]);
+
+useEffect(() => {
+  showAudioPermissionModalRef.current = showAudioPermissionModal;
+}, [showAudioPermissionModal]);
 const cleanupScreenCapture = () => {
   if (screenCaptureStream) {
     screenCaptureStream.getTracks().forEach(track => {
@@ -1407,14 +1418,41 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
   const audioStream = new MediaStream([audioTrack]);
   const userId = producerInfo.userId;
   const userName = producerInfo.userName || `User ${userId}`;
+
   addDebugLog(`🎵 New audio consumer: ${userId} (${sourceType})`);
+
+  // ✅ If already have an audio element for this user, don't kill/recreate it unnecessarily
   const existingAudioEl = audioElementsRef.current.get(userId);
-  if (existingAudioEl && existingAudioEl.srcObject === audioStream) {
-    addDebugLog(`⏩ Already have same audio stream for ${userId}, skipping`);
+  if (existingAudioEl?.srcObject) {
+    // If an element already exists and is attached to some stream, just replace stream safely
+    // (Don't compare streams by reference here; you create a new MediaStream each time)
+    existingAudioEl.srcObject = audioStream;
+
+    if (userInteractedRef.current) {
+      existingAudioEl.play().catch(() => {});
+    } else {
+      // queue play till gesture
+      pendingAudioQueueRef.current.set(userId, {
+        userId,
+        userName,
+        audioStream,
+        sourceType,
+        producerInfo,
+        timestamp: Date.now(),
+      });
+      setPendingAudioStreams(new Map(pendingAudioQueueRef.current));
+
+      // ✅ Show modal only once UNTIL first user interaction (ref-based to avoid stale state)
+      if (!userInteractedRef.current && !showAudioPermissionModalRef.current) {
+        showAudioPermissionModalRef.current = true;
+        setShowAudioPermissionModal(true);
+      }
+    }
     return;
   }
 
-  if (userInteracted) {
+  // ✅ Normal flow
+  if (userInteractedRef.current) {
     createAndPlayAudioElement(userId, audioStream, userName);
   } else {
     pendingAudioQueueRef.current.set(userId, {
@@ -1423,30 +1461,33 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
       audioStream,
       sourceType,
       producerInfo,
-      timestamp: Date.now()
+      timestamp: Date.now(),
     });
-    
+
     setPendingAudioStreams(new Map(pendingAudioQueueRef.current));
-    
-    // Show permission modal if not already shown
-    if (!userInteracted && !showAudioPermissionModal) {
+
+    // ✅ Show modal only once UNTIL first user interaction (ref-based)
+    if (!userInteractedRef.current && !showAudioPermissionModalRef.current) {
+      showAudioPermissionModalRef.current = true; // instant guard (prevents double-open)
       setShowAudioPermissionModal(true);
     }
-    
+
     addDebugLog(`⏳ Audio queued for user interaction: ${userName}`);
 
+    // ✅ If recording is active, add this audio into the live mix
     if (isRecording && audioContextRef.current && audioDestinationRef.current) {
-    try {
-      const newStream = new MediaStream([audioTrack]);
-      const newSource = audioContextRef.current.createMediaStreamSource(newStream);
-      newSource.connect(audioDestinationRef.current);
-      addDebugLog(`➕ New viewer ${producerInfo.userId} added to active recording`);
-    } catch (err) {
-      console.warn("Failed to add new viewer to recording mix", err);
+      try {
+        const newStream = new MediaStream([audioTrack]);
+        const newSource = audioContextRef.current.createMediaStreamSource(newStream);
+        newSource.connect(audioDestinationRef.current);
+        addDebugLog(`➕ New viewer ${producerInfo.userId} added to active recording`);
+      } catch (err) {
+        console.warn("Failed to add new viewer to recording mix", err);
+      }
     }
   }
-  }
 };
+
 
 const handleEndSession = async () => {
 
@@ -1462,14 +1503,18 @@ const handleEndSession = async () => {
 
 const handleEnableAudio = () => {
   addDebugLog('🎵 User manually enabled audio');
+
+  userInteractedRef.current = true;          // ✅ instant latest value
+  showAudioPermissionModalRef.current = false;
+
   setUserInteracted(true);
   setShowAudioPermissionModal(false);
-  
-  // Small delay to ensure state update
+
   setTimeout(() => {
     playAllAudio();
   }, 100);
 };
+
 
   const handleScreenShareRequest = useCallback((data) => {
     addDebugLog(`Screen share request from: ${data.requestedUserId}`);
