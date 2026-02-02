@@ -2730,15 +2730,44 @@ try {
 //   appData: { source: 'camera', userId: user?.id }   // 🔥 add userId
 // });
 
+// const videoProducer = await transport.produce({
+//   track: videoTrack,
+//   appData: { source: "camera", userId: user?.id },
+//   encodings: [
+//     { maxBitrate: 600_000 }, // 640x360 @ 40fps ke liye good starting point
+//   ],
+//   codecOptions: {
+//     videoGoogleStartBitrate: 600, // kbps
+//   },
+// });
+
+// Camera के लिए (आपके current code में L746):
 const videoProducer = await transport.produce({
   track: videoTrack,
   appData: { source: "camera", userId: user?.id },
+  
+  // ✅ Camera के लिए बेहतर settings:
   encodings: [
-    { maxBitrate: 600_000 }, // 640x360 @ 40fps ke liye good starting point
+    // Mobile viewers के लिए (low)
+    { 
+      maxBitrate: 250_000,           // कम bitrate (camera motion कम होता है)
+      scaleResolutionDownBy: 2,      // Half resolution
+      maxFramerate: 20              // Camera के लिए 20fps काफी है
+    },
+    // Desktop viewers के लिए (high)
+    { 
+      maxBitrate: 750_000,           // Screen share से कम bitrate
+      scaleResolutionDownBy: 1,
+      maxFramerate: 30
+    }
   ],
+  
+  // ✅ Camera-specific codec options
   codecOptions: {
-    videoGoogleStartBitrate: 600, // kbps
-  },
+    videoGoogleStartBitrate: 400,    // कम start करें
+    videoGoogleMinBitrate: 100,
+    videoGoogleMaxBitrate: 800,
+  }
 });
 
   producers.current.set(videoProducer.id, videoProducer);
