@@ -5296,7 +5296,7 @@ return (
               className="text-xs bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1.5 rounded-lg flex items-center space-x-1 transition-colors"
               title="Lower All Hands"
             >
-              <FiHand className="h-3 w-3" />
+              <TfiHandOpen className="h-3 w-3" />
               <span>Lower All ({handRaisedUsers.length})</span>
             </button>
           )}
@@ -5380,7 +5380,7 @@ return (
                   {/* Hand raised indicator */}
                   {hasHandRaised && (
                     <div className="flex items-center space-x-1">
-                      <FiHand className="h-3 w-3 text-yellow-400" />
+                      <TfiHandOpen className="h-3 w-3 text-yellow-400" />
                       <span className="text-xs text-yellow-400">Hand Raised</span>
                     </div>
                   )}
@@ -5413,7 +5413,7 @@ return (
                   className="p-1.5 bg-yellow-700/50 hover:bg-yellow-600/50 rounded-lg transition-colors"
                   title="Lower Hand"
                 >
-                  <FiHand className="h-4 w-4 text-yellow-300" />
+                  <TfiHandOpen className="h-4 w-4 text-yellow-300" />
                 </button>
               )}
               
@@ -5472,7 +5472,7 @@ return (
           <span>Speaking</span>
         </div>
         <div className="flex items-center space-x-1">
-          <FiHand className="h-3 w-3 text-yellow-400" />
+          <TfiHandOpen className="h-3 w-3 text-yellow-400" />
           <span>Hand Raised</span>
         </div>
         <div className="flex items-center space-x-1">
