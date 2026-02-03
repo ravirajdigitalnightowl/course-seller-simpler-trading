@@ -5295,7 +5295,7 @@ return (
               className="text-xs bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1.5 rounded-lg flex items-center space-x-1 transition-colors"
               title="Lower All Hands"
             >
-              <TTTfiHandOpen className="h-3 w-3" />
+              <TfiHandOpen className="h-3 w-3" />
               <span>Lower All ({handRaisedUsers.length})</span>
             </button>
           )}
