@@ -5501,7 +5501,7 @@ return (
             </button>
           )}
           
-          {/* Show streamer speaking status */}
+          {/* Show streamer speaking status badge */}
           {isSpeaking && (
             <div className="flex items-center space-x-2 bg-green-900/30 px-3 py-1.5 rounded-lg">
               <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
@@ -5540,108 +5540,20 @@ return (
         <div className="flex items-center space-x-2">
           <div className={`w-2 h-2 rounded-full ${audioEnabled ? 'bg-green-500' : 'bg-red-500'}`}></div>
           <span className="text-gray-300">
-            Speaking Detection: <span className={`font-medium ${audioEnabled ? 'text-green-400' : 'text-red-400'}`}>
-              {audioEnabled ? 'ACTIVE' : 'OFF'}
+            Your Mic: <span className={`font-medium ${audioEnabled ? 'text-green-400' : 'text-red-400'}`}>
+              {audioEnabled ? 'ON' : 'OFF'}
             </span>
           </span>
         </div>
         
         <div className="text-gray-400">
-          Threshold: <span className="font-mono">{speakingThreshold} dB</span>
+          Speaking Threshold: <span className="font-mono">{speakingThreshold} dB</span>
         </div>
       </div>
     </div>
     
-    {/* All Participants List - Enhanced */}
+    {/* All Participants List - Viewers Only */}
     <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-700">
-      {/* Streamer Self Card (at top) */}
-      <div 
-        className={`flex items-center justify-between p-3 rounded-xl transition-all duration-200 ${
-          isSpeaking
-            ? 'bg-gradient-to-r from-green-900/20 to-emerald-900/10 border border-green-500/20'
-            : 'bg-gray-700/40 hover:bg-gray-600/40'
-        }`}
-      >
-        {/* Left side: Streamer info */}
-        <div className="flex items-center space-x-3 flex-1 min-w-0">
-          {/* Avatar */}
-          <div className="relative">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-white font-bold">
-              {user?.name?.charAt(0)?.toUpperCase() || 'S'}
-            </div>
-            
-            {/* Speaking indicator dot */}
-            {isSpeaking && (
-              <div className="absolute -bottom-1 -right-1 w-3 h-3 rounded-full bg-green-500 animate-pulse border-2 border-gray-800"></div>
-            )}
-            
-            {/* Host crown */}
-            <div className="absolute -top-2 -right-2 bg-blue-600 text-white text-[10px] px-1.5 py-0.5 rounded-full font-bold">
-              HOST
-            </div>
-          </div>
-          
-          {/* Name and status */}
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center space-x-2">
-              <span className="font-medium truncate text-sm">
-                {user?.name || "You"} (Host)
-              </span>
-            </div>
-            
-            {/* Status indicators inline */}
-            <div className="flex items-center space-x-2 mt-1">
-              {/* Speaking indicator */}
-              {isSpeaking && (
-                <div className="flex items-center space-x-1 bg-green-900/30 px-2 py-0.5 rounded">
-                  <FiVolume2 className="h-3 w-3 text-green-400 animate-pulse" />
-                  <span className="text-xs text-green-400 font-medium">SPEAKING</span>
-                </div>
-              )}
-              
-              {/* Mic indicator */}
-              {audioEnabled && !isSpeaking && (
-                <div className="flex items-center space-x-1">
-                  <FiMic className="h-3 w-3 text-blue-400" />
-                  <span className="text-xs text-blue-400">Mic Ready</span>
-                </div>
-              )}
-              
-              {!audioEnabled && (
-                <div className="flex items-center space-x-1">
-                  <FiMicOff className="h-3 w-3 text-red-400" />
-                  <span className="text-xs text-red-400">Mic Off</span>
-                </div>
-              )}
-              
-              {/* Camera indicator */}
-              {videoEnabled ? (
-                <div className="flex items-center space-x-1">
-                  <FiVideo className="h-3 w-3 text-purple-400" />
-                  <span className="text-xs text-purple-400">Camera</span>
-                </div>
-              ) : (
-                <div className="flex items-center space-x-1">
-                  <FiVideoOff className="h-3 w-3 text-red-400" />
-                  <span className="text-xs text-red-400">No Camera</span>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-        
-        {/* Right side: Streamer controls */}
-        <div className="flex items-center space-x-1">
-          {/* Speaking volume indicator */}
-          {isSpeaking && (
-            <div className="flex items-center space-x-1 px-2 py-1 bg-green-900/30 rounded-lg">
-              <FiVolume className="h-3 w-3 text-green-400" />
-              <span className="text-xs text-green-400">Active</span>
-            </div>
-          )}
-        </div>
-      </div>
-      
       {/* Viewers List */}
       {participants
         .filter(p => p.userId !== user?.id) // Remove streamer from viewers list
@@ -5691,10 +5603,10 @@ return (
                       {participant.name || participant.userName || participant.userId || "User"}
                     </span>
                     
-                    {/* Role badge */}
-                    {participant.role === 'STREAMER' && (
-                      <span className="text-[10px] bg-blue-600 text-white px-1.5 py-0.5 rounded">HOST</span>
-                    )}
+                    {/* Participant number badge */}
+                    <div className="text-[10px] bg-gray-700 text-gray-300 px-1.5 py-0.5 rounded">
+                      #{index + 1}
+                    </div>
                   </div>
                   
                   {/* Status indicators inline */}
@@ -5730,11 +5642,6 @@ return (
                         <span className="text-xs text-purple-400">Camera</span>
                       </div>
                     )}
-                    
-                    {/* Participant number */}
-                    <div className="text-xs text-gray-500">
-                      #{index + 1}
-                    </div>
                   </div>
                 </div>
               </div>
@@ -5803,13 +5710,14 @@ return (
       {participants.filter(p => p.userId !== user?.id).length === 0 && (
         <div className="flex flex-col items-center justify-center py-12 text-gray-500">
           <FiUsers className="h-16 w-16 mb-4 opacity-30" />
-          <p className="text-lg font-medium mb-2">No participants yet</p>
+          <p className="text-lg font-medium mb-2">No viewers yet</p>
           <p className="text-sm text-center max-w-sm">
             Share the room code with viewers to invite them to join the session
           </p>
           {session?.roomCode && (
             <div className="mt-4 p-3 bg-gray-800/50 rounded-lg">
-              <p className="text-sm font-mono text-blue-400">{session.roomCode}</p>
+              <p className="text-sm text-gray-300 mb-1">Room Code:</p>
+              <p className="text-lg font-mono font-bold text-blue-400">{session.roomCode}</p>
             </div>
           )}
         </div>
