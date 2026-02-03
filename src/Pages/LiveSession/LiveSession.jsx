@@ -200,6 +200,8 @@ const [showRequests, setShowRequests] = useState(false);
   const [viewerAudios, setViewerAudios] = useState(new Map());
 const [viewerVideoRequests, setViewerVideoRequests] = useState([]);
 const [viewerCameras, setViewerCameras] = useState(new Map()); 
+
+
   const streamerMediaRef = useRef(new MediaStream());
   const viewerAudiosRef = useRef(new Map());
   const userInteractedRef = useRef(false);
@@ -272,6 +274,122 @@ const audioDestinationRef = useRef(null);
   // ========== SOCKET EVENT HANDLERS ==========
 
   // Automatic speaking detection functions
+
+  const startStreamerSpeakingDetection = () => {
+  if (!mediaStream || !socket) return;
+  
+  try {
+    // Stop existing detection if any
+    stopStreamerSpeakingDetection();
+    
+    // Get audio track
+    const audioTracks = mediaStream.getAudioTracks();
+    if (audioTracks.length === 0) {
+      addDebugLog('🎤 No audio track found for streamer speaking detection');
+      return;
+    }
+    
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    audioContextRef.current = new AudioContext();
+    
+    const streamSource = audioContextRef.current.createMediaStreamSource(mediaStream);
+    analyserRef.current = audioContextRef.current.createAnalyser();
+    analyserRef.current.fftSize = 256;
+    analyserRef.current.smoothingTimeConstant = 0.8;
+    
+    streamSource.connect(analyserRef.current);
+    
+    const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
+    let lastSpeakingState = false;
+    let consecutiveSpeakingCount = 0;
+    let consecutiveSilenceCount = 0;
+    
+    speakingDetectionIntervalRef.current = setInterval(() => {
+      if (!analyserRef.current || !audioContextRef.current) return;
+      
+      try {
+        analyserRef.current.getByteFrequencyData(dataArray);
+        
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i];
+        }
+        const averageVolume = sum / dataArray.length;
+        
+        const isCurrentlySpeaking = averageVolume > speakingThreshold;
+        
+        // Debounce logic
+        if (isCurrentlySpeaking) {
+          consecutiveSpeakingCount++;
+          consecutiveSilenceCount = 0;
+        } else {
+          consecutiveSilenceCount++;
+          consecutiveSpeakingCount = 0;
+        }
+        
+        const detectedSpeaking = consecutiveSpeakingCount >= 2;
+        const detectedSilence = consecutiveSilenceCount >= 3;
+        
+        if (detectedSpeaking && !lastSpeakingState) {
+          // Streamer started speaking
+          setIsSpeaking(true);
+          socket.emit('user_speaking', {
+            sessionId: sessionId || roomCode,
+            isSpeaking: true
+          });
+          lastSpeakingState = true;
+          addDebugLog(`🎤 Streamer started speaking (volume: ${averageVolume.toFixed(1)})`);
+          
+        } else if (detectedSilence && lastSpeakingState) {
+          // Streamer stopped speaking
+          setIsSpeaking(false);
+          socket.emit('user_stopped_speaking', {
+            sessionId: sessionId || roomCode
+          });
+          lastSpeakingState = false;
+          addDebugLog(`🎤 Streamer stopped speaking (volume: ${averageVolume.toFixed(1)})`);
+        }
+      } catch (error) {
+        console.error('Streamer speaking detection error:', error);
+      }
+    }, 300);
+    
+    addDebugLog('🎤 Streamer speaking detection started');
+    
+  } catch (error) {
+    console.error('Error starting streamer speaking detection:', error);
+    addDebugLog(`❌ Streamer speaking detection error: ${error.message}`);
+  }
+};
+
+const stopStreamerSpeakingDetection = () => {
+  if (speakingDetectionIntervalRef.current) {
+    clearInterval(speakingDetectionIntervalRef.current);
+    speakingDetectionIntervalRef.current = null;
+  }
+  
+  if (analyserRef.current) {
+    analyserRef.current.disconnect();
+    analyserRef.current = null;
+  }
+  
+  if (audioContextRef.current) {
+    audioContextRef.current.close();
+    audioContextRef.current = null;
+  }
+  
+  // If currently speaking, emit stop event
+  if (isSpeaking) {
+    setIsSpeaking(false);
+    if (socket) {
+      socket.emit('user_stopped_speaking', {
+        sessionId: sessionId || roomCode
+      });
+    }
+  }
+  
+  addDebugLog('🎤 Streamer speaking detection stopped');
+};
 const startSpeakingDetection = () => {
   if (!mediaStream || !socket) return;
   
@@ -481,6 +599,17 @@ const lowerAllHands = () => {
 useEffect(() => {
   userInteractedRef.current = userInteracted;
 }, [userInteracted]);
+
+useEffect(() => {
+  if (mediaStream && socket && isConnected && audioEnabled) {
+    // Small delay to ensure everything is ready
+    const timer = setTimeout(() => {
+      startStreamerSpeakingDetection();
+    }, 2000);
+    
+    return () => clearTimeout(timer);
+  }
+}, [mediaStream, socket, isConnected, audioEnabled]);
 
 // Media stream milte hi speaking detection start karen
 useEffect(() => {
@@ -2586,6 +2715,40 @@ const toggleAudio = () => {
           startSpeakingDetection();
         }, 500); // Small delay to ensure audio track is ready
         
+        // Also ensure speaking detection starts immediately for local state
+        if (!audioContextRef.current) {
+          // Force speaking detection initialization
+          const initSpeakingDetection = () => {
+            if (mediaStream && socket) {
+              try {
+                // Setup audio context
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                audioContextRef.current = new AudioContext();
+                
+                const audioTracks = mediaStream.getAudioTracks();
+                if (audioTracks.length === 0) return;
+                
+                // Create media stream source
+                const streamSource = audioContextRef.current.createMediaStreamSource(mediaStream);
+                
+                // Create analyser
+                analyserRef.current = audioContextRef.current.createAnalyser();
+                analyserRef.current.fftSize = 256;
+                analyserRef.current.smoothingTimeConstant = 0.8;
+                
+                // Connect source to analyser
+                streamSource.connect(analyserRef.current);
+                
+                addDebugLog('🎤 Speaking detection audio context initialized');
+              } catch (error) {
+                console.error('Error initializing speaking detection:', error);
+              }
+            }
+          };
+          
+          initSpeakingDetection();
+        }
+        
         addDebugLog(`🎤 Streamer mic ON - speaking detection started`);
       } else {
         // Mic OFF: Stop speaking detection
@@ -2599,6 +2762,15 @@ const toggleAudio = () => {
               sessionId: sessionId || roomCode
             });
             addDebugLog(`🎤 Streamer stopped speaking due to mic off`);
+          }
+          
+          // Also remove from local speaking state
+          if (user?.id) {
+            setSpeakingUsers(prev => {
+              const newMap = new Map(prev);
+              newMap.delete(user.id);
+              return newMap;
+            });
           }
         }
         
@@ -3479,6 +3651,34 @@ newSocket.on('participant_speaking_status', (data) => {
     }
     return newMap;
   });
+});
+
+// Add these socket event listeners in initializeWebSocket() function:
+
+// Participant speaking status (FROM BACKEND)
+newSocket.on('participant_speaking_status', (data) => {
+  addDebugLog(`🎤 Speaking status received: ${data.userId} - ${data.isSpeaking}`);
+  
+  setSpeakingUsers(prev => {
+    const newMap = new Map(prev);
+    if (data.isSpeaking) {
+      newMap.set(data.userId, {
+        userId: data.userId,
+        userName: data.userName || participants.find(p => p.userId === data.userId)?.name || 'User',
+        timestamp: new Date()
+      });
+    } else {
+      newMap.delete(data.userId);
+    }
+    return newMap;
+  });
+});
+
+
+// All hands down event
+newSocket.on('all_hands_down', () => {
+  addDebugLog('🛑 All hands lowered by streamer');
+  setHandRaisedUsers([]);
 });
 
 // Hand raise status
@@ -5300,6 +5500,15 @@ return (
               <span>Lower All ({handRaisedUsers.length})</span>
             </button>
           )}
+          
+          {/* Show streamer speaking status */}
+          {isSpeaking && (
+            <div className="flex items-center space-x-2 bg-green-900/30 px-3 py-1.5 rounded-lg">
+              <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+              <span className="text-xs text-green-400 font-medium">You're Speaking</span>
+            </div>
+          )}
+          
           <button
             onClick={() => setShowParticipantsModal(true)}
             className="p-1.5 hover:bg-gray-700 rounded-lg transition-colors"
@@ -5310,8 +5519,8 @@ return (
         </div>
       </div>
       
-      {/* Quick Stats - Simplified */}
-      <div className="mt-3 grid grid-cols-2 gap-2">
+      {/* Quick Stats - Enhanced */}
+      <div className="mt-3 grid grid-cols-3 gap-2">
         <div className="text-center p-2 bg-gray-700/50 rounded-lg">
           <div className="text-lg font-bold text-white">{participants.length}</div>
           <div className="text-xs text-gray-300">Total</div>
@@ -5320,159 +5529,302 @@ return (
           <div className="text-lg font-bold text-yellow-300">{handRaisedUsers.length}</div>
           <div className="text-xs text-yellow-300">Hands Raised</div>
         </div>
+        <div className="text-center p-2 bg-green-900/30 rounded-lg">
+          <div className="text-lg font-bold text-green-300">{speakingUsers.size}</div>
+          <div className="text-xs text-green-300">Speaking</div>
+        </div>
+      </div>
+      
+      {/* Speaking Detection Status */}
+      <div className="mt-3 flex items-center justify-between text-xs">
+        <div className="flex items-center space-x-2">
+          <div className={`w-2 h-2 rounded-full ${audioEnabled ? 'bg-green-500' : 'bg-red-500'}`}></div>
+          <span className="text-gray-300">
+            Speaking Detection: <span className={`font-medium ${audioEnabled ? 'text-green-400' : 'text-red-400'}`}>
+              {audioEnabled ? 'ACTIVE' : 'OFF'}
+            </span>
+          </span>
+        </div>
+        
+        <div className="text-gray-400">
+          Threshold: <span className="font-mono">{speakingThreshold} dB</span>
+        </div>
       </div>
     </div>
     
-    {/* All Participants List - Clean and Simple */}
+    {/* All Participants List - Enhanced */}
     <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-700">
-      {participants.map((participant, index) => {
-        const isThisUserSpeaking = speakingUsers.has(participant.userId);
-        const hasHandRaised = handRaisedUsers.some(user => user.userId === participant.userId);
-        const isSelf = participant.userId === user?.id;
-        const isStreamer = participant.role === 'STREAMER';
-        
-        // Skip streamer from participants list
-        if (isSelf && isStreamer) return null;
-        
-        return (
-          <div
-            key={index}
-            className={`flex items-center justify-between p-3 rounded-xl transition-all duration-200 ${
-              hasHandRaised
-                ? 'bg-gradient-to-r from-yellow-900/20 to-amber-900/10 border border-yellow-500/20'
-                : 'bg-gray-700/40 hover:bg-gray-600/40'
-            }`}
-          >
-            {/* Left side: Participant info */}
-            <div className="flex items-center space-x-3 flex-1 min-w-0">
-              {/* Avatar */}
-              <div className="relative">
-                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-white font-medium">
-                  {participant.name?.charAt(0)?.toUpperCase() || 
-                   participant.userName?.charAt(0)?.toUpperCase() || 
-                   participant.userId?.charAt(0)?.toUpperCase() || 'U'}
-                </div>
-                
-                {/* Speaking indicator dot */}
-                {isThisUserSpeaking && (
-                  <div className="absolute -bottom-1 -right-1 w-3 h-3 rounded-full bg-green-500 animate-pulse border-2 border-gray-800"></div>
-                )}
-              </div>
-              
-              {/* Name and status */}
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center space-x-2">
-                  <span className="font-medium truncate text-sm">
-                    {participant.name || participant.userName || participant.userId || "User"}
-                  </span>
-                </div>
-                
-                {/* Status indicators inline */}
-                <div className="flex items-center space-x-2 mt-1">
-                  {/* Speaking indicator */}
-                  {isThisUserSpeaking && (
-                    <div className="flex items-center space-x-1">
-                      <FiVolume className="h-3 w-3 text-green-400 animate-pulse" />
-                      <span className="text-xs text-green-400">Speaking</span>
-                    </div>
-                  )}
-                  
-                  {/* Hand raised indicator */}
-                  {hasHandRaised && (
-                    <div className="flex items-center space-x-1">
-                      <TfiHandOpen className="h-3 w-3 text-yellow-400" />
-                      <span className="text-xs text-yellow-400">Hand Raised</span>
-                    </div>
-                  )}
-                  
-                  {/* Mic indicator */}
-                  {participant.hasAudio && !isThisUserSpeaking && (
-                    <div className="flex items-center space-x-1">
-                      <FiMic className="h-3 w-3 text-blue-400" />
-                      <span className="text-xs text-blue-400">Mic On</span>
-                    </div>
-                  )}
-                  
-                  {/* Camera indicator */}
-                  {participant.hasVideo && (
-                    <div className="flex items-center space-x-1">
-                      <FiVideo className="h-3 w-3 text-purple-400" />
-                      <span className="text-xs text-purple-400">Camera</span>
-                    </div>
-                  )}
-                </div>
-              </div>
+      {/* Streamer Self Card (at top) */}
+      <div 
+        className={`flex items-center justify-between p-3 rounded-xl transition-all duration-200 ${
+          isSpeaking
+            ? 'bg-gradient-to-r from-green-900/20 to-emerald-900/10 border border-green-500/20'
+            : 'bg-gray-700/40 hover:bg-gray-600/40'
+        }`}
+      >
+        {/* Left side: Streamer info */}
+        <div className="flex items-center space-x-3 flex-1 min-w-0">
+          {/* Avatar */}
+          <div className="relative">
+            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-white font-bold">
+              {user?.name?.charAt(0)?.toUpperCase() || 'S'}
             </div>
             
-            {/* Right side: Action buttons */}
-            <div className="flex items-center space-x-1">
-              {/* Lower Hand button (only for viewers with raised hands) */}
-              {hasHandRaised && (
-                <button
-                  onClick={() => lowerHandForUser(participant.userId)}
-                  className="p-1.5 bg-yellow-700/50 hover:bg-yellow-600/50 rounded-lg transition-colors"
-                  title="Lower Hand"
-                >
-                  <TfiHandOpen className="h-4 w-4 text-yellow-300" />
-                </button>
+            {/* Speaking indicator dot */}
+            {isSpeaking && (
+              <div className="absolute -bottom-1 -right-1 w-3 h-3 rounded-full bg-green-500 animate-pulse border-2 border-gray-800"></div>
+            )}
+            
+            {/* Host crown */}
+            <div className="absolute -top-2 -right-2 bg-blue-600 text-white text-[10px] px-1.5 py-0.5 rounded-full font-bold">
+              HOST
+            </div>
+          </div>
+          
+          {/* Name and status */}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center space-x-2">
+              <span className="font-medium truncate text-sm">
+                {user?.name || "You"} (Host)
+              </span>
+            </div>
+            
+            {/* Status indicators inline */}
+            <div className="flex items-center space-x-2 mt-1">
+              {/* Speaking indicator */}
+              {isSpeaking && (
+                <div className="flex items-center space-x-1 bg-green-900/30 px-2 py-0.5 rounded">
+                  <FiVolume2 className="h-3 w-3 text-green-400 animate-pulse" />
+                  <span className="text-xs text-green-400 font-medium">SPEAKING</span>
+                </div>
               )}
               
-              {/* Stop Camera button */}
-              {participant.hasVideo && (
-                <button
-                  onClick={() => {
-                    emitSocketEvent("streamer-stop-viewer-video", {
-                      sessionId: sessionId || roomCode,
-                      targetSocketId: participant.socketId,
-                    });
-                    addDebugLog(`🛑 Force stopped camera for: ${participant.userId}`);
-                    toast.info(`Stopped ${participant.name}'s camera`, {
-                      position: "bottom-right",
-                      autoClose: 2000,
-                    });
-                  }}
-                  className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
-                  title="Stop Camera"
-                >
-                  <FiVideoOff className="h-4 w-4 text-gray-300" />
-                </button>
+              {/* Mic indicator */}
+              {audioEnabled && !isSpeaking && (
+                <div className="flex items-center space-x-1">
+                  <FiMic className="h-3 w-3 text-blue-400" />
+                  <span className="text-xs text-blue-400">Mic Ready</span>
+                </div>
               )}
               
-              {/* Mute button */}
-              {participant.hasAudio && (
-                <button
-                  onClick={() => {
-                    emitSocketEvent("streamer-stop-viewer-audio", {
-                      sessionId: sessionId || roomCode,
-                      targetSocketId: participant.socketId,
-                    });
-                    addDebugLog(`🔇 Muted viewer: ${participant.userId}`);
-                    toast.info(`Muted ${participant.name}`, {
-                      position: "bottom-right",
-                      autoClose: 2000,
-                    });
-                  }}
-                  className="p-1.5 bg-red-700/50 hover:bg-red-600/50 rounded-lg transition-colors"
-                  title="Mute User"
-                >
-                  <FiMicOff className="h-4 w-4 text-red-300" />
-                </button>
+              {!audioEnabled && (
+                <div className="flex items-center space-x-1">
+                  <FiMicOff className="h-3 w-3 text-red-400" />
+                  <span className="text-xs text-red-400">Mic Off</span>
+                </div>
+              )}
+              
+              {/* Camera indicator */}
+              {videoEnabled ? (
+                <div className="flex items-center space-x-1">
+                  <FiVideo className="h-3 w-3 text-purple-400" />
+                  <span className="text-xs text-purple-400">Camera</span>
+                </div>
+              ) : (
+                <div className="flex items-center space-x-1">
+                  <FiVideoOff className="h-3 w-3 text-red-400" />
+                  <span className="text-xs text-red-400">No Camera</span>
+                </div>
               )}
             </div>
           </div>
-        );
-      })}
+        </div>
+        
+        {/* Right side: Streamer controls */}
+        <div className="flex items-center space-x-1">
+          {/* Speaking volume indicator */}
+          {isSpeaking && (
+            <div className="flex items-center space-x-1 px-2 py-1 bg-green-900/30 rounded-lg">
+              <FiVolume className="h-3 w-3 text-green-400" />
+              <span className="text-xs text-green-400">Active</span>
+            </div>
+          )}
+        </div>
+      </div>
+      
+      {/* Viewers List */}
+      {participants
+        .filter(p => p.userId !== user?.id) // Remove streamer from viewers list
+        .map((participant, index) => {
+          const isThisUserSpeaking = speakingUsers.has(participant.userId);
+          const hasHandRaised = handRaisedUsers.some(user => user.userId === participant.userId);
+          
+          return (
+            <div
+              key={index}
+              className={`flex items-center justify-between p-3 rounded-xl transition-all duration-200 ${
+                isThisUserSpeaking
+                  ? 'bg-gradient-to-r from-green-900/20 to-emerald-900/10 border border-green-500/20'
+                  : hasHandRaised
+                  ? 'bg-gradient-to-r from-yellow-900/20 to-amber-900/10 border border-yellow-500/20'
+                  : 'bg-gray-700/40 hover:bg-gray-600/40'
+              }`}
+            >
+              {/* Left side: Participant info */}
+              <div className="flex items-center space-x-3 flex-1 min-w-0">
+                {/* Avatar */}
+                <div className="relative">
+                  <div className="w-9 h-9 rounded-full bg-gradient-to-br from-green-600 to-teal-600 flex items-center justify-center text-white font-medium">
+                    {participant.name?.charAt(0)?.toUpperCase() || 
+                     participant.userName?.charAt(0)?.toUpperCase() || 
+                     participant.userId?.charAt(0)?.toUpperCase() || 'U'}
+                  </div>
+                  
+                  {/* Multiple status indicators */}
+                  <div className="absolute -bottom-1 -right-1 flex space-x-1">
+                    {/* Speaking indicator dot */}
+                    {isThisUserSpeaking && (
+                      <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse border-2 border-gray-800"></div>
+                    )}
+                    
+                    {/* Hand raised indicator dot */}
+                    {hasHandRaised && !isThisUserSpeaking && (
+                      <div className="w-3 h-3 rounded-full bg-yellow-500 border-2 border-gray-800"></div>
+                    )}
+                  </div>
+                </div>
+                
+                {/* Name and status */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center space-x-2">
+                    <span className="font-medium truncate text-sm">
+                      {participant.name || participant.userName || participant.userId || "User"}
+                    </span>
+                    
+                    {/* Role badge */}
+                    {participant.role === 'STREAMER' && (
+                      <span className="text-[10px] bg-blue-600 text-white px-1.5 py-0.5 rounded">HOST</span>
+                    )}
+                  </div>
+                  
+                  {/* Status indicators inline */}
+                  <div className="flex items-center flex-wrap gap-2 mt-1">
+                    {/* Speaking indicator */}
+                    {isThisUserSpeaking && (
+                      <div className="flex items-center space-x-1 bg-green-900/30 px-2 py-0.5 rounded">
+                        <FiVolume2 className="h-3 w-3 text-green-400 animate-pulse" />
+                        <span className="text-xs text-green-400 font-medium">SPEAKING</span>
+                      </div>
+                    )}
+                    
+                    {/* Hand raised indicator */}
+                    {hasHandRaised && !isThisUserSpeaking && (
+                      <div className="flex items-center space-x-1 bg-yellow-900/30 px-2 py-0.5 rounded">
+                        <TfiHandOpen className="h-3 w-3 text-yellow-400" />
+                        <span className="text-xs text-yellow-400 font-medium">HAND RAISED</span>
+                      </div>
+                    )}
+                    
+                    {/* Mic indicator */}
+                    {participant.hasAudio && !isThisUserSpeaking && (
+                      <div className="flex items-center space-x-1">
+                        <FiMic className="h-3 w-3 text-blue-400" />
+                        <span className="text-xs text-blue-400">Mic On</span>
+                      </div>
+                    )}
+                    
+                    {/* Camera indicator */}
+                    {participant.hasVideo && (
+                      <div className="flex items-center space-x-1">
+                        <FiVideo className="h-3 w-3 text-purple-400" />
+                        <span className="text-xs text-purple-400">Camera</span>
+                      </div>
+                    )}
+                    
+                    {/* Participant number */}
+                    <div className="text-xs text-gray-500">
+                      #{index + 1}
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              {/* Right side: Action buttons */}
+              <div className="flex items-center space-x-1">
+                {/* Lower Hand button (only for viewers with raised hands) */}
+                {hasHandRaised && (
+                  <button
+                    onClick={() => lowerHandForUser(participant.userId)}
+                    className="p-1.5 bg-yellow-700/50 hover:bg-yellow-600/50 rounded-lg transition-colors"
+                    title="Lower Hand"
+                  >
+                    <TfiHandOpen className="h-4 w-4 text-yellow-300" />
+                  </button>
+                )}
+                
+                {/* Stop Camera button */}
+                {participant.hasVideo && (
+                  <button
+                    onClick={() => {
+                      emitSocketEvent("streamer-stop-viewer-video", {
+                        sessionId: sessionId || roomCode,
+                        targetSocketId: participant.socketId,
+                      });
+                      addDebugLog(`🛑 Force stopped camera for: ${participant.userId}`);
+                      toast.info(`Stopped ${participant.name}'s camera`, {
+                        position: "bottom-right",
+                        autoClose: 2000,
+                      });
+                    }}
+                    className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+                    title="Stop Camera"
+                  >
+                    <FiVideoOff className="h-4 w-4 text-gray-300" />
+                  </button>
+                )}
+                
+                {/* Mute button */}
+                {participant.hasAudio && (
+                  <button
+                    onClick={() => {
+                      emitSocketEvent("streamer-stop-viewer-audio", {
+                        sessionId: sessionId || roomCode,
+                        targetSocketId: participant.socketId,
+                      });
+                      addDebugLog(`🔇 Muted viewer: ${participant.userId}`);
+                      toast.info(`Muted ${participant.name}`, {
+                        position: "bottom-right",
+                        autoClose: 2000,
+                      });
+                    }}
+                    className="p-1.5 bg-red-700/50 hover:bg-red-600/50 rounded-lg transition-colors"
+                    title="Mute User"
+                  >
+                    <FiMicOff className="h-4 w-4 text-red-300" />
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })
+      }
+      
+      {/* Empty State */}
+      {participants.filter(p => p.userId !== user?.id).length === 0 && (
+        <div className="flex flex-col items-center justify-center py-12 text-gray-500">
+          <FiUsers className="h-16 w-16 mb-4 opacity-30" />
+          <p className="text-lg font-medium mb-2">No participants yet</p>
+          <p className="text-sm text-center max-w-sm">
+            Share the room code with viewers to invite them to join the session
+          </p>
+          {session?.roomCode && (
+            <div className="mt-4 p-3 bg-gray-800/50 rounded-lg">
+              <p className="text-sm font-mono text-blue-400">{session.roomCode}</p>
+            </div>
+          )}
+        </div>
+      )}
     </div>
     
     {/* Legend at bottom */}
     <div className="p-3 border-t border-gray-700 bg-gray-800/50">
       <div className="flex flex-wrap items-center gap-3 text-xs text-gray-400">
         <div className="flex items-center space-x-1">
-          <FiVolume className="h-3 w-3 text-green-400" />
+          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
           <span>Speaking</span>
         </div>
         <div className="flex items-center space-x-1">
-          <TfiHandOpen className="h-3 w-3 text-yellow-400" />
+          <div className="w-2 h-2 rounded-full bg-yellow-500"></div>
           <span>Hand Raised</span>
         </div>
         <div className="flex items-center space-x-1">
@@ -5482,6 +5834,9 @@ return (
         <div className="flex items-center space-x-1">
           <FiVideo className="h-3 w-3 text-purple-400" />
           <span>Camera On</span>
+        </div>
+        <div className="ml-auto text-xs text-gray-500">
+          {speakingUsers.size} speaking • {handRaisedUsers.length} hands raised
         </div>
       </div>
     </div>
