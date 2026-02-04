@@ -208,6 +208,15 @@ const [viewerCameras, setViewerCameras] = useState(new Map());
 const showAudioPermissionModalRef = useRef(false);
 const audioModalLockRef = useRef(false);
 
+
+const activeScreenShareRef = useRef(null);
+const participantsRef = useRef([]);
+const viewerCamerasRef = useRef(new Map());
+const zoomedRef = useRef(null);
+
+// ✅ sequential queue (one-by-one)
+const userLeftQueueRef = useRef(Promise.resolve());
+
   const videoRef = useRef(null);
   const screenRef = useRef(null);
   const remoteVideosRef = useRef(new Map());
@@ -594,6 +603,11 @@ const lowerAllHands = () => {
     return null;
   }
 };
+
+useEffect(() => { activeScreenShareRef.current = activeScreenShare; }, [activeScreenShare]);
+useEffect(() => { participantsRef.current = participants; }, [participants]);
+useEffect(() => { viewerCamerasRef.current = viewerCameras; }, [viewerCameras]);
+useEffect(() => { zoomedRef.current = zoomed; }, [zoomed]);
 
 
 useEffect(() => {
@@ -3272,6 +3286,276 @@ const initializeMedia = async (currentSessionId, initialIceServers = []) => {
   };
   // ========== CAMERA AND PERMISSION FUNCTIONS ==========
 
+
+const handleUserLeftSequential = async (data) => {
+  const userId = data.userId;
+  const socketId = data.socketId;
+
+  // ✅ Always read latest from refs (NO stale state)
+  const activeSS = activeScreenShareRef.current;
+  const parts = participantsRef.current;
+  const cams = viewerCamerasRef.current;
+  const zm = zoomedRef.current;
+
+  console.log("🔴🔴🔴 USER_LEFT EVENT (SEQUENTIAL) 🔴🔴🔴", {
+    data,
+    timestamp: new Date().toISOString(),
+    activeScreenShare: activeSS,
+    participantsCount: parts?.length ?? 0,
+    viewerCamerasCount: cams?.size ?? 0,
+  });
+
+  addDebugLog(`❌ USER LEFT: ${userId} - Cleaning ALL media...`);
+  console.log("📊 CLEANUP STARTING FOR:", { userId, socketId });
+
+  // =========================================================
+  // 1) PARTICIPANTS LIST
+  // =========================================================
+  console.log(
+    "👥 Participants before cleanup:",
+    (parts || []).map((p) => ({ userId: p.userId, socketId: p.socketId, name: p.name }))
+  );
+
+  setParticipants((prev) => {
+    const filtered = prev.filter((p) => p.socketId !== socketId);
+    return filtered;
+  });
+
+  // =========================================================
+  // 2) HAND RAISED & SPEAKING
+  // =========================================================
+  console.log("✋ Hand raised users before:", handRaisedUsers.length);
+  console.log("🎤 Speaking users before:", speakingUsers.size);
+
+  setHandRaisedUsers((prev) => prev.filter((u) => u.userId !== userId));
+
+  setSpeakingUsers((prev) => {
+    const next = new Map(prev);
+    next.delete(userId);
+    return next;
+  });
+
+  // =========================================================
+  // 3) CAMERA CLEANUP
+  // =========================================================
+  console.log("📷 Viewer cameras before cleanup:", {
+    hasCamera: cams?.has(userId),
+    totalCameras: cams?.size ?? 0,
+  });
+
+  setViewerCameras((prev) => {
+    const next = new Map(prev);
+    if (next.has(userId)) {
+      const stream = next.get(userId);
+      if (stream) {
+        const tracks = stream.getTracks?.() || [];
+        console.log("🎬 Camera tracks to stop:", tracks.length);
+        tracks.forEach((t) => {
+          try { t.stop(); } catch {}
+        });
+      }
+      next.delete(userId);
+      addDebugLog(`📷 Camera cleanup for: ${userId}`);
+    }
+    return next;
+  });
+
+  // =========================================================
+  // 4) SCREEN SHARE COMPLETE CLEANUP (IMPORTANT)
+  // =========================================================
+  console.log("🖥️ SCREEN SHARE CHECK:", {
+    hasActiveScreenShare: !!activeSS,
+    leavingUserId: userId,
+    match: activeSS?.userId === userId,
+    activeUserId: activeSS?.userId,
+    activeUserName: activeSS?.userName,
+    activeSource: activeSS?.source,
+  });
+
+  if (activeSS?.userId === userId) {
+    console.log("✅ SCREEN SHARE USER MATCH - STARTING CLEANUP");
+    addDebugLog(`🖥️ FORCE SCREEN SHARE CLEANUP for: ${userId}`);
+
+    // 4.1 Stop tracks
+    if (activeSS?.stream) {
+      const vTracks = activeSS.stream.getVideoTracks?.() || [];
+      const aTracks = activeSS.stream.getAudioTracks?.() || [];
+
+      console.log("🎬 Screen share tracks:", { videoTracks: vTracks.length, audioTracks: aTracks.length });
+
+      vTracks.forEach((track) => {
+        if (track?.readyState === "live") {
+          try { track.stop(); } catch {}
+          addDebugLog(`🛑 Stopped screen video track: ${track.id}`);
+        }
+      });
+
+      aTracks.forEach((track) => {
+        if (track?.readyState === "live") {
+          try { track.stop(); } catch {}
+          addDebugLog(`🛑 Stopped screen audio track: ${track.id}`);
+        }
+      });
+    } else {
+      console.log("⚠️ No stream found in activeScreenShare");
+    }
+
+    // 4.2 Reset active screen share (state + ref safety)
+    setActiveScreenShare(null);
+    activeScreenShareRef.current = null; // ✅ immediate ref reset (avoid same tick stale)
+
+    // 4.3 Clear screen element
+    if (screenRef.current) {
+      try {
+        screenRef.current.srcObject = null;
+        screenRef.current.load?.();
+        addDebugLog("🖥️ Screen ref cleared");
+      } catch (e) {
+        console.warn("Screen ref clear error:", e);
+      }
+    }
+
+    // 4.4 Producers cleanup (screen + screen-audio)
+    let producerCount = 0;
+    producers.current.forEach((producer, id) => {
+      const pUserId = producer?.appData?.userId;
+      const src = producer?.appData?.source;
+
+      if (
+        pUserId === userId &&
+        (src === "screen" || src === "screen-audio")
+      ) {
+        try {
+          producer.close();
+          producers.current.delete(id);
+          producerCount++;
+          addDebugLog(`🛑 Closed screen producer: ${id}`);
+        } catch (err) {
+          console.warn("Error closing producer:", err);
+          addDebugLog(`⚠️ Error closing producer: ${err.message}`);
+        }
+      }
+    });
+    console.log(`🔧 Closed ${producerCount} producers`);
+
+    // 4.5 Consumers cleanup (screen)
+    let consumerCount = 0;
+    consumers.current.forEach((consumer, id) => {
+      const cUserId = consumer?.appData?.userId;
+      const src = consumer?.appData?.source;
+
+      if (cUserId === userId && src === "screen") {
+        try {
+          consumer.close();
+          consumers.current.delete(id);
+          consumerCount++;
+          addDebugLog(`🛑 Closed screen consumer: ${id}`);
+        } catch (err) {
+          console.warn("Error closing consumer:", err);
+          addDebugLog(`⚠️ Error closing consumer: ${err.message}`);
+        }
+      }
+    });
+    console.log(`🔧 Closed ${consumerCount} consumers`);
+
+    // 4.6 Zoom reset if zoomed screen belonged to leaving user
+    const latestZoomed = zoomedRef.current; // ✅ latest
+    if (latestZoomed?.type === "screen" && latestZoomed?.userId === userId) {
+      setZoomed(null);
+      zoomedRef.current = null; // ✅ immediate ref reset
+      addDebugLog("🔍 Zoom reset for screen share");
+    }
+
+    console.log("✅ SCREEN SHARE CLEANUP COMPLETED");
+  } else {
+    console.log("❌ SCREEN SHARE NOT CLEANED - REASONS:", {
+      noActiveScreenShare: !activeSS,
+      userIdMismatch: activeSS?.userId !== userId,
+      activeScreenShareUserId: activeSS?.userId,
+      leavingUserId: userId,
+    });
+  }
+
+  // =========================================================
+  // 5) MIC AUDIO CLEANUP
+  // =========================================================
+  console.log("🎧 Starting audio cleanup...");
+
+  const audioElements = document.querySelectorAll(
+    `#viewer-audio-${userId}, audio[data-user-id="${userId}"]`
+  );
+
+  console.log(`🎧 Found ${audioElements.length} audio elements to cleanup`);
+
+  audioElements.forEach((audioEl) => {
+    try {
+      audioEl.pause?.();
+      if (audioEl.srcObject) {
+        const tracks = audioEl.srcObject.getTracks?.() || [];
+        tracks.forEach((t) => {
+          try { t.stop(); } catch {}
+        });
+      }
+      audioEl.remove?.();
+    } catch (e) {
+      console.warn("Audio element cleanup error:", e);
+    }
+  });
+
+  // Refs cleanup
+  audioElementsRef.current.delete(userId);
+  viewerAudiosRef.current.delete(userId);
+  pendingAudioQueueRef.current.delete(userId);
+
+  // State cleanup
+  setViewerAudios((prev) => {
+    const next = new Map(prev);
+    next.delete(userId);
+    return next;
+  });
+
+  setPendingAudioStreams(new Map(pendingAudioQueueRef.current));
+
+  setActiveViewerAudio((prev) => {
+    const next = new Map(prev);
+    Array.from(next.entries()).forEach(([key, value]) => {
+      if (value?.userId === userId) next.delete(key);
+    });
+    return next;
+  });
+
+  // =========================================================
+  // 6) ZOOM RESET (general)
+  // =========================================================
+  const zNow = zoomedRef.current; // ✅ latest
+  if (zNow?.userId === userId) {
+    setZoomed(null);
+    zoomedRef.current = null;
+    addDebugLog("🔍 General zoom reset");
+  }
+
+  // =========================================================
+  // 7) PENDING REQUESTS
+  // =========================================================
+  setViewerAudioRequests((prev) => prev.filter((req) => req.requestedUserId !== userId));
+  setScreenShareRequests((prev) => prev.filter((req) => req.requestedUserId !== userId));
+  setViewerVideoRequests((prev) => prev.filter((req) => req.userId !== userId));
+
+  addDebugLog(`✅ All cleanup done for: ${userId}`);
+  console.log("✅✅✅ ALL CLEANUP COMPLETED FOR USER:", userId);
+
+  // Optional: final snapshot (refs based)
+  setTimeout(() => {
+    console.log("📊 FINAL (REF SNAPSHOT) AFTER CLEANUP:", {
+      activeScreenShare: activeScreenShareRef.current,
+      zoomed: zoomedRef.current,
+      participantsCount: participantsRef.current?.length ?? 0,
+      viewerCamerasSize: viewerCamerasRef.current?.size ?? 0,
+    });
+  }, 100);
+};
+
+
 const initializeCamera = async () => {
   try {
     addDebugLog('🔄 Initializing camera with smart audio optimization...');
@@ -3627,10 +3911,14 @@ newSocket.on('recording_stopped', (data) => {
 });
 
 newSocket.on("user_left", (data) => {
-  // keep your existing cleanup, but also ensure audio element removed
-  cleanupViewerAudio(data.userId);
-  cleanupViewerMedia(data.userId); // if you already had this
+  userLeftQueueRef.current = userLeftQueueRef.current
+    .then(() => handleUserLeftSequential(data))
+    .catch((err) => {
+      console.error("❌ user_left cleanup queue error:", err);
+      addDebugLog(`⚠️ user_left cleanup error: ${err?.message || err}`);
+    });
 });
+
 
 
 // Socket event handlers mein yeh add karen:
@@ -3759,23 +4047,8 @@ newSocket.on('all_hands_down', () => {
       setParticipants(prev => [...prev, data]);
     });
 
-    newSocket.on('user_left', (data) => {
-      addDebugLog(`User left: ${data.userId}`);
-      setParticipants(prev => prev.filter(p => p.socketId !== data.socketId));
-      
-      // Clean up viewer media
-      cleanupViewerMedia(data.userId);
-      
-      // Clean up remote videos
-      const videoToRemove = Array.from(remoteVideosRef.current.entries())
-        .find(([_, video]) => video.dataset?.socketId === data.socketId);
-      
-      if (videoToRemove) {
-        const [producerId, video] = videoToRemove;
-        video.remove();
-        remoteVideosRef.current.delete(producerId);
-      }
-    });
+   // SOCKET EVENT LISTENERS में ये अपडेटेड version add करें:
+
     // Socket event handlers mein ye add karen
 newSocket.on('chat_message', (message) => {
   addDebugLog(`Chat message from ${message.userId}`);
@@ -3885,84 +4158,84 @@ newSocket.on("viewer-camera-resumed-global", ({ userId }) => {
       });
     });
 
-newSocket.on("producer-closed", (data) => {
-  addDebugLog(
-    `❌ Producer closed: ${data.producerId}, source: ${data.source}, user: ${data.userId}`
-  );
+// newSocket.on("producer-closed", (data) => {
+//   addDebugLog(
+//     `❌ Producer closed: ${data.producerId}, source: ${data.source}, user: ${data.userId}`
+//   );
 
-  // 🖥️ Screen share cleanup (streamer OR viewer)
-  if (data.source === "screen" || data.source === "viewer-screen") {
-    // 🔴 Forcefully clear state
-    setActiveScreenShare(null);
+//   // 🖥️ Screen share cleanup (streamer OR viewer)
+//   if (data.source === "screen" || data.source === "viewer-screen") {
+//     // 🔴 Forcefully clear state
+//     setActiveScreenShare(null);
 
-    // 🔴 Stop only video tracks from screen share
-    try {
-      if (screenRef.current?.srcObject) {
-        const tracks = screenRef.current.srcObject.getTracks?.() || [];
-        tracks.forEach((t) => {
-          if (t.kind === 'video') {
-            t.stop(); // Only stop video tracks
-          }
-        });
-      }
-    } catch (e) {
-      console.warn("Error stopping screen share tracks on producer-closed", e);
-    }
+//     // 🔴 Stop only video tracks from screen share
+//     try {
+//       if (screenRef.current?.srcObject) {
+//         const tracks = screenRef.current.srcObject.getTracks?.() || [];
+//         tracks.forEach((t) => {
+//           if (t.kind === 'video') {
+//             t.stop(); // Only stop video tracks
+//           }
+//         });
+//       }
+//     } catch (e) {
+//       console.warn("Error stopping screen share tracks on producer-closed", e);
+//     }
 
-    // 🔴 Clear video ref
-    if (screenRef.current) {
-      try {
-        screenRef.current.srcObject = null;
-        screenRef.current.load?.();
-      } catch (e) {
-        console.warn("Error clearing screenRef on producer-closed", e);
-      }
-    }
+//     // 🔴 Clear video ref
+//     if (screenRef.current) {
+//       try {
+//         screenRef.current.srcObject = null;
+//         screenRef.current.load?.();
+//       } catch (e) {
+//         console.warn("Error clearing screenRef on producer-closed", e);
+//       }
+//     }
 
-    addDebugLog(
-      `✅ Producer closed → forced activeScreenShare reset for ${data.userId}`
-    );
-  }
+//     addDebugLog(
+//       `✅ Producer closed → forced activeScreenShare reset for ${data.userId}`
+//     );
+//   }
 
-  // 🎤 Audio cleanup - ONLY for audio sources
-  if (data.source === "viewer-mic" || data.source === "viewer-screen-audio") {
-    cleanupViewerAudio(data.userId);
-    addDebugLog(`🎤 Viewer audio stopped for user: ${data.userId}`);
-  }
+//   // 🎤 Audio cleanup - ONLY for audio sources
+//   if (data.source === "viewer-mic" || data.source === "viewer-screen-audio") {
+//     cleanupViewerAudio(data.userId);
+//     addDebugLog(`🎤 Viewer audio stopped for user: ${data.userId}`);
+//   }
 
-  // 📷 Camera cleanup - ONLY for camera video
-  if (data.source === "viewer-camera") {
-    setViewerCameras((prev) => {
-      const newMap = new Map(prev);
-      if (newMap.has(data.userId)) {
-        const stream = newMap.get(data.userId);
-        if (stream) {
-          try {
-            // ✅ ONLY stop VIDEO tracks, leave audio tracks alone
-            stream.getTracks().forEach((t) => {
-              if (t.kind === 'video') {
-                t.stop();
-                addDebugLog(`📹 Stopped video track for user ${data.userId}`);
-              }
-              // Audio tracks continue playing
-            });
-          } catch (e) {
-            console.warn("Error stopping camera tracks", e);
-          }
-        }
-        newMap.delete(data.userId);
-      }
-      return newMap;
-    });
-    addDebugLog(`📷 Viewer camera removed for user ${data.userId}`);
-  }
+//   // 📷 Camera cleanup - ONLY for camera video
+//   if (data.source === "viewer-camera") {
+//     setViewerCameras((prev) => {
+//       const newMap = new Map(prev);
+//       if (newMap.has(data.userId)) {
+//         const stream = newMap.get(data.userId);
+//         if (stream) {
+//           try {
+//             // ✅ ONLY stop VIDEO tracks, leave audio tracks alone
+//             stream.getTracks().forEach((t) => {
+//               if (t.kind === 'video') {
+//                 t.stop();
+//                 addDebugLog(`📹 Stopped video track for user ${data.userId}`);
+//               }
+//               // Audio tracks continue playing
+//             });
+//           } catch (e) {
+//             console.warn("Error stopping camera tracks", e);
+//           }
+//         }
+//         newMap.delete(data.userId);
+//       }
+//       return newMap;
+//     });
+//     addDebugLog(`📷 Viewer camera removed for user ${data.userId}`);
+//   }
 
-  // 🔊 Streamer audio cleanup - if needed
-  if (data.source === "mic" || data.source === "streamer-mic") {
-    addDebugLog(`🎤 Streamer audio producer closed: ${data.userId}`);
-    // Don't cleanup viewer audio here, this is streamer's audio
-  }
-});
+//   // 🔊 Streamer audio cleanup - if needed
+//   if (data.source === "mic" || data.source === "streamer-mic") {
+//     addDebugLog(`🎤 Streamer audio producer closed: ${data.userId}`);
+//     // Don't cleanup viewer audio here, this is streamer's audio
+//   }
+// });
 
 
     newSocket.on("new-producer", (data) => {
@@ -4348,6 +4621,10 @@ useEffect(() => {
         });
       }
     };
+
+
+
+    
 
     const handleLoadedData = () => {
       console.log('Video data loaded');
