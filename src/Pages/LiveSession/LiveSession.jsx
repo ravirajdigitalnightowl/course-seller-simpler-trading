@@ -5757,16 +5757,17 @@ return (
 
             {/* Participants View */}
 
-{sidebarView === 'participants' && (
+
+            {sidebarView === 'participants' && (
   <div className="flex-1 flex flex-col min-h-0">
     <div className="p-4 border-b border-gray-600">
       <div className="flex items-center justify-between">
         <h3 className="font-semibold text-lg flex items-center space-x-2">
           <FiUsers className="h-5 w-5 text-blue-400" />
-          <span>Participants ({participants.length})</span>
+          <span>Viewers ({participants.filter(p => p.userId !== user?.id).length})</span>
         </h3>
         <div className="flex items-center space-x-2">
-          {/* Lower All Hands Button - Only show when hands are raised */}
+          {/* Lower All Hands Button */}
           {handRaisedUsers.length > 0 && (
             <button
               onClick={lowerAllHands}
@@ -5777,70 +5778,37 @@ return (
               <span>Lower All ({handRaisedUsers.length})</span>
             </button>
           )}
-          
-          {/* Show streamer speaking status badge */}
-          {isSpeaking && (
-            <div className="flex items-center space-x-2 bg-green-900/30 px-3 py-1.5 rounded-lg">
-              <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-              <span className="text-xs text-green-400 font-medium">You're Speaking</span>
-            </div>
-          )}
-          
-          <button
-            onClick={() => setShowParticipantsModal(true)}
-            className="p-1.5 hover:bg-gray-700 rounded-lg transition-colors"
-            title="Manage Participants"
-          >
-            <FiUsers className="h-5 w-5 text-gray-400" />
-          </button>
         </div>
       </div>
       
-      {/* Quick Stats - Enhanced */}
-      <div className="mt-3 grid grid-cols-3 gap-2">
+      {/* Quick Stats */}
+      <div className="mt-3 grid grid-cols-2 gap-2">
         <div className="text-center p-2 bg-gray-700/50 rounded-lg">
-          <div className="text-lg font-bold text-white">{participants.length}</div>
-          <div className="text-xs text-gray-300">Total</div>
+          <div className="text-lg font-bold text-white">
+            {participants.filter(p => p.userId !== user?.id).length}
+          </div>
+          <div className="text-xs text-gray-300">Viewers</div>
         </div>
         <div className="text-center p-2 bg-yellow-900/30 rounded-lg">
-          <div className="text-lg font-bold text-yellow-300">{handRaisedUsers.length}</div>
+          <div className="text-lg font-bold text-yellow-300">
+            {handRaisedUsers.filter(u => u.userId !== user?.id).length}
+          </div>
           <div className="text-xs text-yellow-300">Hands Raised</div>
-        </div>
-        <div className="text-center p-2 bg-green-900/30 rounded-lg">
-          <div className="text-lg font-bold text-green-300">{speakingUsers.size}</div>
-          <div className="text-xs text-green-300">Speaking</div>
-        </div>
-      </div>
-      
-      {/* Speaking Detection Status */}
-      <div className="mt-3 flex items-center justify-between text-xs">
-        <div className="flex items-center space-x-2">
-          <div className={`w-2 h-2 rounded-full ${audioEnabled ? 'bg-green-500' : 'bg-red-500'}`}></div>
-          <span className="text-gray-300">
-            Your Mic: <span className={`font-medium ${audioEnabled ? 'text-green-400' : 'text-red-400'}`}>
-              {audioEnabled ? 'ON' : 'OFF'}
-            </span>
-          </span>
-        </div>
-        
-        <div className="text-gray-400">
-          Speaking Threshold: <span className="font-mono">{speakingThreshold} dB</span>
         </div>
       </div>
     </div>
     
-    {/* All Participants List - Viewers Only */}
+    {/* Viewers List */}
     <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-700">
-      {/* Viewers List */}
       {participants
-        .filter(p => p.userId !== user?.id) // Remove streamer from viewers list
-        .map((participant, index) => {
-          const isThisUserSpeaking = speakingUsers.has(participant.userId);
-          const hasHandRaised = handRaisedUsers.some(user => user.userId === participant.userId);
+        .filter(p => p.userId !== user?.id) // Streamer ko hata do
+        .map((viewer, index) => {
+          const isThisUserSpeaking = speakingUsers.has(viewer.userId);
+          const hasHandRaised = handRaisedUsers.some(u => u.userId === viewer.userId);
           
           return (
             <div
-              key={index}
+              key={viewer.socketId || viewer.userId}
               className={`flex items-center justify-between p-3 rounded-xl transition-all duration-200 ${
                 isThisUserSpeaking
                   ? 'bg-gradient-to-r from-green-900/20 to-emerald-900/10 border border-green-500/20'
@@ -5849,26 +5817,29 @@ return (
                   : 'bg-gray-700/40 hover:bg-gray-600/40'
               }`}
             >
-              {/* Left side: Participant info */}
+              {/* Left side: Viewer info */}
               <div className="flex items-center space-x-3 flex-1 min-w-0">
                 {/* Avatar */}
                 <div className="relative">
-                  <div className="w-9 h-9 rounded-full bg-gradient-to-br from-green-600 to-teal-600 flex items-center justify-center text-white font-medium">
-                    {participant.name?.charAt(0)?.toUpperCase() || 
-                     participant.userName?.charAt(0)?.toUpperCase() || 
-                     participant.userId?.charAt(0)?.toUpperCase() || 'U'}
+                  <div className="w-9 h-9 rounded-full bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-white font-medium">
+                    {viewer.name?.charAt(0)?.toUpperCase() || 
+                     viewer.userName?.charAt(0)?.toUpperCase() || 'V'}
                   </div>
                   
-                  {/* Multiple status indicators */}
+                  {/* Status indicators */}
                   <div className="absolute -bottom-1 -right-1 flex space-x-1">
-                    {/* Speaking indicator dot */}
+                    {/* Speaking indicator */}
                     {isThisUserSpeaking && (
-                      <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse border-2 border-gray-800"></div>
+                      <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse border-2 border-gray-800">
+                        <FiVolume2 className="w-full h-full p-0.5 text-white" />
+                      </div>
                     )}
                     
-                    {/* Hand raised indicator dot */}
+                    {/* Hand raised indicator */}
                     {hasHandRaised && !isThisUserSpeaking && (
-                      <div className="w-3 h-3 rounded-full bg-yellow-500 border-2 border-gray-800"></div>
+                      <div className="w-3 h-3 rounded-full bg-yellow-500 border-2 border-gray-800">
+                        <TfiHandOpen className="w-full h-full p-0.5 text-white" />
+                      </div>
                     )}
                   </div>
                 </div>
@@ -5877,46 +5848,54 @@ return (
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center space-x-2">
                     <span className="font-medium truncate text-sm">
-                      {participant.name || participant.userName || participant.userId || "User"}
+                      {viewer.name || viewer.userName || `Viewer ${index + 1}`}
                     </span>
                     
-                    {/* Participant number badge */}
+                    {/* View number badge */}
                     <div className="text-[10px] bg-gray-700 text-gray-300 px-1.5 py-0.5 rounded">
                       #{index + 1}
                     </div>
                   </div>
                   
-                  {/* Status indicators inline */}
-                  <div className="flex items-center flex-wrap gap-2 mt-1">
-                    {/* Speaking indicator */}
-                    {isThisUserSpeaking && (
-                      <div className="flex items-center space-x-1 bg-green-900/30 px-2 py-0.5 rounded">
-                        <FiVolume2 className="h-3 w-3 text-green-400 animate-pulse" />
-                        <span className="text-xs text-green-400 font-medium">SPEAKING</span>
+                  {/* Media icons row */}
+                  <div className="flex items-center space-x-3 mt-2">
+                    {/* Camera icon */}
+                    <div className="flex items-center space-x-1">
+                      <div className={`p-1 rounded ${viewer.hasVideo ? 'bg-purple-600/30' : 'bg-gray-700/50'}`}>
+                        {viewer.hasVideo ? (
+                          <FiVideo className="h-3 w-3 text-purple-400" />
+                        ) : (
+                          <FiVideoOff className="h-3 w-3 text-gray-400" />
+                        )}
                       </div>
-                    )}
+                      <span className="text-xs text-gray-400">
+                        {viewer.hasVideo ? 'Camera' : 'No Camera'}
+                      </span>
+                    </div>
                     
-                    {/* Hand raised indicator */}
-                    {hasHandRaised && !isThisUserSpeaking && (
-                      <div className="flex items-center space-x-1 bg-yellow-900/30 px-2 py-0.5 rounded">
-                        <TfiHandOpen className="h-3 w-3 text-yellow-400" />
-                        <span className="text-xs text-yellow-400 font-medium">HAND RAISED</span>
+                    {/* Mic icon */}
+                    <div className="flex items-center space-x-1">
+                      <div className={`p-1 rounded ${viewer.hasAudio ? 'bg-blue-600/30' : 'bg-gray-700/50'}`}>
+                        {isThisUserSpeaking ? (
+                          <FiVolume2 className="h-3 w-3 text-green-400 animate-pulse" />
+                        ) : viewer.hasAudio ? (
+                          <FiMic className="h-3 w-3 text-blue-400" />
+                        ) : (
+                          <FiMicOff className="h-3 w-3 text-gray-400" />
+                        )}
                       </div>
-                    )}
+                      <span className="text-xs text-gray-400">
+                        {isThisUserSpeaking ? 'Speaking' : viewer.hasAudio ? 'Mic On' : 'Mic Off'}
+                      </span>
+                    </div>
                     
-                    {/* Mic indicator */}
-                    {participant.hasAudio && !isThisUserSpeaking && (
+                    {/* Screen share icon */}
+                    {viewer.hasScreen && (
                       <div className="flex items-center space-x-1">
-                        <FiMic className="h-3 w-3 text-blue-400" />
-                        <span className="text-xs text-blue-400">Mic On</span>
-                      </div>
-                    )}
-                    
-                    {/* Camera indicator */}
-                    {participant.hasVideo && (
-                      <div className="flex items-center space-x-1">
-                        <FiVideo className="h-3 w-3 text-purple-400" />
-                        <span className="text-xs text-purple-400">Camera</span>
+                        <div className="p-1 rounded bg-green-600/30">
+                          <FiMonitor className="h-3 w-3 text-green-400" />
+                        </div>
+                        <span className="text-xs text-gray-400">Screen</span>
                       </div>
                     )}
                   </div>
@@ -5925,11 +5904,11 @@ return (
               
               {/* Right side: Action buttons */}
               <div className="flex items-center space-x-1">
-                {/* Lower Hand button (only for viewers with raised hands) */}
+                {/* Lower Hand button */}
                 {hasHandRaised && (
                   <button
-                    onClick={() => lowerHandForUser(participant.userId)}
-                    className="p-1.5 bg-yellow-700/50 hover:bg-yellow-600/50 rounded-lg transition-colors"
+                    onClick={() => lowerHandForUser(viewer.userId)}
+                    className="p-2 bg-yellow-700/50 hover:bg-yellow-600/50 rounded-lg transition-colors"
                     title="Lower Hand"
                   >
                     <TfiHandOpen className="h-4 w-4 text-yellow-300" />
@@ -5937,51 +5916,58 @@ return (
                 )}
                 
                 {/* Stop Camera button */}
-                {participant.hasVideo && (
+                {viewer.hasVideo && (
                   <button
                     onClick={() => {
                       emitSocketEvent("streamer-stop-viewer-video", {
                         sessionId: sessionId || roomCode,
-                        targetSocketId: participant.socketId,
+                        targetSocketId: viewer.socketId,
                       });
-                      addDebugLog(`🛑 Force stopped camera for: ${participant.userId}`);
-                      toast.info(`Stopped ${participant.name}'s camera`, {
-                        position: "bottom-right",
-                        autoClose: 2000,
-                      });
+                      addDebugLog(`🛑 Stopped camera for viewer: ${viewer.name || viewer.userId}`);
+                      toast.info(`Stopped ${viewer.name || 'Viewer'}'s camera`);
                     }}
-                    className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+                    className="p-2 bg-purple-600/50 hover:bg-purple-500/50 rounded-lg transition-colors"
                     title="Stop Camera"
                   >
-                    <FiVideoOff className="h-4 w-4 text-gray-300" />
+                    <FiVideoOff className="h-4 w-4 text-purple-300" />
                   </button>
                 )}
                 
                 {/* Mute button */}
-                {participant.hasAudio && (
+                {viewer.hasAudio && (
                   <button
                     onClick={() => {
                       emitSocketEvent("streamer-stop-viewer-audio", {
                         sessionId: sessionId || roomCode,
-                        targetSocketId: participant.socketId,
+                        targetSocketId: viewer.socketId,
                       });
-                      addDebugLog(`🔇 Muted viewer: ${participant.userId}`);
-                      toast.info(`Muted ${participant.name}`, {
-                        position: "bottom-right",
-                        autoClose: 2000,
-                      });
+                      addDebugLog(`🔇 Muted viewer: ${viewer.name || viewer.userId}`);
+                      toast.info(`Muted ${viewer.name || 'Viewer'}`);
                     }}
-                    className="p-1.5 bg-red-700/50 hover:bg-red-600/50 rounded-lg transition-colors"
+                    className="p-2 bg-blue-600/50 hover:bg-blue-500/50 rounded-lg transition-colors"
                     title="Mute User"
                   >
-                    <FiMicOff className="h-4 w-4 text-red-300" />
+                    <FiMicOff className="h-4 w-4 text-blue-300" />
+                  </button>
+                )}
+                
+                {/* Stop Screen Share button */}
+                {viewer.hasScreen && (
+                  <button
+                    onClick={() => {
+                      handleStopViewerScreenShare(viewer.userId);
+                      toast.info(`Stopped ${viewer.name || 'Viewer'}'s screen share`);
+                    }}
+                    className="p-2 bg-green-600/50 hover:bg-green-500/50 rounded-lg transition-colors"
+                    title="Stop Screen Share"
+                  >
+                    <FiMonitor className="h-4 w-4 text-green-300" />
                   </button>
                 )}
               </div>
             </div>
           );
-        })
-      }
+        })}
       
       {/* Empty State */}
       {participants.filter(p => p.userId !== user?.id).length === 0 && (
@@ -5989,12 +5975,14 @@ return (
           <FiUsers className="h-16 w-16 mb-4 opacity-30" />
           <p className="text-lg font-medium mb-2">No viewers yet</p>
           <p className="text-sm text-center max-w-sm">
-            Share the room code with viewers to invite them to join the session
+            Share the room code with viewers to invite them
           </p>
           {session?.roomCode && (
             <div className="mt-4 p-3 bg-gray-800/50 rounded-lg">
               <p className="text-sm text-gray-300 mb-1">Room Code:</p>
-              <p className="text-lg font-mono font-bold text-blue-400">{session.roomCode}</p>
+              <p className="text-lg font-mono font-bold text-blue-400">
+                {session.roomCode}
+              </p>
             </div>
           )}
         </div>
@@ -6005,23 +5993,27 @@ return (
     <div className="p-3 border-t border-gray-700 bg-gray-800/50">
       <div className="flex flex-wrap items-center gap-3 text-xs text-gray-400">
         <div className="flex items-center space-x-1">
-          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+          <FiVolume2 className="h-3 w-3 text-green-400 animate-pulse" />
           <span>Speaking</span>
         </div>
         <div className="flex items-center space-x-1">
-          <div className="w-2 h-2 rounded-full bg-yellow-500"></div>
+          <TfiHandOpen className="h-3 w-3 text-yellow-400" />
           <span>Hand Raised</span>
         </div>
         <div className="flex items-center space-x-1">
-          <FiMic className="h-3 w-3 text-blue-400" />
-          <span>Mic On</span>
+          <FiVideo className="h-3 w-3 text-purple-400" />
+          <span>Camera</span>
         </div>
         <div className="flex items-center space-x-1">
-          <FiVideo className="h-3 w-3 text-purple-400" />
-          <span>Camera On</span>
+          <FiMic className="h-3 w-3 text-blue-400" />
+          <span>Mic</span>
+        </div>
+        <div className="flex items-center space-x-1">
+          <FiMonitor className="h-3 w-3 text-green-400" />
+          <span>Screen Share</span>
         </div>
         <div className="ml-auto text-xs text-gray-500">
-          {speakingUsers.size} speaking • {handRaisedUsers.length} hands raised
+          {handRaisedUsers.filter(u => u.userId !== user?.id).length} hands raised
         </div>
       </div>
     </div>
