@@ -3272,6 +3272,85 @@ const initializeMedia = async (currentSessionId, initialIceServers = []) => {
   };
   // ========== CAMERA AND PERMISSION FUNCTIONS ==========
 
+  // सिर्फ स्क्रीन शेयर audio के लिए
+const cleanupScreenShareAudio = (userId) => {
+  addDebugLog(`🧹 Cleaning up screen share audio for user: ${userId}`);
+  
+  // सिर्फ screen-audio elements हटाएं
+  const screenAudioElements = document.querySelectorAll(
+    `[data-screen-audio-user="${userId}"], #viewer-screen-share-audio-${userId}`
+  );
+  
+  screenAudioElements.forEach(screenAudioEl => {
+    try {
+      screenAudioEl.pause();
+      if (screenAudioEl.srcObject) {
+        screenAudioEl.srcObject.getTracks().forEach(track => track.stop());
+        screenAudioEl.srcObject = null;
+      }
+      if (screenAudioEl.parentNode) {
+        screenAudioEl.parentNode.removeChild(screenAudioEl);
+      }
+      addDebugLog(`🗑️ Cleaned up screen share audio element for user: ${userId}`);
+    } catch (e) {
+      addDebugLog(`⚠️ Error cleaning screen share audio: ${e.message}`);
+    }
+  });
+  
+  // pending audio queue से भी हटाएं
+  if (pendingAudioQueueRef.current.has(userId)) {
+    const pending = pendingAudioQueueRef.current.get(userId);
+    if (pending.sourceType === "viewer-screen-audio") {
+      pendingAudioQueueRef.current.delete(userId);
+      
+      setPendingAudioStreams(prev => {
+        const newMap = new Map(prev);
+        newMap.delete(userId);
+        return newMap;
+      });
+    }
+  }
+};
+
+// सिर्फ microphone audio के लिए
+const cleanupOnlyMicrophoneAudio = (userId) => {
+  addDebugLog(`🎤 Cleaning up only microphone audio for user: ${userId}`);
+  
+  // viewerAudios में से सिर्फ viewer-mic वाला stream हटाएं
+  setViewerAudios(prev => {
+    const newMap = new Map(prev);
+    if (newMap.has(userId)) {
+      const stream = newMap.get(userId);
+      // सिर्फ उन्हीं tracks को stop करें जो viewer-mic के हैं
+      if (stream) {
+        stream.getTracks().forEach(track => {
+          // यहाँ आपको track के metadata से पता लगाना होगा कि यह viewer-mic है या viewer-screen-audio
+          // या फिर आप separate maps रख सकते हैं
+        });
+      }
+      newMap.delete(userId);
+    }
+    return newMap;
+  });
+  
+  // Audio elements को सही तरीके से manage करें
+  const micAudioElements = document.querySelectorAll(
+    `[data-audio-source="viewer-mic"][data-user-id="${userId}"], #viewer-mic-audio-${userId}`
+  );
+  
+  micAudioElements.forEach(audioEl => {
+    try {
+      audioEl.pause();
+      if (audioEl.srcObject) {
+        audioEl.srcObject.getTracks().forEach(track => track.stop());
+        audioEl.srcObject = null;
+      }
+    } catch (e) {
+      console.warn("Error cleaning microphone audio element", e);
+    }
+  });
+};
+
 const initializeCamera = async () => {
   try {
     addDebugLog('🔄 Initializing camera with smart audio optimization...');
@@ -3924,10 +4003,16 @@ newSocket.on("producer-closed", (data) => {
     );
   }
 
-  // 🎤 Audio cleanup - ONLY for audio sources
-  if (data.source === "viewer-mic" || data.source === "viewer-screen-audio") {
-    cleanupViewerAudio(data.userId);
-    addDebugLog(`🎤 Viewer audio stopped for user: ${data.userId}`);
+if (data.source === "viewer-screen-audio") {
+    // यह सिर्फ स्क्रीन शेयर का audio है
+    cleanupScreenShareAudio(data.userId);
+    addDebugLog(`🎤 Screen share audio stopped for user: ${data.userId}`);
+  } 
+  else if (data.source === "viewer-mic") {
+    // यह viewer का मूल microphone audio है
+    // इसे cleanupViewerAudio से अलग handle करें
+    cleanupOnlyMicrophoneAudio(data.userId);
+    addDebugLog(`🎤 Viewer microphone stopped for user: ${data.userId}`);
   }
 
   // 📷 Camera cleanup - ONLY for camera video
