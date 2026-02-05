@@ -5731,7 +5731,7 @@ return (
                 }`}
               >
                 <FiUsers className="h-5 w-5" />
-                <span className="text-sm font-medium">Participants</span>
+                <span className="text-sm font-medium">Participants ({participants.filter(p => p.userId !== user?.id).length})</span>
               </button>
               <button
                 onClick={() => setSidebarView('chat')}
@@ -5781,25 +5781,12 @@ return (
         </div>
       </div>
       
-      {/* Quick Stats */}
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        <div className="text-center p-2 bg-gray-700/50 rounded-lg">
-          <div className="text-lg font-bold text-white">
-            {participants.filter(p => p.userId !== user?.id).length}
-          </div>
-          <div className="text-xs text-gray-300">Viewers</div>
-        </div>
-        <div className="text-center p-2 bg-yellow-900/30 rounded-lg">
-          <div className="text-lg font-bold text-yellow-300">
-            {handRaisedUsers.filter(u => u.userId !== user?.id).length}
-          </div>
-          <div className="text-xs text-yellow-300">Hands Raised</div>
-        </div>
-      </div>
+     
     </div>
     
     {/* Viewers List */}
     <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-700">
+       
       {participants
         .filter(p => p.userId !== user?.id) // Streamer ko hata do
         .map((viewer, index) => {
