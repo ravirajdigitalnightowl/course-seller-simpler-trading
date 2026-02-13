@@ -10,25 +10,25 @@ jobs:
     runs-on: ubuntu-latest
  
     steps:
-      - uses: actions/checkout@v4
- 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 18
- 
-      - run: npm install
- 
-      - name: Build Trainer Panel
-        env:
-          VITE_API_URL: ${{ secrets.VITE_API_URL }}
-          VITE_SOCKET_URL: ${{ secrets.VITE_SOCKET_URL }}
-        run: npm run build
- 
       - name: Deploy to VPS
-        uses: appleboy/scp-action@v0.1.7
+        uses: appleboy/ssh-action@v0.1.10
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          source: "dist"
-          target: "/var/www/trainer.learnntrade"
+          script: |
+            cd /var/www/trainer-source
+ 
+            git fetch origin
+            git reset --hard origin/latest
+ 
+            npm install
+            npm run build
+ 
+            rm -rf /var/www/trainer.learnntrade.com/*
+            cp -r dist/* /var/www/trainer.learnntrade.com/
+ 
+            chown -R www-data:www-data /var/www/trainer.learnntrade.com
+            chmod -R 755 /var/www/trainer.learnntrade.com
+ 
+            echo "🚀 Deployment completed"

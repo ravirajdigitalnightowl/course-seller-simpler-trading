@@ -5075,847 +5075,896 @@ return (
       )}
 
       {/* When sidebar is collapsed */}
-      {sidebarCollapsed ? (
-        <div className="flex h-full">
-          {/* Main Video Area */}
-          <div className="flex-1 flex flex-col min-h-0">
-            <div 
-              className="relative flex-1 bg-black overflow-hidden cursor-pointer"
-               onClick={(e) => {                    // 👈 e parameter add karo
-    // 🛑 AGAR WHITEBOARD ZOOMED HAI TO FULLSCREEN MAT KARO
-    if (zoomed?.type === "whiteboard") {
-      e.stopPropagation();
-      return;
-    }
-    
-    // Warna normal full-screen logic
-    if (zoomed) {
-      const element = document.querySelector('.main-video-container');
-      if (element) {
-        if (!document.fullscreenElement) {
-          element.requestFullscreen().catch(err => {
-            console.log('Full screen error:', err);
-          });
-        } else {
-          document.exitFullscreen();
-        }
-      }
-    }
-  }}
-            >
-              {/* Zoomed Video View */}
-              {/* Zoomed Video View */}
-{/* Zoomed Video View */}
-{zoomed ? (
-  <div className="relative w-full h-full main-video-container">
-    {/* 🎨 CASE 1: WHITEBOARD - Video player ki jagah whiteboard */}
-    {zoomed.type === "whiteboard" ? (
-      /* Whiteboard Component - Exactly video ki jagah */
-      showWhiteboard && whiteboardSessionInfo ? (
-        // LiveSession.js - Whiteboard component call karte waqt
-<StreamerWhiteboard
- key={`whiteboard-${whiteboardSessionInfo.sessionId}-${Date.now()}`} // ✅ Dynamic key
-      sessionId={whiteboardSessionInfo.sessionId}
-      roomCode={whiteboardSessionInfo.roomCode}
-      wsToken={whiteboardSessionInfo.wsToken}
-      sessionInfo={whiteboardSessionInfo}
-      isActive={showWhiteboard} // ✅ isActive = showWhiteboard
-      onClose={handleCloseWhiteboard}
-      isStreamer={true}
-      allowViewersToDraw={true}
-      mainScreenMode={true}
-      compact={true}
-    />
 
-      ) : (
-        /* Fallback - agar whiteboard load nahi hua */
-        <div className="absolute inset-0 flex items-center justify-center bg-gray-900">
-          <div className="text-white text-center">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-3"></div>
-            <p className="text-sm">Loading whiteboard...</p>
-          </div>
-        </div>
-      )
-    ) : (
-      /* 🎥 CASE 2: REGULAR VIDEO - Camera ya Screen Share */
-      <>
-        <video
-          ref={
-            zoomed.type === "screen" 
-              ? screenRef           // Screen share ke liye alag ref
-              : zoomed.type === "streamer" 
-                ? videoRef          // Streamer ke camera ke liye
-                : zoomedVideoRef    // Viewers ke camera ke liye
+     {/* When sidebar is collapsed */}
+{sidebarCollapsed ? (
+  <div className="flex h-full">
+    {/* Main Video Area */}
+    <div className="flex-1 flex flex-col min-h-0">
+      <div 
+        className="relative flex-1 bg-black overflow-hidden cursor-pointer"
+        onClick={(e) => {
+          // 🛑 AGAR WHITEBOARD ZOOMED HAI TO FULLSCREEN MAT KARO
+          if (zoomed?.type === "whiteboard") {
+            e.stopPropagation();
+            return;
           }
-          autoPlay
-          playsInline
-          muted={zoomed.type !== "viewer"} // Viewers ka audio chahiye
-          className="absolute inset-0 w-full h-full object-contain bg-black"
-          srcObject={zoomed.stream}
-          onError={(e) => {
-            console.error('Zoomed video error:', e);
-            // Don't reset zoomed immediately on minor errors
-          }}
-        />
-        
-        {/* Video Label - Batata hai kiska video hai */}
-        <div className="absolute top-4 left-4 bg-black/70 text-white px-3 py-1 rounded-lg text-sm z-20 flex items-center space-x-2">
-          {zoomed.type === "streamer" && (
-            <>
-              <FiVideo className="h-4 w-4 text-blue-400" />
-              <span>Your Camera</span>
-            </>
-          )}
-          {zoomed.type === "viewer" && (
-            <>
-              <FiVideo className="h-4 w-4 text-green-400" />
-              <span>
-                {participants.find(p => p.userId === zoomed.userId)?.name || 'Viewer'}'s Camera
-              </span>
-            </>
-          )}
-          {zoomed.type === "screen" && (
-            <>
-              <FiMonitor className="h-4 w-4 text-purple-400" />
-              <span>
-                {activeScreenShare?.userName || 'Streamer'}'s Screen
-              </span>
-            </>
-          )}
-        </div>
-      </>
-    )}
-    
-    {/* 🔴 Close Button - Sirf Whiteboard ke liye */}
-    {zoomed.type === "whiteboard" && (
-      <button
-        onClick={handleCloseWhiteboard}
-        className="absolute top-4 right-4 bg-red-600 hover:bg-red-700 text-white p-2 rounded-lg shadow-lg transition-colors z-30 flex items-center space-x-1"
-        title="Close Whiteboard"
+          
+          // Warna normal full-screen logic
+          if (zoomed) {
+            const element = document.querySelector('.main-video-container');
+            if (element) {
+              if (!document.fullscreenElement) {
+                element.requestFullscreen().catch(err => {
+                  console.log('Full screen error:', err);
+                });
+              } else {
+                document.exitFullscreen();
+              }
+            }
+          }
+        }}
       >
-        <FiX className="h-4 w-4" />
-        <span className="text-sm">Close Whiteboard</span>
-      </button>
-    )}
-    
- 
-  </div>
-) : (
-  /* 🎬 DEFAULT VIEW - Streamer's Camera (Jab koi zoom nahi hai) */
-  <div className="relative w-full h-full">
-    <video
-      ref={videoRef}
-      autoPlay
-      playsInline
-      muted={true}
-      className="absolute inset-0 w-full h-full object-contain bg-black"
-      srcObject={mediaStream}
-      onError={(e) => {
-        console.error('Main video error:', e);
-        setMediaError(true);
-      }}
-    />
-    
-    {/* Live Badge */}
-    <div className="absolute top-4 left-4 flex items-center space-x-2 bg-black/70 text-white px-3 py-1.5 rounded-lg">
-      <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
-      <span className="text-sm font-medium">LIVE</span>
-      {session?.roomCode && (
-        <>
-          <span className="text-gray-400 mx-1">•</span>
-          <span className="text-sm">{session.roomCode}</span>
-        </>
-      )}
-    </div>
-    
-    {/* Camera Off Placeholder - Agar video band hai */}
-    {!videoEnabled && (
-      <div className="absolute inset-0 flex items-center justify-center bg-gray-900">
-        <div className="text-center">
-          <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center mx-auto mb-3">
-            <FiVideoOff className="h-8 w-8 text-gray-400" />
+        {/* Zoomed Video View */}
+        {zoomed ? (
+          <div className="relative w-full h-full main-video-container">
+            {/* 🎨 CASE 1: WHITEBOARD - Video player ki jagah whiteboard */}
+            {zoomed.type === "whiteboard" ? (
+              /* Whiteboard Component - Exactly video ki jagah */
+              showWhiteboard && whiteboardSessionInfo ? (
+                <StreamerWhiteboard
+                  key={`whiteboard-${whiteboardSessionInfo.sessionId}-${Date.now()}`}
+                  sessionId={whiteboardSessionInfo.sessionId}
+                  roomCode={whiteboardSessionInfo.roomCode}
+                  wsToken={whiteboardSessionInfo.wsToken}
+                  sessionInfo={whiteboardSessionInfo}
+                  isActive={showWhiteboard}
+                  onClose={handleCloseWhiteboard}
+                  isStreamer={true}
+                  allowViewersToDraw={true}
+                  mainScreenMode={true}
+                  compact={true}
+                />
+              ) : (
+                /* Fallback - agar whiteboard load nahi hua */
+                <div className="absolute inset-0 flex items-center justify-center bg-gray-900">
+                  <div className="text-white text-center">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-3"></div>
+                    <p className="text-sm">Loading whiteboard...</p>
+                  </div>
+                </div>
+              )
+            ) : (
+              /* 🎥 CASE 2: REGULAR VIDEO - Camera ya Screen Share */
+              <>
+                <video
+                  ref={
+                    zoomed.type === "screen" 
+                      ? screenRef           // Screen share ke liye alag ref
+                      : zoomed.type === "streamer" 
+                        ? videoRef          // Streamer ke camera ke liye
+                        : zoomedVideoRef    // Viewers ke camera ke liye
+                  }
+                  autoPlay
+                  playsInline
+                  muted={zoomed.type !== "viewer"} // Viewers ka audio chahiye
+                  className="absolute inset-0 w-full h-full object-contain bg-black"
+                  srcObject={zoomed.stream}
+                  onError={(e) => {
+                    console.error('Zoomed video error:', e);
+                  }}
+                />
+                
+                {/* Video Label - Batata hai kiska video hai */}
+                <div className="absolute top-4 left-4 bg-black/70 text-white px-3 py-1 rounded-lg text-sm z-20 flex items-center space-x-2">
+                  {zoomed.type === "streamer" && (
+                    <>
+                      <FiVideo className="h-4 w-4 text-blue-400" />
+                      <span>Your Camera</span>
+                    </>
+                  )}
+                  {zoomed.type === "viewer" && (
+                    <>
+                      <FiVideo className="h-4 w-4 text-green-400" />
+                      <span>
+                        {participants.find(p => p.userId === zoomed.userId)?.name || 'Viewer'}'s Camera
+                      </span>
+                    </>
+                  )}
+                  {zoomed.type === "screen" && (
+                    <>
+                      <FiMonitor className="h-4 w-4 text-purple-400" />
+                      <span>
+                        {activeScreenShare?.userName || 'Streamer'}'s Screen
+                      </span>
+                    </>
+                  )}
+                </div>
+              </>
+            )}
+            
+            {/* 🔴 Close Button - Sirf Whiteboard ke liye */}
+           
           </div>
-          <p className="text-white text-sm">Camera is off</p>
-        </div>
-      </div>
-    )}
-  </div>
-)}
-
-              {/* Status Overlay */}
-              <div className="absolute top-4 left-4 flex items-center space-x-4 z-10">
-                <div className="flex items-center space-x-2 bg-black/70 text-sm text-white px-4 py-2 rounded-xl backdrop-blur-sm">
-                  <div className={`w-3 h-3 rounded-full ${isPlaying ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`}></div>
-                  <span className="font-medium">{isPlaying ? 'Live' : 'Paused'}</span>
-                </div>
-              </div>
-
-              {/* Loading States */}
-              {isLoading && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black/80 backdrop-blur-sm z-30">
-                  <div className="text-center">
-                    <FiLoader className="h-12 w-12 text-blue-400 animate-spin mx-auto mb-4" />
-                    <p className="text-white font-medium text-lg">Loading camera...</p>
-                  </div>
-                </div>
-              )}
-
-              {isInitializing && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black/80 backdrop-blur-sm z-30">
-                  <div className="text-center">
-                    <FiLoader className="h-12 w-12 text-blue-400 animate-spin mx-auto mb-4" />
-                    <p className="text-white font-medium text-lg">Initializing stream...</p>
-                  </div>
-                </div>
-              )}
-
-              {/* Play Button */}
-              {showPlayButton && !mediaError && !zoomed && (
-                <div 
-                  className="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm cursor-pointer z-30"
-                  onClick={handlePlayClick}
-                >
-                  <div className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white p-6 rounded-full transition-all duration-300 transform hover:scale-110 shadow-2xl">
-                    <FiPlay className="h-16 w-16" />
-                  </div>
-                </div>
-              )}
-
-              {/* Media Error State */}
-              {mediaError && !zoomed && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-900/90 backdrop-blur-sm z-30">
-                  <div className="text-center p-8 bg-gray-800/80 rounded-2xl max-w-md backdrop-blur-sm">
-                    <FiAlertCircle className="h-16 w-16 text-red-400 mx-auto mb-4" />
-                    <p className="text-xl mb-2 font-semibold text-white">Camera not available</p>
-                    <button 
-                      onClick={retryCamera}
-                      className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-lg transition-all duration-200"
-                    >
-                      Retry Camera
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Expand Sidebar Button */}
-              <div className="absolute right-4 top-4 z-20">
-                <button
-                  onClick={() => setSidebarCollapsed(false)}
-                  className="bg-gray-800/80 hover:bg-gray-700/80 p-3 rounded-lg shadow-lg transition-all duration-200"
-                  title="Show Sidebar"
-                >
-                  <FiChevronLeft className="h-5 w-5 text-blue-400" />
-                </button>
-              </div>
-            </div>
-          </div>
-          
-          {/* Thumbnails Column - Always visible */}
-          <div className="w-48 xl:w-56 flex flex-col bg-gray-800/80 border-l border-gray-600 z-30 h-full">
-            {/* Thumbnails header with expand button */}
-            <div className="p-4 border-b border-gray-600 flex items-center justify-between">
-              <h3 className="font-semibold flex items-center space-x-2 text-sm">
-                <FiVideo className="h-4 w-4 text-blue-400" />
-                <span>Cameras ({thumbnailsCount})</span>
-              </h3>
-              {thumbnailsCount > 0 && (
-                <button
-                  onClick={() => setThumbnailsExpanded(true)}
-                  className="p-1 hover:bg-gray-700 rounded transition-colors"
-                  title="View All Cameras"
-                >
-                  <FiMaximize className="h-4 w-4 text-gray-300" />
-                </button>
+        ) : (
+          /* 🎬 DEFAULT VIEW - Streamer's Camera (Jab koi zoom nahi hai) */
+          <div className="relative w-full h-full">
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted={true}
+              className="absolute inset-0 w-full h-full object-contain bg-black"
+              srcObject={mediaStream}
+              onError={(e) => {
+                console.error('Main video error:', e);
+                setMediaError(true);
+              }}
+            />
+            
+            {/* Live Badge */}
+            <div className="absolute top-4 left-4 flex items-center space-x-2 bg-black/70 text-white px-3 py-1.5 rounded-lg">
+              <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+              <span className="text-sm font-medium">LIVE</span>
+              {session?.roomCode && (
+                <>
+                  <span className="text-gray-400 mx-1">•</span>
+                  <span className="text-sm">{session.roomCode}</span>
+                </>
               )}
             </div>
             
-            {/* Thumbnails container */}
-            <div className="flex-1 overflow-y-auto p-3 space-y-3 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-700">
-              {/* Streamer thumbnail */}
-              {mediaStream && (
-                <ThumbnailVideo
-                  uid="streamer"
-                  stream={mediaStream}
-                  userName="You"
-                  onClick={() => {
-                    setZoomed({ type: "streamer", stream: mediaStream, userId: user?.id });
-                    setShowPlayButton(false);
-                  }}
-                  isZoomed={zoomed?.type === "streamer"}
-                  videoEnabled={videoEnabled}
-                />
-              )}
-              
-              {/* Viewer cameras */}
-              {[...viewerCameras.entries()].map(([uid, stream]) => (
-                <ThumbnailVideo
-                  key={uid}
-                  uid={uid}
-                  stream={stream}
-                  userName={participants.find(p => p.userId === uid)?.name || `User ${uid}`}
-                  onClick={() => {
-                    setZoomed({ type: "viewer", stream, userId: uid });
-                    setShowPlayButton(false);
-                  }}
-                  isZoomed={zoomed?.type === "viewer" && zoomed.userId === uid}
-                  videoEnabled={true}
-                />
-              ))}
-              
-              {/* Screen share thumbnails */}
-              {activeScreenShare && (
-                <ThumbnailVideo
-                  uid={activeScreenShare.userId}
-                  stream={activeScreenShare.stream}
-                  userName={`${activeScreenShare.userName}'s Screen`}
-                  onClick={() => {
-                    setZoomed({ type: "screen", stream: activeScreenShare.stream, userId: activeScreenShare.userId });
-                    setShowPlayButton(false);
-                  }}
-                  isZoomed={zoomed?.type === "screen"}
-                  videoEnabled={true}
-                  isScreenShare={true}
-                />
-              )}
-              
-              {/* Empty state */}
-              {thumbnailsCount === 0 && (
-                <div className="flex-1 flex items-center justify-center text-gray-500 text-sm text-center p-4">
-                  <div>
-                    <FiVideoOff className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                    <p>No active cameras</p>
+            {/* Camera Off Placeholder - Agar video band hai */}
+            {!videoEnabled && (
+              <div className="absolute inset-0 flex items-center justify-center bg-gray-900">
+                <div className="text-center">
+                  <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center mx-auto mb-3">
+                    <FiVideoOff className="h-8 w-8 text-gray-400" />
                   </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      ) : (
-        /* Original Layout when sidebar is expanded */
-        <div className="flex h-full">
-          {/* Main Video Area */}
-          <div className="flex-1 flex flex-col min-h-0">
-            <div 
-              className="relative flex-1 bg-black overflow-hidden cursor-pointer"
-               onClick={(e) => {                    // 👈 e parameter add karo
-    // 🛑 AGAR WHITEBOARD ZOOMED HAI TO FULLSCREEN MAT KARO
-    if (zoomed?.type === "whiteboard") {
-      e.stopPropagation();
-      return;
-    }
-    
-    // Warna normal full-screen logic
-    if (zoomed) {
-      const element = document.querySelector('.main-video-container');
-      if (element) {
-        if (!document.fullscreenElement) {
-          element.requestFullscreen().catch(err => {
-            console.log('Full screen error:', err);
-          });
-        } else {
-          document.exitFullscreen();
-        }
-      }
-    }
-  }}
-            >
-         {/* Zoomed Video View */}
-{zoomed ? (
-  <div className="relative w-full h-full main-video-container">
-    <video
-      ref={zoomedVideoRef} // ✅ Use the persistent ref here
-      autoPlay
-      playsInline
-      muted={zoomed.type !== "viewer"} // Viewers should have sound
-      className="absolute inset-0 w-full h-full object-contain bg-black"
-      onError={(e) => {
-        console.error('Zoomed video error:', e);
-        // Don't reset zoomed immediately on minor errors to prevent UI jumps
-      }}
-    />
-    
-    <div className="absolute top-4 left-4 bg-black/70 text-white px-3 py-1 rounded-lg text-sm z-20">
-      {zoomed.type === "streamer" ? "Your Camera" : 
-       zoomed.type === "viewer" ? `${participants.find(p => p.userId === zoomed.userId)?.name || 'User'}'s Camera` : 
-       `${activeScreenShare?.userName}'s Screen`}
-    </div>
-  </div>
-) : (
-  // Default view - Streamer's camera
-  <video
-    ref={videoRef}
-    autoPlay
-    playsInline
-    muted={true}
-    className="absolute inset-0 w-full h-full object-contain bg-black"
-    onError={(e) => {
-      console.error('Main video error:', e);
-      setMediaError(true);
-    }}
-  />
-)}
-
-              {/* Status Overlay */}
-              <div className="absolute top-4 left-4 flex items-center space-x-4 z-10">
-                <div className="flex items-center space-x-2 bg-black/70 text-sm text-white px-4 py-2 rounded-xl backdrop-blur-sm">
-                  <div className={`w-3 h-3 rounded-full ${isPlaying ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`}></div>
-                  <span className="font-medium">{isPlaying ? 'Live' : 'Paused'}</span>
+                  <p className="text-white text-sm">Camera is off</p>
                 </div>
               </div>
+            )}
+          </div>
+        )}
 
-              {/* Loading States */}
-              {isLoading && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black/80 backdrop-blur-sm z-30">
-                  <div className="text-center">
-                    <FiLoader className="h-12 w-12 text-blue-400 animate-spin mx-auto mb-4" />
-                    <p className="text-white font-medium text-lg">Loading camera...</p>
-                  </div>
-                </div>
-              )}
+        {/* Status Overlay */}
+        <div className="absolute top-4 left-4 flex items-center space-x-4 z-10">
+          <div className="flex items-center space-x-2 bg-black/70 text-sm text-white px-4 py-2 rounded-xl backdrop-blur-sm">
+            <div className={`w-3 h-3 rounded-full ${isPlaying ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`}></div>
+            <span className="font-medium">{isPlaying ? 'Live' : 'Paused'}</span>
+          </div>
+        </div>
 
-              {isInitializing && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black/80 backdrop-blur-sm z-30">
-                  <div className="text-center">
-                    <FiLoader className="h-12 w-12 text-blue-400 animate-spin mx-auto mb-4" />
-                    <p className="text-white font-medium text-lg">Initializing stream...</p>
-                  </div>
-                </div>
-              )}
-
-              {/* Play Button */}
-              {showPlayButton && !mediaError && !zoomed && (
-                <div 
-                  className="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm cursor-pointer z-30"
-                  onClick={handlePlayClick}
-                >
-                  <div className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white p-6 rounded-full transition-all duration-300 transform hover:scale-110 shadow-2xl">
-                    <FiPlay className="h-16 w-16" />
-                  </div>
-                </div>
-              )}
-
-              {/* Media Error State */}
-              {mediaError && !zoomed && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-900/90 backdrop-blur-sm z-30">
-                  <div className="text-center p-8 bg-gray-800/80 rounded-2xl max-w-md backdrop-blur-sm">
-                    <FiAlertCircle className="h-16 w-16 text-red-400 mx-auto mb-4" />
-                    <p className="text-xl mb-2 font-semibold text-white">Camera not available</p>
-                    <button 
-                      onClick={retryCamera}
-                      className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-lg transition-all duration-200"
-                    >
-                      Retry Camera
-                    </button>
-                  </div>
-                </div>
-              )}
+        {/* Loading States */}
+        {isLoading && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/80 backdrop-blur-sm z-30">
+            <div className="text-center">
+              <FiLoader className="h-12 w-12 text-blue-400 animate-spin mx-auto mb-4" />
+              <p className="text-white font-medium text-lg">Loading camera...</p>
             </div>
           </div>
-          
-          {/* Thumbnails Column */}
-          <div className="w-48 xl:w-56 flex flex-col bg-gray-800/80 border-l border-gray-600 z-30 h-full">
-            {/* Thumbnails header with expand button */}
-            <div className="p-4 border-b border-gray-600 flex items-center justify-between">
-              <h3 className="font-semibold flex items-center space-x-2 text-sm">
-                <FiVideo className="h-4 w-4 text-blue-400" />
-                <span>Cameras ({thumbnailsCount})</span>
-              </h3>
-              {thumbnailsCount > 0 && (
-                <button
-                  onClick={() => setThumbnailsExpanded(true)}
-                  className="p-1 hover:bg-gray-700 rounded transition-colors"
-                  title="View All Cameras"
-                >
-                  <FiMaximize className="h-4 w-4 text-gray-300" />
-                </button>
-              )}
-            </div>
-            
-            {/* Thumbnails container */}
-            <div className="flex-1 overflow-y-auto p-3 space-y-3 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-700">
-              {/* Streamer thumbnail */}
-              {mediaStream && (
-                <ThumbnailVideo
-                  uid="streamer"
-                  stream={mediaStream}
-                  userName="You"
-                  onClick={() => {
-                    setZoomed({ type: "streamer", stream: mediaStream, userId: user?.id });
-                    setShowPlayButton(false);
-                  }}
-                  isZoomed={zoomed?.type === "streamer"}
-                  videoEnabled={videoEnabled}
-                />
-              )}
-              
-              {/* Viewer cameras */}
-              {[...viewerCameras.entries()].map(([uid, stream]) => (
-                <ThumbnailVideo
-                  key={uid}
-                  uid={uid}
-                  stream={stream}
-                  userName={participants.find(p => p.userId === uid)?.name || `User ${uid}`}
-                  onClick={() => {
-                    setZoomed({ type: "viewer", stream, userId: uid });
-                    setShowPlayButton(false);
-                  }}
-                  isZoomed={zoomed?.type === "viewer" && zoomed.userId === uid}
-                  videoEnabled={true}
-                />
-              ))}
-              
-              {/* Screen share thumbnails */}
-              {activeScreenShare && (
-                <ThumbnailVideo
-                  uid={activeScreenShare.userId}
-                  stream={activeScreenShare.stream}
-                  userName={`${activeScreenShare.userName}'s Screen`}
-                  onClick={() => {
-                    setZoomed({ type: "screen", stream: activeScreenShare.stream, userId: activeScreenShare.userId });
-                    setShowPlayButton(false);
-                  }}
-                  isZoomed={zoomed?.type === "screen"}
-                  videoEnabled={true}
-                  isScreenShare={true}
-                />
-              )}
-              
-              {/* Empty state */}
-              {thumbnailsCount === 0 && (
-                <div className="flex-1 flex items-center justify-center text-gray-500 text-sm text-center p-4">
-                  <div>
-                    <FiVideoOff className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                    <p>No active cameras</p>
-                  </div>
-                </div>
-              )}
+        )}
+
+        {isInitializing && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/80 backdrop-blur-sm z-30">
+            <div className="text-center">
+              <FiLoader className="h-12 w-12 text-blue-400 animate-spin mx-auto mb-4" />
+              <p className="text-white font-medium text-lg">Initializing stream...</p>
             </div>
           </div>
+        )}
 
-          {/* Sidebar - Expanded */}
-          <div className="w-80 xl:w-96 flex flex-col bg-gray-800/80 border-l border-gray-600 z-30 h-full">
-            {/* Sidebar Toggle Header */}
-            <div className="flex border-b border-gray-600">
-              <button
-                onClick={() => setSidebarView('participants')}
-                className={`flex-1 flex items-center justify-center space-x-2 py-3 transition-all duration-200 ${
-                  sidebarView === 'participants' 
-                    ? 'bg-gray-700/50 text-white' 
-                    : 'text-gray-400 hover:text-white hover:bg-gray-700/30'
-                }`}
-              >
-                <FiUsers className="h-5 w-5" />
-                <span className="text-sm font-medium">Participants</span>
-              </button>
-              <button
-                onClick={() => setSidebarView('chat')}
-                className={`flex-1 flex items-center justify-center space-x-2 py-3 transition-all duration-200 ${
-                  sidebarView === 'chat' 
-                    ? 'bg-gray-700/50 text-white' 
-                    : 'text-gray-400 hover:text-white hover:bg-gray-700/30'
-                }`}
-              >
-                <FiMessageSquare className="h-5 w-5" />
-                <span className="text-sm font-medium">Chat</span>
-              </button>
-              
-              {/* Collapse button inside sidebar */}
-              <button
-                onClick={() => setSidebarCollapsed(true)}
-                className="px-3 text-gray-400 hover:text-white hover:bg-gray-700/30 transition-all duration-200"
-                title="Hide Sidebar"
-              >
-                <FiChevronRight className="h-5 w-5" />
-              </button>
-            </div>
-
-            {/* Participants View */}
-
-{sidebarView === 'participants' && (
-  <div className="flex-1 flex flex-col min-h-0">
-    <div className="p-4 border-b border-gray-600">
-      <div className="flex items-center justify-between">
-        <h3 className="font-semibold text-lg flex items-center space-x-2">
-          <FiUsers className="h-5 w-5 text-blue-400" />
-          <span>Participants ({participants.length})</span>
-        </h3>
-        <div className="flex items-center space-x-2">
-          {/* Lower All Hands Button - Only show when hands are raised */}
-          {handRaisedUsers.length > 0 && (
-            <button
-              onClick={lowerAllHands}
-              className="text-xs bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1.5 rounded-lg flex items-center space-x-1 transition-colors"
-              title="Lower All Hands"
-            >
-              <TfiHandOpen className="h-3 w-3" />
-              <span>Lower All ({handRaisedUsers.length})</span>
-            </button>
-          )}
-          
-          {/* Show streamer speaking status badge */}
-          {isSpeaking && (
-            <div className="flex items-center space-x-2 bg-green-900/30 px-3 py-1.5 rounded-lg">
-              <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-              <span className="text-xs text-green-400 font-medium">You're Speaking</span>
-            </div>
-          )}
-          
-          <button
-            onClick={() => setShowParticipantsModal(true)}
-            className="p-1.5 hover:bg-gray-700 rounded-lg transition-colors"
-            title="Manage Participants"
+        {/* Play Button */}
+        {showPlayButton && !mediaError && !zoomed && (
+          <div 
+            className="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm cursor-pointer z-30"
+            onClick={handlePlayClick}
           >
-            <FiUsers className="h-5 w-5 text-gray-400" />
+            <div className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white p-6 rounded-full transition-all duration-300 transform hover:scale-110 shadow-2xl">
+              <FiPlay className="h-16 w-16" />
+            </div>
+          </div>
+        )}
+
+        {/* Media Error State */}
+        {mediaError && !zoomed && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-900/90 backdrop-blur-sm z-30">
+            <div className="text-center p-8 bg-gray-800/80 rounded-2xl max-w-md backdrop-blur-sm">
+              <FiAlertCircle className="h-16 w-16 text-red-400 mx-auto mb-4" />
+              <p className="text-xl mb-2 font-semibold text-white">Camera not available</p>
+              <button 
+                onClick={retryCamera}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-lg transition-all duration-200"
+              >
+                Retry Camera
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Expand Sidebar Button */}
+        <div className="absolute right-4 top-4 z-20">
+          <button
+            onClick={() => setSidebarCollapsed(false)}
+            className="bg-gray-800/80 hover:bg-gray-700/80 p-3 rounded-lg shadow-lg transition-all duration-200"
+            title="Show Sidebar"
+          >
+            <FiChevronLeft className="h-5 w-5 text-blue-400" />
           </button>
         </div>
       </div>
-      
-      {/* Quick Stats - Enhanced */}
-      <div className="mt-3 grid grid-cols-3 gap-2">
-        <div className="text-center p-2 bg-gray-700/50 rounded-lg">
-          <div className="text-lg font-bold text-white">{participants.length}</div>
-          <div className="text-xs text-gray-300">Total</div>
-        </div>
-        <div className="text-center p-2 bg-yellow-900/30 rounded-lg">
-          <div className="text-lg font-bold text-yellow-300">{handRaisedUsers.length}</div>
-          <div className="text-xs text-yellow-300">Hands Raised</div>
-        </div>
-        <div className="text-center p-2 bg-green-900/30 rounded-lg">
-          <div className="text-lg font-bold text-green-300">{speakingUsers.size}</div>
-          <div className="text-xs text-green-300">Speaking</div>
-        </div>
+    </div>
+    
+    {/* Thumbnails Column - Always visible */}
+    <div className="w-48 xl:w-56 flex flex-col bg-gray-800/80 border-l border-gray-600 z-30 h-full">
+      {/* Thumbnails header with expand button */}
+      <div className="p-4 border-b border-gray-600 flex items-center justify-between">
+        <h3 className="font-semibold flex items-center space-x-2 text-sm">
+          <FiVideo className="h-4 w-4 text-blue-400" />
+          <span>Cameras ({thumbnailsCount})</span>
+        </h3>
+        {thumbnailsCount > 0 && (
+          <button
+            onClick={() => setThumbnailsExpanded(true)}
+            className="p-1 hover:bg-gray-700 rounded transition-colors"
+            title="View All Cameras"
+          >
+            <FiMaximize className="h-4 w-4 text-gray-300" />
+          </button>
+        )}
       </div>
       
-      {/* Speaking Detection Status */}
-      <div className="mt-3 flex items-center justify-between text-xs">
-        <div className="flex items-center space-x-2">
-          <div className={`w-2 h-2 rounded-full ${audioEnabled ? 'bg-green-500' : 'bg-red-500'}`}></div>
-          <span className="text-gray-300">
-            Your Mic: <span className={`font-medium ${audioEnabled ? 'text-green-400' : 'text-red-400'}`}>
-              {audioEnabled ? 'ON' : 'OFF'}
-            </span>
-          </span>
-        </div>
+      {/* Thumbnails container */}
+      <div className="flex-1 overflow-y-auto p-3 space-y-3 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-700">
+        {/* Streamer thumbnail */}
+        {mediaStream && (
+          <ThumbnailVideo
+            uid="streamer"
+            stream={mediaStream}
+            userName="You"
+            onClick={() => {
+              setZoomed({ type: "streamer", stream: mediaStream, userId: user?.id });
+              setShowPlayButton(false);
+            }}
+            isZoomed={zoomed?.type === "streamer"}
+            videoEnabled={videoEnabled}
+          />
+        )}
         
-        <div className="text-gray-400">
-          Speaking Threshold: <span className="font-mono">{speakingThreshold} dB</span>
-        </div>
-      </div>
-    </div>
-    
-    {/* All Participants List - Viewers Only */}
-    <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-700">
-      {/* Viewers List */}
-      {participants
-        .filter(p => p.userId !== user?.id) // Remove streamer from viewers list
-        .map((participant, index) => {
-          const isThisUserSpeaking = speakingUsers.has(participant.userId);
-          const hasHandRaised = handRaisedUsers.some(user => user.userId === participant.userId);
-          
-          return (
-            <div
-              key={index}
-              className={`flex items-center justify-between p-3 rounded-xl transition-all duration-200 ${
-                isThisUserSpeaking
-                  ? 'bg-gradient-to-r from-green-900/20 to-emerald-900/10 border border-green-500/20'
-                  : hasHandRaised
-                  ? 'bg-gradient-to-r from-yellow-900/20 to-amber-900/10 border border-yellow-500/20'
-                  : 'bg-gray-700/40 hover:bg-gray-600/40'
-              }`}
-            >
-              {/* Left side: Participant info */}
-              <div className="flex items-center space-x-3 flex-1 min-w-0">
-                {/* Avatar */}
-                <div className="relative">
-                  <div className="w-9 h-9 rounded-full bg-gradient-to-br from-green-600 to-teal-600 flex items-center justify-center text-white font-medium">
-                    {participant.name?.charAt(0)?.toUpperCase() || 
-                     participant.userName?.charAt(0)?.toUpperCase() || 
-                     participant.userId?.charAt(0)?.toUpperCase() || 'U'}
-                  </div>
-                  
-                  {/* Multiple status indicators */}
-                  <div className="absolute -bottom-1 -right-1 flex space-x-1">
-                    {/* Speaking indicator dot */}
-                    {isThisUserSpeaking && (
-                      <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse border-2 border-gray-800"></div>
-                    )}
-                    
-                    {/* Hand raised indicator dot */}
-                    {hasHandRaised && !isThisUserSpeaking && (
-                      <div className="w-3 h-3 rounded-full bg-yellow-500 border-2 border-gray-800"></div>
-                    )}
-                  </div>
-                </div>
-                
-                {/* Name and status */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center space-x-2">
-                    <span className="font-medium truncate text-sm">
-                      {participant.name || participant.userName || participant.userId || "User"}
-                    </span>
-                    
-                    {/* Participant number badge */}
-                    <div className="text-[10px] bg-gray-700 text-gray-300 px-1.5 py-0.5 rounded">
-                      #{index + 1}
-                    </div>
-                  </div>
-                  
-                  {/* Status indicators inline */}
-                  <div className="flex items-center flex-wrap gap-2 mt-1">
-                    {/* Speaking indicator */}
-                    {isThisUserSpeaking && (
-                      <div className="flex items-center space-x-1 bg-green-900/30 px-2 py-0.5 rounded">
-                        <FiVolume2 className="h-3 w-3 text-green-400 animate-pulse" />
-                        <span className="text-xs text-green-400 font-medium">SPEAKING</span>
-                      </div>
-                    )}
-                    
-                    {/* Hand raised indicator */}
-                    {hasHandRaised && !isThisUserSpeaking && (
-                      <div className="flex items-center space-x-1 bg-yellow-900/30 px-2 py-0.5 rounded">
-                        <TfiHandOpen className="h-3 w-3 text-yellow-400" />
-                        <span className="text-xs text-yellow-400 font-medium">HAND RAISED</span>
-                      </div>
-                    )}
-                    
-                    {/* Mic indicator */}
-                    {participant.hasAudio && !isThisUserSpeaking && (
-                      <div className="flex items-center space-x-1">
-                        <FiMic className="h-3 w-3 text-blue-400" />
-                        <span className="text-xs text-blue-400">Mic On</span>
-                      </div>
-                    )}
-                    
-                    {/* Camera indicator */}
-                    {participant.hasVideo && (
-                      <div className="flex items-center space-x-1">
-                        <FiVideo className="h-3 w-3 text-purple-400" />
-                        <span className="text-xs text-purple-400">Camera</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-              
-              {/* Right side: Action buttons */}
-              <div className="flex items-center space-x-1">
-                {/* Lower Hand button (only for viewers with raised hands) */}
-                {hasHandRaised && (
-                  <button
-                    onClick={() => lowerHandForUser(participant.userId)}
-                    className="p-1.5 bg-yellow-700/50 hover:bg-yellow-600/50 rounded-lg transition-colors"
-                    title="Lower Hand"
-                  >
-                    <TfiHandOpen className="h-4 w-4 text-yellow-300" />
-                  </button>
-                )}
-                
-                {/* Stop Camera button */}
-                {participant.hasVideo && (
-                  <button
-                    onClick={() => {
-                      emitSocketEvent("streamer-stop-viewer-video", {
-                        sessionId: sessionId || roomCode,
-                        targetSocketId: participant.socketId,
-                      });
-                      addDebugLog(`🛑 Force stopped camera for: ${participant.userId}`);
-                      toast.info(`Stopped ${participant.name}'s camera`, {
-                        position: "bottom-right",
-                        autoClose: 2000,
-                      });
-                    }}
-                    className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
-                    title="Stop Camera"
-                  >
-                    <FiVideoOff className="h-4 w-4 text-gray-300" />
-                  </button>
-                )}
-                
-                {/* Mute button */}
-                {participant.hasAudio && (
-                  <button
-                    onClick={() => {
-                      emitSocketEvent("streamer-stop-viewer-audio", {
-                        sessionId: sessionId || roomCode,
-                        targetSocketId: participant.socketId,
-                      });
-                      addDebugLog(`🔇 Muted viewer: ${participant.userId}`);
-                      toast.info(`Muted ${participant.name}`, {
-                        position: "bottom-right",
-                        autoClose: 2000,
-                      });
-                    }}
-                    className="p-1.5 bg-red-700/50 hover:bg-red-600/50 rounded-lg transition-colors"
-                    title="Mute User"
-                  >
-                    <FiMicOff className="h-4 w-4 text-red-300" />
-                  </button>
-                )}
-              </div>
+        {/* Viewer cameras */}
+        {[...viewerCameras.entries()].map(([uid, stream]) => (
+          <ThumbnailVideo
+            key={uid}
+            uid={uid}
+            stream={stream}
+            userName={participants.find(p => p.userId === uid)?.name || `User ${uid}`}
+            onClick={() => {
+              setZoomed({ type: "viewer", stream, userId: uid });
+              setShowPlayButton(false);
+            }}
+            isZoomed={zoomed?.type === "viewer" && zoomed.userId === uid}
+            videoEnabled={true}
+          />
+        ))}
+        
+        {/* Screen share thumbnails */}
+        {activeScreenShare && (
+          <ThumbnailVideo
+            uid={activeScreenShare.userId}
+            stream={activeScreenShare.stream}
+            userName={`${activeScreenShare.userName}'s Screen`}
+            onClick={() => {
+              setZoomed({ type: "screen", stream: activeScreenShare.stream, userId: activeScreenShare.userId });
+              setShowPlayButton(false);
+            }}
+            isZoomed={zoomed?.type === "screen"}
+            videoEnabled={true}
+            isScreenShare={true}
+          />
+        )}
+        
+        {/* Empty state */}
+        {thumbnailsCount === 0 && (
+          <div className="flex-1 flex items-center justify-center text-gray-500 text-sm text-center p-4">
+            <div>
+              <FiVideoOff className="h-8 w-8 mx-auto mb-2 opacity-50" />
+              <p>No active cameras</p>
             </div>
-          );
-        })
-      }
-      
-      {/* Empty State */}
-      {participants.filter(p => p.userId !== user?.id).length === 0 && (
-        <div className="flex flex-col items-center justify-center py-12 text-gray-500">
-          <FiUsers className="h-16 w-16 mb-4 opacity-30" />
-          <p className="text-lg font-medium mb-2">No viewers yet</p>
-          <p className="text-sm text-center max-w-sm">
-            Share the room code with viewers to invite them to join the session
-          </p>
-          {session?.roomCode && (
-            <div className="mt-4 p-3 bg-gray-800/50 rounded-lg">
-              <p className="text-sm text-gray-300 mb-1">Room Code:</p>
-              <p className="text-lg font-mono font-bold text-blue-400">{session.roomCode}</p>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-    
-    {/* Legend at bottom */}
-    <div className="p-3 border-t border-gray-700 bg-gray-800/50">
-      <div className="flex flex-wrap items-center gap-3 text-xs text-gray-400">
-        <div className="flex items-center space-x-1">
-          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-          <span>Speaking</span>
-        </div>
-        <div className="flex items-center space-x-1">
-          <div className="w-2 h-2 rounded-full bg-yellow-500"></div>
-          <span>Hand Raised</span>
-        </div>
-        <div className="flex items-center space-x-1">
-          <FiMic className="h-3 w-3 text-blue-400" />
-          <span>Mic On</span>
-        </div>
-        <div className="flex items-center space-x-1">
-          <FiVideo className="h-3 w-3 text-purple-400" />
-          <span>Camera On</span>
-        </div>
-        <div className="ml-auto text-xs text-gray-500">
-          {speakingUsers.size} speaking • {handRaisedUsers.length} hands raised
-        </div>
+          </div>
+        )}
       </div>
     </div>
   </div>
-)}
-            {/* Chat View */}
-            {sidebarView === 'chat' && (
-              <ChatComponent
-                messages={messages}
-                onSendMessage={sendMessage}
-                currentUserId={user?.id}
-                uploadingFile={uploadingFile}
-                socket={socket}
-                sessionId={sessionId}
-                roomCode={roomCode}
-              />
+) : (
+  /* Original Layout when sidebar is expanded */
+  <div className="flex h-full">
+    {/* Main Video Area */}
+    <div className="flex-1 flex flex-col min-h-0">
+      <div 
+        className="relative flex-1 bg-black overflow-hidden cursor-pointer"
+        onClick={(e) => {
+          // 🛑 AGAR WHITEBOARD ZOOMED HAI TO FULLSCREEN MAT KARO
+          if (zoomed?.type === "whiteboard") {
+            e.stopPropagation();
+            return;
+          }
+          
+          // Warna normal full-screen logic
+          if (zoomed) {
+            const element = document.querySelector('.main-video-container');
+            if (element) {
+              if (!document.fullscreenElement) {
+                element.requestFullscreen().catch(err => {
+                  console.log('Full screen error:', err);
+                });
+              } else {
+                document.exitFullscreen();
+              }
+            }
+          }
+        }}
+      >
+        {/* Zoomed Video View */}
+        {zoomed ? (
+          <div className="relative w-full h-full main-video-container">
+            {/* 🎨 CASE 1: WHITEBOARD - Video player ki jagah whiteboard */}
+            {zoomed.type === "whiteboard" ? (
+              /* Whiteboard Component - Exactly video ki jagah */
+              showWhiteboard && whiteboardSessionInfo ? (
+                <StreamerWhiteboard
+                  key={`whiteboard-${whiteboardSessionInfo.sessionId}-${Date.now()}`}
+                  sessionId={whiteboardSessionInfo.sessionId}
+                  roomCode={whiteboardSessionInfo.roomCode}
+                  wsToken={whiteboardSessionInfo.wsToken}
+                  sessionInfo={whiteboardSessionInfo}
+                  isActive={showWhiteboard}
+                  onClose={handleCloseWhiteboard}
+                  isStreamer={true}
+                  allowViewersToDraw={true}
+                  mainScreenMode={true}
+                  compact={true}
+                />
+              ) : (
+                /* Fallback - agar whiteboard load nahi hua */
+                <div className="absolute inset-0 flex items-center justify-center bg-gray-900">
+                  <div className="text-white text-center">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-3"></div>
+                    <p className="text-sm">Loading whiteboard...</p>
+                  </div>
+                </div>
+              )
+            ) : (
+              /* 🎥 CASE 2: REGULAR VIDEO - Camera ya Screen Share */
+              <>
+                <video
+                  ref={
+                    zoomed.type === "screen" 
+                      ? screenRef           // Screen share ke liye alag ref
+                      : zoomed.type === "streamer" 
+                        ? videoRef          // Streamer ke camera ke liye
+                        : zoomedVideoRef    // Viewers ke camera ke liye
+                  }
+                  autoPlay
+                  playsInline
+                  muted={zoomed.type !== "viewer"} // Viewers ka audio chahiye
+                  className="absolute inset-0 w-full h-full object-contain bg-black"
+                  srcObject={zoomed.stream}
+                  onError={(e) => {
+                    console.error('Zoomed video error:', e);
+                  }}
+                />
+                
+                {/* Video Label - Batata hai kiska video hai */}
+                <div className="absolute top-4 left-4 bg-black/70 text-white px-3 py-1 rounded-lg text-sm z-20 flex items-center space-x-2">
+                  {zoomed.type === "streamer" && (
+                    <>
+                      <FiVideo className="h-4 w-4 text-blue-400" />
+                      <span>Your Camera</span>
+                    </>
+                  )}
+                  {zoomed.type === "viewer" && (
+                    <>
+                      <FiVideo className="h-4 w-4 text-green-400" />
+                      <span>
+                        {participants.find(p => p.userId === zoomed.userId)?.name || 'Viewer'}'s Camera
+                      </span>
+                    </>
+                  )}
+                  {zoomed.type === "screen" && (
+                    <>
+                      <FiMonitor className="h-4 w-4 text-purple-400" />
+                      <span>
+                        {activeScreenShare?.userName || 'Streamer'}'s Screen
+                      </span>
+                    </>
+                  )}
+                </div>
+              </>
             )}
+            
+            {/* 🔴 Close Button - Sirf Whiteboard ke liye */}
+           
+          </div>
+        ) : (
+          /* 🎬 DEFAULT VIEW - Streamer's Camera (Jab koi zoom nahi hai) */
+          <div className="relative w-full h-full">
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted={true}
+              className="absolute inset-0 w-full h-full object-contain bg-black"
+              srcObject={mediaStream}
+              onError={(e) => {
+                console.error('Main video error:', e);
+                setMediaError(true);
+              }}
+            />
+            
+            {/* Live Badge */}
+            <div className="absolute top-4 left-4 flex items-center space-x-2 bg-black/70 text-white px-3 py-1.5 rounded-lg">
+              <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+              <span className="text-sm font-medium">LIVE</span>
+              {session?.roomCode && (
+                <>
+                  <span className="text-gray-400 mx-1">•</span>
+                  <span className="text-sm">{session.roomCode}</span>
+                </>
+              )}
+            </div>
+            
+            {/* Camera Off Placeholder - Agar video band hai */}
+            {!videoEnabled && (
+              <div className="absolute inset-0 flex items-center justify-center bg-gray-900">
+                <div className="text-center">
+                  <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center mx-auto mb-3">
+                    <FiVideoOff className="h-8 w-8 text-gray-400" />
+                  </div>
+                  <p className="text-white text-sm">Camera is off</p>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Status Overlay */}
+        <div className="absolute top-4 left-4 flex items-center space-x-4 z-10">
+          <div className="flex items-center space-x-2 bg-black/70 text-sm text-white px-4 py-2 rounded-xl backdrop-blur-sm">
+            <div className={`w-3 h-3 rounded-full ${isPlaying ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`}></div>
+            <span className="font-medium">{isPlaying ? 'Live' : 'Paused'}</span>
+          </div>
+        </div>
+
+        {/* Loading States */}
+        {isLoading && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/80 backdrop-blur-sm z-30">
+            <div className="text-center">
+              <FiLoader className="h-12 w-12 text-blue-400 animate-spin mx-auto mb-4" />
+              <p className="text-white font-medium text-lg">Loading camera...</p>
+            </div>
+          </div>
+        )}
+
+        {isInitializing && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/80 backdrop-blur-sm z-30">
+            <div className="text-center">
+              <FiLoader className="h-12 w-12 text-blue-400 animate-spin mx-auto mb-4" />
+              <p className="text-white font-medium text-lg">Initializing stream...</p>
+            </div>
+          </div>
+        )}
+
+        {/* Play Button */}
+        {showPlayButton && !mediaError && !zoomed && (
+          <div 
+            className="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm cursor-pointer z-30"
+            onClick={handlePlayClick}
+          >
+            <div className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white p-6 rounded-full transition-all duration-300 transform hover:scale-110 shadow-2xl">
+              <FiPlay className="h-16 w-16" />
+            </div>
+          </div>
+        )}
+
+        {/* Media Error State */}
+        {mediaError && !zoomed && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-900/90 backdrop-blur-sm z-30">
+            <div className="text-center p-8 bg-gray-800/80 rounded-2xl max-w-md backdrop-blur-sm">
+              <FiAlertCircle className="h-16 w-16 text-red-400 mx-auto mb-4" />
+              <p className="text-xl mb-2 font-semibold text-white">Camera not available</p>
+              <button 
+                onClick={retryCamera}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-lg transition-all duration-200"
+              >
+                Retry Camera
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Collapse Sidebar Button */}
+        <div className="absolute right-4 top-4 z-20">
+          <button
+            onClick={() => setSidebarCollapsed(true)}
+            className="bg-gray-800/80 hover:bg-gray-700/80 p-3 rounded-lg shadow-lg transition-all duration-200"
+            title="Hide Sidebar"
+          >
+            <FiChevronRight className="h-5 w-5 text-blue-400" />
+          </button>
+        </div>
+      </div>
+    </div>
+    
+    {/* Thumbnails Column - Always visible */}
+    <div className="w-48 xl:w-56 flex flex-col bg-gray-800/80 border-l border-gray-600 z-30 h-full">
+      {/* Thumbnails header with expand button */}
+      <div className="p-4 border-b border-gray-600 flex items-center justify-between">
+        <h3 className="font-semibold flex items-center space-x-2 text-sm">
+          <FiVideo className="h-4 w-4 text-blue-400" />
+          <span>Cameras ({thumbnailsCount})</span>
+        </h3>
+        {thumbnailsCount > 0 && (
+          <button
+            onClick={() => setThumbnailsExpanded(true)}
+            className="p-1 hover:bg-gray-700 rounded transition-colors"
+            title="View All Cameras"
+          >
+            <FiMaximize className="h-4 w-4 text-gray-300" />
+          </button>
+        )}
+      </div>
+      
+      {/* Thumbnails container */}
+      <div className="flex-1 overflow-y-auto p-3 space-y-3 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-700">
+        {/* Streamer thumbnail */}
+        {mediaStream && (
+          <ThumbnailVideo
+            uid="streamer"
+            stream={mediaStream}
+            userName="You"
+            onClick={() => {
+              setZoomed({ type: "streamer", stream: mediaStream, userId: user?.id });
+              setShowPlayButton(false);
+            }}
+            isZoomed={zoomed?.type === "streamer"}
+            videoEnabled={videoEnabled}
+          />
+        )}
+        
+        {/* Viewer cameras */}
+        {[...viewerCameras.entries()].map(([uid, stream]) => (
+          <ThumbnailVideo
+            key={uid}
+            uid={uid}
+            stream={stream}
+            userName={participants.find(p => p.userId === uid)?.name || `User ${uid}`}
+            onClick={() => {
+              setZoomed({ type: "viewer", stream, userId: uid });
+              setShowPlayButton(false);
+            }}
+            isZoomed={zoomed?.type === "viewer" && zoomed.userId === uid}
+            videoEnabled={true}
+          />
+        ))}
+        
+        {/* Screen share thumbnails */}
+        {activeScreenShare && (
+          <ThumbnailVideo
+            uid={activeScreenShare.userId}
+            stream={activeScreenShare.stream}
+            userName={`${activeScreenShare.userName}'s Screen`}
+            onClick={() => {
+              setZoomed({ type: "screen", stream: activeScreenShare.stream, userId: activeScreenShare.userId });
+              setShowPlayButton(false);
+            }}
+            isZoomed={zoomed?.type === "screen"}
+            videoEnabled={true}
+            isScreenShare={true}
+          />
+        )}
+        
+        {/* Empty state */}
+        {thumbnailsCount === 0 && (
+          <div className="flex-1 flex items-center justify-center text-gray-500 text-sm text-center p-4">
+            <div>
+              <FiVideoOff className="h-8 w-8 mx-auto mb-2 opacity-50" />
+              <p>No active cameras</p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+
+    {/* Sidebar - Expanded (Participants/Chat) */}
+    <div className="w-80 xl:w-96 flex flex-col bg-gray-800/80 border-l border-gray-600 z-30 h-full">
+      {/* Sidebar Toggle Header */}
+      <div className="flex border-b border-gray-600">
+        <button
+          onClick={() => setSidebarView('participants')}
+          className={`flex-1 flex items-center justify-center space-x-2 py-3 transition-all duration-200 ${
+            sidebarView === 'participants' 
+              ? 'bg-gray-700/50 text-white' 
+              : 'text-gray-400 hover:text-white hover:bg-gray-700/30'
+          }`}
+        >
+          <FiUsers className="h-5 w-5" />
+          <span className="text-sm font-medium">Participants</span>
+        </button>
+        <button
+          onClick={() => setSidebarView('chat')}
+          className={`flex-1 flex items-center justify-center space-x-2 py-3 transition-all duration-200 ${
+            sidebarView === 'chat' 
+              ? 'bg-gray-700/50 text-white' 
+              : 'text-gray-400 hover:text-white hover:bg-gray-700/30'
+          }`}
+        >
+          <FiMessageSquare className="h-5 w-5" />
+          <span className="text-sm font-medium">Chat</span>
+        </button>
+      </div>
+
+      {/* Participants View */}
+      {sidebarView === 'participants' && (
+        <div className="flex-1 flex flex-col min-h-0">
+          <div className="p-4 border-b border-gray-600">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-lg flex items-center space-x-2">
+                <FiUsers className="h-5 w-5 text-blue-400" />
+                <span>Participants ({participants.length})</span>
+              </h3>
+              <div className="flex items-center space-x-2">
+                {/* Lower All Hands Button */}
+                {handRaisedUsers.length > 0 && (
+                  <button
+                    onClick={lowerAllHands}
+                    className="text-xs bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1.5 rounded-lg flex items-center space-x-1 transition-colors"
+                    title="Lower All Hands"
+                  >
+                    <TfiHandOpen className="h-3 w-3" />
+                    <span>Lower All ({handRaisedUsers.length})</span>
+                  </button>
+                )}
+                
+                {/* Show streamer speaking status badge */}
+                {isSpeaking && (
+                  <div className="flex items-center space-x-2 bg-green-900/30 px-3 py-1.5 rounded-lg">
+                    <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                    <span className="text-xs text-green-400 font-medium">You're Speaking</span>
+                  </div>
+                )}
+                
+                <button
+                  onClick={() => setShowParticipantsModal(true)}
+                  className="p-1.5 hover:bg-gray-700 rounded-lg transition-colors"
+                  title="Manage Participants"
+                >
+                  <FiUsers className="h-5 w-5 text-gray-400" />
+                </button>
+              </div>
+            </div>
+            
+            {/* Quick Stats */}
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              <div className="text-center p-2 bg-gray-700/50 rounded-lg">
+                <div className="text-lg font-bold text-white">{participants.length}</div>
+                <div className="text-xs text-gray-300">Total</div>
+              </div>
+              <div className="text-center p-2 bg-yellow-900/30 rounded-lg">
+                <div className="text-lg font-bold text-yellow-300">{handRaisedUsers.length}</div>
+                <div className="text-xs text-yellow-300">Hands Raised</div>
+              </div>
+              <div className="text-center p-2 bg-green-900/30 rounded-lg">
+                <div className="text-lg font-bold text-green-300">{speakingUsers.size}</div>
+                <div className="text-xs text-green-300">Speaking</div>
+              </div>
+            </div>
+          </div>
+          
+          {/* All Participants List - Viewers Only */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-700">
+            {participants
+              .filter(p => p.userId !== user?.id)
+              .map((participant, index) => {
+                const isThisUserSpeaking = speakingUsers.has(participant.userId);
+                const hasHandRaised = handRaisedUsers.some(user => user.userId === participant.userId);
+                
+                return (
+                  <div
+                    key={index}
+                    className={`flex items-center justify-between p-3 rounded-xl transition-all duration-200 ${
+                      isThisUserSpeaking
+                        ? 'bg-gradient-to-r from-green-900/20 to-emerald-900/10 border border-green-500/20'
+                        : hasHandRaised
+                        ? 'bg-gradient-to-r from-yellow-900/20 to-amber-900/10 border border-yellow-500/20'
+                        : 'bg-gray-700/40 hover:bg-gray-600/40'
+                    }`}
+                  >
+                    {/* Left side: Participant info */}
+                    <div className="flex items-center space-x-3 flex-1 min-w-0">
+                      {/* Avatar */}
+                      <div className="relative">
+                        <div className="w-9 h-9 rounded-full bg-gradient-to-br from-green-600 to-teal-600 flex items-center justify-center text-white font-medium">
+                          {participant.name?.charAt(0)?.toUpperCase() || 
+                           participant.userName?.charAt(0)?.toUpperCase() || 
+                           participant.userId?.charAt(0)?.toUpperCase() || 'U'}
+                        </div>
+                        
+                        {/* Multiple status indicators */}
+                        <div className="absolute -bottom-1 -right-1 flex space-x-1">
+                          {isThisUserSpeaking && (
+                            <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse border-2 border-gray-800"></div>
+                          )}
+                          
+                          {hasHandRaised && !isThisUserSpeaking && (
+                            <div className="w-3 h-3 rounded-full bg-yellow-500 border-2 border-gray-800"></div>
+                          )}
+                        </div>
+                      </div>
+                      
+                      {/* Name and status */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center space-x-2">
+                          <span className="font-medium truncate text-sm">
+                            {participant.name || participant.userName || participant.userId || "User"}
+                          </span>
+                          
+                          <div className="text-[10px] bg-gray-700 text-gray-300 px-1.5 py-0.5 rounded">
+                            #{index + 1}
+                          </div>
+                        </div>
+                        
+                        {/* Status indicators inline */}
+                        <div className="flex items-center flex-wrap gap-2 mt-1">
+                          {isThisUserSpeaking && (
+                            <div className="flex items-center space-x-1 bg-green-900/30 px-2 py-0.5 rounded">
+                              <FiVolume2 className="h-3 w-3 text-green-400 animate-pulse" />
+                              <span className="text-xs text-green-400 font-medium">SPEAKING</span>
+                            </div>
+                          )}
+                          
+                          {hasHandRaised && !isThisUserSpeaking && (
+                            <div className="flex items-center space-x-1 bg-yellow-900/30 px-2 py-0.5 rounded">
+                              <TfiHandOpen className="h-3 w-3 text-yellow-400" />
+                              <span className="text-xs text-yellow-400 font-medium">HAND RAISED</span>
+                            </div>
+                          )}
+                          
+                          {participant.hasAudio && !isThisUserSpeaking && (
+                            <div className="flex items-center space-x-1">
+                              <FiMic className="h-3 w-3 text-blue-400" />
+                              <span className="text-xs text-blue-400">Mic On</span>
+                            </div>
+                          )}
+                          
+                          {participant.hasVideo && (
+                            <div className="flex items-center space-x-1">
+                              <FiVideo className="h-3 w-3 text-purple-400" />
+                              <span className="text-xs text-purple-400">Camera</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {/* Right side: Action buttons */}
+                    <div className="flex items-center space-x-1">
+                      {hasHandRaised && (
+                        <button
+                          onClick={() => lowerHandForUser(participant.userId)}
+                          className="p-1.5 bg-yellow-700/50 hover:bg-yellow-600/50 rounded-lg transition-colors"
+                          title="Lower Hand"
+                        >
+                          <TfiHandOpen className="h-4 w-4 text-yellow-300" />
+                        </button>
+                      )}
+                      
+                      {participant.hasVideo && (
+                        <button
+                          onClick={() => {
+                            emitSocketEvent("streamer-stop-viewer-video", {
+                              sessionId: sessionId || roomCode,
+                              targetSocketId: participant.socketId,
+                            });
+                            addDebugLog(`🛑 Force stopped camera for: ${participant.userId}`);
+                            toast.info(`Stopped ${participant.name}'s camera`, {
+                              position: "bottom-right",
+                              autoClose: 2000,
+                            });
+                          }}
+                          className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+                          title="Stop Camera"
+                        >
+                          <FiVideoOff className="h-4 w-4 text-gray-300" />
+                        </button>
+                      )}
+                      
+                      {participant.hasAudio && (
+                        <button
+                          onClick={() => {
+                            emitSocketEvent("streamer-stop-viewer-audio", {
+                              sessionId: sessionId || roomCode,
+                              targetSocketId: participant.socketId,
+                            });
+                            addDebugLog(`🔇 Muted viewer: ${participant.userId}`);
+                            toast.info(`Muted ${participant.name}`, {
+                              position: "bottom-right",
+                              autoClose: 2000,
+                            });
+                          }}
+                          className="p-1.5 bg-red-700/50 hover:bg-red-600/50 rounded-lg transition-colors"
+                          title="Mute User"
+                        >
+                          <FiMicOff className="h-4 w-4 text-red-300" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            }
+            
+            {/* Empty State */}
+            {participants.filter(p => p.userId !== user?.id).length === 0 && (
+              <div className="flex flex-col items-center justify-center py-12 text-gray-500">
+                <FiUsers className="h-16 w-16 mb-4 opacity-30" />
+                <p className="text-lg font-medium mb-2">No viewers yet</p>
+                <p className="text-sm text-center max-w-sm">
+                  Share the room code with viewers to invite them to join the session
+                </p>
+                {session?.roomCode && (
+                  <div className="mt-4 p-3 bg-gray-800/50 rounded-lg">
+                    <p className="text-sm text-gray-300 mb-1">Room Code:</p>
+                    <p className="text-lg font-mono font-bold text-blue-400">{session.roomCode}</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+          
+          {/* Legend at bottom */}
+          <div className="p-3 border-t border-gray-700 bg-gray-800/50">
+            <div className="flex flex-wrap items-center gap-3 text-xs text-gray-400">
+              <div className="flex items-center space-x-1">
+                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                <span>Speaking</span>
+              </div>
+              <div className="flex items-center space-x-1">
+                <div className="w-2 h-2 rounded-full bg-yellow-500"></div>
+                <span>Hand Raised</span>
+              </div>
+              <div className="flex items-center space-x-1">
+                <FiMic className="h-3 w-3 text-blue-400" />
+                <span>Mic On</span>
+              </div>
+              <div className="flex items-center space-x-1">
+                <FiVideo className="h-3 w-3 text-purple-400" />
+                <span>Camera On</span>
+              </div>
+              <div className="ml-auto text-xs text-gray-500">
+                {speakingUsers.size} speaking • {handRaisedUsers.length} hands raised
+              </div>
+            </div>
           </div>
         </div>
       )}
+
+      {/* Chat View */}
+      {sidebarView === 'chat' && (
+        <ChatComponent
+          messages={messages}
+          onSendMessage={sendMessage}
+          currentUserId={user?.id}
+          uploadingFile={uploadingFile}
+          socket={socket}
+          sessionId={sessionId}
+          roomCode={roomCode}
+        />
+      )}
+    </div>
+  </div>
+)}
+      
     </div>
      
     {/* Audio Permission Modal */}
@@ -6064,7 +6113,14 @@ return (
       <span className="text-xs font-medium">{videoEnabled ? 'Video' : 'No Video'}</span>
     </button>
  <button
-  onClick={handleOpenWhiteboard}
+  onClick={(e) => {
+    e.stopPropagation();
+    if (showWhiteboard) {
+      handleCloseWhiteboard();
+    } else {
+      handleOpenWhiteboard();
+    }
+  }}
   className={`flex flex-col items-center p-4 rounded-2xl focus:outline-none transition-all duration-200 transform hover:scale-110 shadow-lg ${
     showWhiteboard 
       ? 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700' 
