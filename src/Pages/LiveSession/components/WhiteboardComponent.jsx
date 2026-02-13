@@ -1,1579 +1,1773 @@
-// import React, { useRef, useEffect, useState, useCallback } from 'react';
-// import * as fabric from 'fabric';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import * as Y from 'yjs';
+import { WebsocketProvider } from 'y-websocket';
+import { IndexeddbPersistence } from 'y-indexeddb';
+
+// Drawing tools
+import { 
+  FiPenTool, 
+  FiSquare, 
+  FiCircle, 
+  FiMinus, 
+  FiType, 
+  FiDelete,
+  FiDownload,
+  FiRefreshCcw,
+  FiTrash2,
+  FiMousePointer,
+  FiMove,
+  FiPlus,
+  FiMinusCircle,
+  FiX
+} from 'react-icons/fi';
+import { FaEraser, FaPaintBrush } from 'react-icons/fa';
+import { toast } from 'react-toastify';
+
+const StreamerWhiteboard = ({
+  sessionId,
+  roomCode,
+  wsToken,
+  sessionInfo,
+  isActive,
+  onClose,
+  allowViewersToDraw = true,
+  mainScreenMode = false,
+  compact = false
+}) => {
+  // Canvas refs
+  const canvasRef = useRef(null);
+  const backgroundCanvasRef = useRef(null);
+  const ctxRef = useRef(null);
+  const bgCtxRef = useRef(null);
+  const containerRef = useRef(null);
+  
+  // Yjs refs
+  const yDocRef = useRef(null);
+  const yProviderRef = useRef(null);
+  const yWhiteboardRef = useRef(null);
+  const ySettingsRef = useRef(null);
+  const yUndoManagerRef = useRef(null);
+  
+  // State
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [tool, setTool] = useState('pen');
+  const [color, setColor] = useState('#000000');
+  const [strokeWidth, setStrokeWidth] = useState(2);
+  const [opacity, setOpacity] = useState(1);
+  const [currentZoom, setCurrentZoom] = useState(1);
+  const [isConnected, setIsConnected] = useState(false);
+  const [participants, setParticipants] = useState([]);
+  const [isLocalDrawing, setIsLocalDrawing] = useState(false);
+  const [backgroundColor, setBackgroundColor] = useState('#ffffff');
+  const [isGridVisible, setIsGridVisible] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
+  const [showControls, setShowControls] = useState(!compact);
+  
+  // Canvas state
+  const lastPointRef = useRef({ x: 0, y: 0 });
+  const canvasOffsetRef = useRef({ x: 0, y: 0 });
+  const lastPanPointRef = useRef({ x: 0, y: 0 });
+  
+  // Initialize Yjs document and WebSocket provider
+  useEffect(() => {
+    if (!sessionId || !wsToken) return;
+    
+    const initYjs = async () => {
+      try {
+        // Create Yjs document
+        const ydoc = new Y.Doc();
+        yDocRef.current = ydoc;
+        
+        // WebSocket URL for Yjs
+        const wsUrl = `${import.meta.env.VITE_WS_URL || 'ws://localhost:9090'}/yjs/${sessionId}?token=${wsToken}&isStreamer=true&allowViewersToDraw=${allowViewersToDraw}&roomCode=${roomCode}`;
+        
+        // Create WebSocket provider
+        const provider = new WebsocketProvider(
+          wsUrl,
+          sessionId,
+          ydoc,
+          { WebSocketPolyfill: WebSocket }
+        );
+        
+        yProviderRef.current = provider;
+        
+        // Get or create shared whiteboard array
+        const yWhiteboard = ydoc.getArray('whiteboard');
+        yWhiteboardRef.current = yWhiteboard;
+        
+        // Get or create settings map
+        const ySettings = ydoc.getMap('room_settings');
+        ySettingsRef.current = ySettings;
+        
+        // Setup awareness
+        provider.awareness.setLocalState({
+          userId: sessionInfo?.streamerId || 'streamer',
+          userName: sessionInfo?.streamerName || 'Streamer',
+          role: 'STREAMER',
+          isStreamer: true,
+          color: color,
+          tool: tool,
+          cursor: null
+        });
+        
+        // Listen for awareness updates
+        provider.awareness.on('change', () => {
+          const states = Array.from(provider.awareness.getStates().entries());
+          const participantsList = states
+            .map(([clientId, state]) => ({
+              clientId,
+              ...state
+            }))
+            .filter(p => p.userId);
+          
+          setParticipants(participantsList);
+        });
+        
+        // Listen for Yjs sync status
+        provider.on('sync', (isSynced) => {
+          setIsConnected(isSynced);
+          if (isSynced) {
+            loadWhiteboardState();
+          }
+        });
+        
+        // Setup undo manager
+        yUndoManagerRef.current = new Y.UndoManager(yWhiteboard, {
+          captureTimeout: 100,
+          trackedOrigins: new Set([ydoc.clientID])
+        });
+        
+        // Persist to IndexedDB for offline support
+        const indexeddbProvider = new IndexeddbPersistence(
+          `whiteboard-${sessionId}`,
+          ydoc
+        );
+        
+      } catch (error) {
+        console.error('Failed to initialize Yjs:', error);
+        toast.error('Failed to connect to whiteboard server');
+      }
+    };
+    
+    initYjs();
+    
+    return () => {
+      // Cleanup Yjs resources
+      if (yProviderRef.current) {
+        yProviderRef.current.disconnect();
+        yProviderRef.current.destroy();
+      }
+      if (yDocRef.current) {
+        yDocRef.current.destroy();
+      }
+    };
+  }, [sessionId, roomCode, wsToken, allowViewersToDraw]);
+  
+  // Load whiteboard state from Yjs
+  const loadWhiteboardState = useCallback(() => {
+    if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return;
+    
+    try {
+      const state = yWhiteboardRef.current.toArray()[0] || {};
+      
+      // Set background color
+      if (state.background) {
+        setBackgroundColor(state.background);
+      }
+      
+      // Load drawings
+      if (state.objects && Array.isArray(state.objects)) {
+        redrawCanvas(state.objects);
+      }
+      
+    } catch (error) {
+      console.error('Error loading whiteboard state:', error);
+    }
+  }, []);
+  
+  // Initialize canvas
+  useEffect(() => {
+    if (!canvasRef.current || !backgroundCanvasRef.current || !containerRef.current) return;
+    
+    const canvas = canvasRef.current;
+    const bgCanvas = backgroundCanvasRef.current;
+    const container = containerRef.current;
+    
+    const resizeCanvas = () => {
+      const containerWidth = container.clientWidth;
+      const containerHeight = container.clientHeight;
+      
+      canvas.width = containerWidth;
+      canvas.height = containerHeight;
+      bgCanvas.width = containerWidth;
+      bgCanvas.height = containerHeight;
+      
+      // Set contexts
+      const ctx = canvas.getContext('2d');
+      const bgCtx = bgCanvas.getContext('2d');
+      
+      ctxRef.current = ctx;
+      bgCtxRef.current = bgCtx;
+      
+      // Apply initial styles
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      
+      // Redraw after resize
+      if (yWhiteboardRef.current) {
+        const state = yWhiteboardRef.current.toArray()[0] || {};
+        redrawCanvas(state.objects || []);
+      }
+    };
+    
+    resizeCanvas();
+    
+    const resizeObserver = new ResizeObserver(() => {
+      resizeCanvas();
+    });
+    
+    resizeObserver.observe(container);
+    
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, []);
+  
+  // Redraw canvas from objects
+  const redrawCanvas = useCallback((objects) => {
+    if (!ctxRef.current || !bgCtxRef.current) return;
+    
+    const ctx = ctxRef.current;
+    const bgCtx = bgCtxRef.current;
+    const canvas = canvasRef.current;
+    
+    // Clear canvases
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    bgCtx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw background
+    bgCtx.fillStyle = backgroundColor;
+    bgCtx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw grid if visible
+    if (isGridVisible) {
+      drawGrid(bgCtx, canvas.width, canvas.height);
+    }
+    
+    // Apply zoom and pan
+    ctx.save();
+    ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+    ctx.scale(currentZoom, currentZoom);
+    
+    // Draw all objects
+    objects.forEach(obj => {
+      drawObject(ctx, obj);
+    });
+    
+    ctx.restore();
+  }, [backgroundColor, isGridVisible, currentZoom]);
+  
+  // Draw grid
+  const drawGrid = (ctx, width, height) => {
+    ctx.save();
+    ctx.strokeStyle = '#e0e0e0';
+    ctx.lineWidth = 0.5;
+    ctx.globalAlpha = 0.3;
+    
+    const gridSize = 20;
+    
+    // Vertical lines
+    for (let x = 0; x <= width; x += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height);
+      ctx.stroke();
+    }
+    
+    // Horizontal lines
+    for (let y = 0; y <= height; y += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
+      ctx.stroke();
+    }
+    
+    ctx.restore();
+  };
+  
+  // Draw individual object
+  const drawObject = (ctx, obj) => {
+    ctx.save();
+    ctx.strokeStyle = obj.color || '#000000';
+    ctx.fillStyle = obj.fillColor || 'transparent';
+    ctx.lineWidth = (obj.strokeWidth || 2) / currentZoom;
+    ctx.globalAlpha = obj.opacity || 1;
+    
+    switch (obj.type) {
+      case 'pen':
+      case 'pencil':
+        ctx.beginPath();
+        ctx.moveTo(obj.points[0].x, obj.points[0].y);
+        obj.points.forEach(point => {
+          ctx.lineTo(point.x, point.y);
+        });
+        ctx.stroke();
+        break;
+        
+      case 'line':
+        ctx.beginPath();
+        ctx.moveTo(obj.x1, obj.y1);
+        ctx.lineTo(obj.x2, obj.y2);
+        ctx.stroke();
+        break;
+        
+      case 'rectangle':
+        if (obj.fillColor) {
+          ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
+        }
+        ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
+        break;
+        
+      case 'circle':
+        ctx.beginPath();
+        ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
+        if (obj.fillColor) {
+          ctx.fill();
+        }
+        ctx.stroke();
+        break;
+        
+      case 'text':
+        ctx.font = `${obj.fontSize || 16}px Arial`;
+        ctx.fillStyle = obj.color;
+        ctx.fillText(obj.text, obj.x, obj.y);
+        break;
+        
+      case 'eraser':
+        ctx.save();
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.beginPath();
+        ctx.moveTo(obj.points[0].x, obj.points[0].y);
+        obj.points.forEach(point => {
+          ctx.lineTo(point.x, point.y);
+        });
+        ctx.stroke();
+        ctx.restore();
+        break;
+    }
+    
+    ctx.restore();
+  };
+  
+  // Add object to Yjs document
+  const addObject = useCallback((obj) => {
+    if (!yWhiteboardRef.current) return;
+    
+    setIsLocalDrawing(true);
+    
+    try {
+      const currentState = yWhiteboardRef.current.toArray()[0] || {
+        version: '1.0.0',
+        objects: [],
+        background: backgroundColor,
+        createdAt: new Date().toISOString()
+      };
+      
+      const updatedState = {
+        ...currentState,
+        objects: [...(currentState.objects || []), obj],
+        updatedBy: sessionInfo?.streamerId,
+        updatedAt: new Date().toISOString()
+      };
+      
+      // Update Yjs document
+      if (yWhiteboardRef.current.length === 0) {
+        yWhiteboardRef.current.insert(0, [updatedState]);
+      } else {
+        yWhiteboardRef.current.delete(0, 1);
+        yWhiteboardRef.current.insert(0, [updatedState]);
+      }
+      
+    } catch (error) {
+      console.error('Error adding object to Yjs:', error);
+    } finally {
+      setIsLocalDrawing(false);
+    }
+  }, [backgroundColor, sessionInfo]);
+  
+  // Handle mouse events for drawing
+  const handleMouseDown = useCallback((e) => {
+    e.preventDefault();
+    
+    const rect = canvasRef.current.getBoundingClientRect();
+    const scaleX = canvasRef.current.width / rect.width;
+    const scaleY = canvasRef.current.height / rect.height;
+    
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+    
+    // Pan tool (Alt key or middle mouse)
+    if (tool === 'pan' || e.altKey || e.button === 1) {
+      setIsPanning(true);
+      lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+      canvasRef.current.style.cursor = 'grabbing';
+      return;
+    }
+    
+    setIsDrawing(true);
+    
+    const transformedX = (x - canvasOffsetRef.current.x) / currentZoom;
+    const transformedY = (y - canvasOffsetRef.current.y) / currentZoom;
+    
+    lastPointRef.current = { x: transformedX, y: transformedY };
+    
+    // Start drawing based on tool
+    if (tool === 'pen' || tool === 'eraser') {
+      const points = [{ x: transformedX, y: transformedY }];
+      
+      addObject({
+        type: tool,
+        points,
+        color: tool === 'eraser' ? backgroundColor : color,
+        strokeWidth,
+        opacity,
+        timestamp: Date.now()
+      });
+    }
+  }, [tool, color, strokeWidth, opacity, currentZoom, addObject, backgroundColor]);
+  
+  const handleMouseMove = useCallback((e) => {
+    if (isPanning) {
+      // Handle panning
+      const dx = e.clientX - lastPanPointRef.current.x;
+      const dy = e.clientY - lastPanPointRef.current.y;
+      
+      canvasOffsetRef.current.x += dx;
+      canvasOffsetRef.current.y += dy;
+      
+      lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+      
+      // Redraw with new offset
+      if (yWhiteboardRef.current) {
+        const state = yWhiteboardRef.current.toArray()[0] || {};
+        redrawCanvas(state.objects || []);
+      }
+      
+      return;
+    }
+    
+    if (!isDrawing || !yWhiteboardRef.current) return;
+    
+    const rect = canvasRef.current.getBoundingClientRect();
+    const scaleX = canvasRef.current.width / rect.width;
+    const scaleY = canvasRef.current.height / rect.height;
+    
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+    
+    const transformedX = (x - canvasOffsetRef.current.x) / currentZoom;
+    const transformedY = (y - canvasOffsetRef.current.y) / currentZoom;
+    
+    const currentState = yWhiteboardRef.current.toArray()[0] || {};
+    const objects = [...(currentState.objects || [])];
+    const lastObject = objects[objects.length - 1];
+    
+    if (lastObject && (lastObject.type === 'pen' || lastObject.type === 'eraser')) {
+      // Continue drawing
+      lastObject.points.push({ x: transformedX, y: transformedY });
+      
+      const updatedState = {
+        ...currentState,
+        objects,
+        updatedAt: new Date().toISOString()
+      };
+      
+      yWhiteboardRef.current.delete(0, 1);
+      yWhiteboardRef.current.insert(0, [updatedState]);
+      
+      redrawCanvas(objects);
+    }
+  }, [isDrawing, isPanning, redrawCanvas, currentZoom]);
+  
+  const handleMouseUp = useCallback(() => {
+    setIsDrawing(false);
+    setIsPanning(false);
+    canvasRef.current.style.cursor = tool === 'pan' ? 'grab' : 'crosshair';
+  }, [tool]);
+  
+  const handleMouseLeave = useCallback(() => {
+    setIsDrawing(false);
+    setIsPanning(false);
+  }, []);
+  
+  // Handle wheel for zoom
+  const handleWheel = useCallback((e) => {
+    e.preventDefault();
+    
+    const rect = canvasRef.current.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    
+    const scaleFactor = e.deltaY > 0 ? 0.9 : 1.1;
+    const newZoom = Math.max(0.5, Math.min(3, currentZoom * scaleFactor));
+    
+    // Adjust offset to zoom towards mouse position
+    const zoomChange = newZoom / currentZoom;
+    
+    canvasOffsetRef.current.x = mouseX - (mouseX - canvasOffsetRef.current.x) * zoomChange;
+    canvasOffsetRef.current.y = mouseY - (mouseY - canvasOffsetRef.current.y) * zoomChange;
+    
+    setCurrentZoom(newZoom);
+    
+    // Redraw with new zoom
+    if (yWhiteboardRef.current) {
+      const state = yWhiteboardRef.current.toArray()[0] || {};
+      redrawCanvas(state.objects || []);
+    }
+  }, [currentZoom, redrawCanvas]);
+  
+  // Zoom controls
+  const handleZoomIn = useCallback(() => {
+    setCurrentZoom(prev => Math.min(prev + 0.1, 3));
+    if (yWhiteboardRef.current) {
+      const state = yWhiteboardRef.current.toArray()[0] || {};
+      redrawCanvas(state.objects || []);
+    }
+  }, [redrawCanvas]);
+  
+  const handleZoomOut = useCallback(() => {
+    setCurrentZoom(prev => Math.max(prev - 0.1, 0.5));
+    if (yWhiteboardRef.current) {
+      const state = yWhiteboardRef.current.toArray()[0] || {};
+      redrawCanvas(state.objects || []);
+    }
+  }, [redrawCanvas]);
+  
+  const handleZoomReset = useCallback(() => {
+    setCurrentZoom(1);
+    canvasOffsetRef.current = { x: 0, y: 0 };
+    
+    if (yWhiteboardRef.current) {
+      const state = yWhiteboardRef.current.toArray()[0] || {};
+      redrawCanvas(state.objects || []);
+    }
+  }, [redrawCanvas]);
+  
+  // Clear whiteboard
+  const handleClearWhiteboard = useCallback(() => {
+    if (window.confirm('Clear entire whiteboard?')) {
+      const emptyState = {
+        version: '1.0.0',
+        objects: [],
+        background: backgroundColor,
+        clearedAt: new Date().toISOString(),
+        clearedBy: sessionInfo?.streamerId
+      };
+      
+      yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
+      yWhiteboardRef.current.insert(0, [emptyState]);
+      
+      redrawCanvas([]);
+      toast.success('Whiteboard cleared');
+    }
+  }, [backgroundColor, sessionInfo, redrawCanvas]);
+  
+  // Export as image
+  const handleExport = useCallback(() => {
+    const canvas = canvasRef.current;
+    const bgCanvas = backgroundCanvasRef.current;
+    
+    // Create a combined canvas
+    const exportCanvas = document.createElement('canvas');
+    exportCanvas.width = canvas.width;
+    exportCanvas.height = canvas.height;
+    
+    const exportCtx = exportCanvas.getContext('2d');
+    
+    // Draw background
+    exportCtx.drawImage(bgCanvas, 0, 0);
+    
+    // Draw drawings
+    exportCtx.drawImage(canvas, 0, 0);
+    
+    // Download
+    const link = document.createElement('a');
+    link.download = `whiteboard-${sessionId}-${Date.now()}.png`;
+    link.href = exportCanvas.toDataURL('image/png');
+    link.click();
+    
+    toast.success('Whiteboard exported');
+  }, [sessionId]);
+  
+  // Undo/Redo
+  const handleUndo = useCallback(() => {
+    if (yUndoManagerRef.current) {
+      yUndoManagerRef.current.undo();
+    }
+  }, []);
+  
+  const handleRedo = useCallback(() => {
+    if (yUndoManagerRef.current) {
+      yUndoManagerRef.current.redo();
+    }
+  }, []);
+  
+  return (
+    <div 
+      ref={containerRef}
+      className="relative w-full h-full bg-gray-900 overflow-hidden"
+      onWheel={handleWheel}
+    >
+      {/* Background canvas */}
+      <canvas
+        ref={backgroundCanvasRef}
+        className="absolute top-0 left-0 w-full h-full"
+        style={{ pointerEvents: 'none' }}
+      />
+      
+      {/* Main drawing canvas */}
+      <canvas
+        ref={canvasRef}
+        className={`absolute top-0 left-0 w-full h-full ${
+          tool === 'pan' ? 'cursor-grab' : 'cursor-crosshair'
+        }`}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseLeave}
+        onContextMenu={(e) => e.preventDefault()}
+      />
+      
+      {/* Floating Controls - Always Visible */}
+      <div className="absolute top-2 left-1/2 transform -translate-x-1/2 z-10">
+        <div className="bg-gray-800/95 backdrop-blur-sm rounded-lg shadow-lg border border-gray-700 p-2 flex items-center space-x-2">
+          {/* Connection status */}
+          <div className={`w-2 h-2 rounded-full ${
+            isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'
+          }`} />
+          <span className="text-white text-xs mr-2">
+            {isConnected ? 'Connected' : 'Disconnected'}
+          </span>
+          
+          {/* Divider */}
+          <div className="w-px h-6 bg-gray-600"></div>
+          
+          {/* Drawing tools */}
+          <div className="flex items-center space-x-1">
+            <button
+              onClick={() => setTool('pen')}
+              className={`p-1.5 rounded-lg transition-colors ${
+                tool === 'pen' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+              }`}
+              title="Pen"
+            >
+              <FaPaintBrush className="w-4 h-4" />
+            </button>
+            
+            <button
+              onClick={() => setTool('eraser')}
+              className={`p-1.5 rounded-lg transition-colors ${
+                tool === 'eraser' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+              }`}
+              title="Eraser"
+            >
+              <FaEraser className="w-4 h-4" />
+            </button>
+            
+            <button
+              onClick={() => setTool('line')}
+              className={`p-1.5 rounded-lg transition-colors ${
+                tool === 'line' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+              }`}
+              title="Line"
+            >
+              <FiMinus className="w-4 h-4" />
+            </button>
+            
+            <button
+              onClick={() => setTool('rectangle')}
+              className={`p-1.5 rounded-lg transition-colors ${
+                tool === 'rectangle' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+              }`}
+              title="Rectangle"
+            >
+              <FiSquare className="w-4 h-4" />
+            </button>
+            
+            <button
+              onClick={() => setTool('circle')}
+              className={`p-1.5 rounded-lg transition-colors ${
+                tool === 'circle' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+              }`}
+              title="Circle"
+            >
+              <FiCircle className="w-4 h-4" />
+            </button>
+            
+            <button
+              onClick={() => setTool('pan')}
+              className={`p-1.5 rounded-lg transition-colors ${
+                tool === 'pan' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+              }`}
+              title="Pan (Alt + Drag)"
+            >
+              <FiMove className="w-4 h-4" />
+            </button>
+          </div>
+          
+          {/* Divider */}
+          <div className="w-px h-6 bg-gray-600"></div>
+          
+          {/* Color picker */}
+          <input
+            type="color"
+            value={color}
+            onChange={(e) => setColor(e.target.value)}
+            className="w-7 h-7 rounded cursor-pointer border border-gray-600"
+            title="Color"
+          />
+          
+          <select
+            value={strokeWidth}
+            onChange={(e) => setStrokeWidth(Number(e.target.value))}
+            className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
+            title="Stroke Width"
+          >
+            <option value="1">1px</option>
+            <option value="2">2px</option>
+            <option value="3">3px</option>
+            <option value="5">5px</option>
+            <option value="8">8px</option>
+          </select>
+          
+          <select
+            value={opacity}
+            onChange={(e) => setOpacity(Number(e.target.value))}
+            className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
+            title="Opacity"
+          >
+            <option value="1">100%</option>
+            <option value="0.8">80%</option>
+            <option value="0.6">60%</option>
+            <option value="0.4">40%</option>
+          </select>
+          
+          {/* Divider */}
+          <div className="w-px h-6 bg-gray-600"></div>
+          
+          {/* Zoom controls */}
+          <button
+            onClick={handleZoomOut}
+            className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+            title="Zoom Out"
+          >
+            <FiMinusCircle className="w-4 h-4 text-white" />
+          </button>
+          <span className="text-white text-sm min-w-[50px] text-center font-medium">
+            {Math.round(currentZoom * 100)}%
+          </span>
+          <button
+            onClick={handleZoomIn}
+            className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+            title="Zoom In"
+          >
+            <FiPlus className="w-4 h-4 text-white" />
+          </button>
+          <button
+            onClick={handleZoomReset}
+            className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+            title="Reset Zoom"
+          >
+            <FiRefreshCcw className="w-4 h-4 text-white" />
+          </button>
+          
+          {/* Divider */}
+          <div className="w-px h-6 bg-gray-600"></div>
+          
+          {/* Undo/Redo */}
+          <button
+            onClick={handleUndo}
+            className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+            title="Undo"
+          >
+            <FiRefreshCcw className="w-4 h-4 text-white" />
+          </button>
+          <button
+            onClick={handleRedo}
+            className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+            title="Redo"
+          >
+            <FiRefreshCcw className="w-4 h-4 text-white transform scale-x-[-1]" />
+          </button>
+          
+          {/* Clear/Export */}
+          <button
+            onClick={handleClearWhiteboard}
+            className="p-1.5 bg-red-900 hover:bg-red-800 rounded-lg transition-colors"
+            title="Clear Whiteboard"
+          >
+            <FiTrash2 className="w-4 h-4 text-white" />
+          </button>
+          <button
+            onClick={handleExport}
+            className="p-1.5 bg-blue-900 hover:bg-blue-800 rounded-lg transition-colors"
+            title="Export as PNG"
+          >
+            <FiDownload className="w-4 h-4 text-white" />
+          </button>
+          
+          {/* Grid toggle */}
+          <button
+            onClick={() => setIsGridVisible(!isGridVisible)}
+            className={`p-1.5 rounded-lg transition-colors ${
+              isGridVisible ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+            }`}
+            title="Toggle Grid"
+          >
+            <FiSquare className="w-4 h-4" />
+          </button>
+          
+          {/* Divider */}
+          <div className="w-px h-6 bg-gray-600"></div>
+          
+          {/* Close button */}
+          <button
+            onClick={onClose}
+            className="p-1.5 bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+            title="Close Whiteboard"
+          >
+            <FiX className="w-4 h-4 text-white" />
+          </button>
+        </div>
+      </div>
+      
+      {/* Bottom Info Bar */}
+      <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
+        <div className="flex items-center space-x-3">
+          <span>Tool: <span className="font-bold capitalize">{tool}</span></span>
+          <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+          <span>Zoom: <span className="font-bold">{Math.round(currentZoom * 100)}%</span></span>
+          <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+          <span>Viewers: <span className="font-bold">{participants.length}</span></span>
+          <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+          <span>Alt+Click to pan</span>
+        </div>
+      </div>
+      
+      {/* Viewers count in top right */}
+      <div className="absolute top-2 right-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
+        <div className="flex items-center space-x-2">
+          <span>{participants.length} active {participants.length === 1 ? 'viewer' : 'viewers'}</span>
+          {participants.map((p, i) => (
+            <div
+              key={p.clientId}
+              className="w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-medium"
+              title={`${p.userName || 'User'}`}
+            >
+              {p.userName?.charAt(0) || 'U'}
+            </div>
+          ))}
+        </div>
+      </div>
+      
+      {/* Panning indicator */}
+      {isPanning && (
+        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/70 text-white px-4 py-2 rounded-lg backdrop-blur-sm border border-gray-600">
+          <div className="flex items-center space-x-2">
+            <FiMove className="w-4 h-4" />
+            <span>Panning...</span>
+          </div>
+        </div>
+      )}
+      
+      {/* Drawing disabled overlay */}
+      {!allowViewersToDraw && (
+        <div className="absolute bottom-2 right-2 bg-yellow-900/70 text-yellow-200 px-3 py-1.5 rounded-lg text-xs backdrop-blur-sm border border-yellow-600/30">
+          Viewers cannot draw
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default StreamerWhiteboard;
+
+
+
+// import React, { useState, useEffect, useRef, useCallback } from 'react';
 // import * as Y from 'yjs';
 // import { WebsocketProvider } from 'y-websocket';
-// import { useAuth } from '../../../contexts/AuthContext';
+// import { IndexeddbPersistence } from 'y-indexeddb';
+// import * as awarenessProtocol from 'y-protocols/awareness';
+
+// // Drawing tools
 // import { 
-//   FiSquare, FiCircle, FiType, FiPenTool, FiEdit3, FiMousePointer, FiTrash2, 
-//   FiDownload, FiUpload, FiSave, FiZoomIn, FiZoomOut, FiMaximize2,
-//   FiMinimize2, FiImage, FiStar, FiHexagon, FiTriangle, FiMinus, FiArrowRight,
-//   FiX, FiPlay, FiPause, FiRefreshCw, FiAlertCircle
+//   FiPenTool, 
+//   FiSquare, 
+//   FiCircle, 
+//   FiMinus, 
+//   FiType, 
+//   FiDelete,
+//   FiDownload,
+//   FiRefreshCcw,
+//   FiTrash2,
+//   FiMousePointer,
+//   FiMove,
+//   FiPlus,
+//   FiMinusCircle
 // } from 'react-icons/fi';
-// import { FaRedo, FaUndo } from "react-icons/fa";
-// import { BsBrush, BsEraser } from 'react-icons/bs';
-// import { LuStickyNote } from 'react-icons/lu';
+// import { FaEraser, FaPaintBrush, FaFillDrip } from 'react-icons/fa';
+// import { toast } from 'react-toastify';
 
-// // ✅ DEBUG LOG
-// console.log('⚡⚡⚡ WHITEBOARD COMPONENT LOADED ⚡⚡⚡');
-
-// const WhiteboardComponent = ({ sessionId, roomCode, socket, isActive, onClose }) => {
-//   console.log('🎨 WhiteboardComponent RENDERING:', { 
-//     isActive, 
-//     sessionId, 
-//     roomCode,
-//     socketAvailable: !!socket
-//   });
-
-//   const { user } = useAuth();
+// const StreamerWhiteboard = ({
+//   sessionId,
+//   roomCode,
+//   wsToken,
+//   sessionInfo,
+//   isActive,
+//   onClose,
+//   allowViewersToDraw = true,
+//   mainScreenMode = false,
+//   compact = false
+// }) => {
+//   // Canvas refs
 //   const canvasRef = useRef(null);
-//   const fabricCanvasRef = useRef(null);
-//   const containerRef = useRef(null);
-//   const ydocRef = useRef(null);
-//   const providerRef = useRef(null);
+//   const backgroundCanvasRef = useRef(null);
+//   const ctxRef = useRef(null);
+//   const bgCtxRef = useRef(null);
   
-//   const [tool, setTool] = useState('select');
-//   const [brushWidth, setBrushWidth] = useState(5);
-//   const [brushColor, setBrushColor] = useState('#000000');
-//   const [fillColor, setFillColor] = useState('#ffffff');
+//   // Yjs refs
+//   const yDocRef = useRef(null);
+//   const yProviderRef = useRef(null);
+//   const yWhiteboardRef = useRef(null);
+//   const ySettingsRef = useRef(null);
+//   const yUndoManagerRef = useRef(null);
+  
+//   // State
+//   const [isDrawing, setIsDrawing] = useState(false);
+//   const [tool, setTool] = useState('pen'); // pen, eraser, rectangle, circle, line, text
+//   const [color, setColor] = useState('#000000');
+//   const [strokeWidth, setStrokeWidth] = useState(2);
 //   const [opacity, setOpacity] = useState(1);
-//   const [fontSize, setFontSize] = useState(20);
-//   const [fontFamily, setFontFamily] = useState('Arial');
-//   const [zoom, setZoom] = useState(1);
+//   const [currentZoom, setCurrentZoom] = useState(1);
+//   const [canvasDimensions, setCanvasDimensions] = useState({ width: 0, height: 0 });
+//   const [isConnected, setIsConnected] = useState(false);
+//   const [participants, setParticipants] = useState([]);
+//   const [isLocalDrawing, setIsLocalDrawing] = useState(false);
 //   const [history, setHistory] = useState([]);
 //   const [historyIndex, setHistoryIndex] = useState(-1);
-//   const [showGrid, setShowGrid] = useState(false);
-//   const [cursorPosition, setCursorPosition] = useState({ x: 0, y: 0 });
-//   const [connectionStatus, setConnectionStatus] = useState('disconnected');
-//   const [stickyNoteColor, setStickyNoteColor] = useState('#ffff88');
-//   const [showDebug, setShowDebug] = useState(true);
-//   const [connectionAttempt, setConnectionAttempt] = useState(0);
-//   const [connectionLogs, setConnectionLogs] = useState([]);
+//   const [backgroundColor, setBackgroundColor] = useState('#ffffff');
+//   const [isGridVisible, setIsGridVisible] = useState(false);
   
-//   const tools = [
-//     { id: 'select', name: 'Select', icon: <FiMousePointer /> },
-//     { id: 'draw', name: 'Draw', icon: <FiPenTool /> },
-//     { id: 'line', name: 'Line', icon: <FiMinus /> },
-//     { id: 'arrow', name: 'Arrow', icon: <FiArrowRight /> },
-//     { id: 'rectangle', name: 'Rectangle', icon: <FiSquare /> },
-//     { id: 'circle', name: 'Circle', icon: <FiCircle /> },
-//     { id: 'triangle', name: 'Triangle', icon: <FiTriangle /> },
-//     { id: 'star', name: 'Star', icon: <FiStar /> },
-//     { id: 'hexagon', name: 'Hexagon', icon: <FiHexagon /> },
-//     { id: 'text', name: 'Text', icon: <FiType /> },
-//     { id: 'sticky', name: 'Sticky Note', icon: <LuStickyNote /> },
-//     { id: 'image', name: 'Image', icon: <FiImage /> },
-//     { id: 'eraser', name: 'Eraser', icon: <BsEraser /> },
-//   ];
-
-//   const colors = [
-//     '#000000', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF',
-//     '#FFA500', '#800080', '#008000', '#800000', '#008080', '#000080', '#808080'
-//   ];
-
-//   const brushSizes = [1, 2, 3, 5, 8, 10, 15, 20, 30];
-
-//   // ✅ Add connection log
-//   const addConnectionLog = (message) => {
-//     console.log('📝 Connection Log:', message);
-//     setConnectionLogs(prev => [...prev.slice(-20), {
-//       timestamp: new Date().toLocaleTimeString(),
-//       message
-//     }]);
-//   };
-
-//   // ✅ Direct WebSocket Test
-//   const testWebSocketConnection = () => {
-//     console.log('🧪 Testing WebSocket connection...');
-//     addConnectionLog('Testing WebSocket connection...');
-    
-//     const testUrls = [
-//       'ws://localhost:9090/yjs',
-//       'ws://127.0.0.1:9090/yjs',
-//       `ws://${window.location.hostname}:9090/yjs`,
-//       'ws://localhost:9090/yjs?room=test',
-//       'ws://localhost:9090'
-//     ];
-    
-//     testUrls.forEach((url, index) => {
-//       console.log(`Test ${index + 1}: ${url}`);
-//       addConnectionLog(`Testing: ${url}`);
-      
-//       const testWs = new WebSocket(url);
-      
-//       testWs.onopen = () => {
-//         console.log(`✅ CONNECTED to: ${url}`);
-//         addConnectionLog(`✅ Connected to: ${url}`);
-        
-//         testWs.send(JSON.stringify({ 
-//           type: 'test', 
-//           message: 'Whiteboard connection test',
-//           timestamp: new Date().toISOString()
-//         }));
-        
-//         setTimeout(() => testWs.close(), 1000);
-//       };
-      
-//       testWs.onerror = (error) => {
-//         console.log(`❌ FAILED: ${url}`);
-//         addConnectionLog(`❌ Failed: ${url}`);
-//       };
-      
-//       testWs.onmessage = (event) => {
-//         console.log(`📨 Response from ${url}:`, event.data);
-//         addConnectionLog(`Response from ${url}: ${event.data}`);
-//       };
-      
-//       testWs.onclose = () => {
-//         console.log(`🔌 Closed: ${url}`);
-//       };
-//     });
-//   };
-
-//   // ✅ Initialize Collaboration - SIMPLIFIED
-//   // const initCollaboration = useCallback(() => {
-//   //   console.log('🔗 initCollaboration called! Attempt:', connectionAttempt + 1);
-//   //   addConnectionLog(`Initializing collaboration (Attempt ${connectionAttempt + 1})`);
-    
-//   //   setConnectionAttempt(prev => prev + 1);
-    
-//   //   try {
-//   //     // Create Yjs document
-//   //     const ydoc = new Y.Doc();
-//   //     ydocRef.current = ydoc;
-//   //     console.log('✅ Yjs document created');
-//   //     addConnectionLog('Yjs document created');
-      
-//   //     // WebSocket URL
-//   //     const wsUrl = 'ws://localhost:9090/yjs';
-//   //     console.log('🔌 Connecting to:', wsUrl);
-//   //     addConnectionLog(`Connecting to: ${wsUrl}`);
-      
-//   //     // Room name
-//   //     const roomName = `whiteboard-${sessionId || roomCode || 'default'}`;
-//   //     console.log('📝 Room:', roomName);
-//   //     addConnectionLog(`Room: ${roomName}`);
-      
-//   //     // Create WebSocket Provider
-//   //     const provider = new WebsocketProvider(
-//   //       wsUrl,
-//   //       roomName,
-//   //       ydoc,
-//   //       {
-//   //         connect: true,
-//   //         WebSocketPolyfill: WebSocket,
-//   //         disableBc: true,
-//   //         awareness: true
-//   //       }
-//   //     );
-      
-//   //     providerRef.current = provider;
-      
-//   //     // Connection Status
-//   //     provider.on('status', (event) => {
-//   //       console.log('📡 Yjs Status:', event.status);
-//   //       addConnectionLog(`Yjs Status: ${event.status}`);
-//   //       setConnectionStatus(event.status);
-        
-//   //       if (event.status === 'connected') {
-//   //         console.log('🎉🎉🎉 YJS CONNECTED SUCCESSFULLY! 🎉🎉🎉');
-//   //         addConnectionLog('✅ Yjs Connected Successfully!');
-          
-//   //         // Setup Yjs array
-//   //         const yCanvasArray = ydoc.getArray('canvas');
-          
-//   //         // Load initial canvas state if exists
-//   //         if (yCanvasArray.length > 0 && fabricCanvasRef.current) {
-//   //           try {
-//   //             const canvasState = yCanvasArray.toJSON();
-//   //             console.log('📥 Loading initial canvas from Yjs');
-//   //             addConnectionLog('Loading initial canvas from Yjs');
-              
-//   //             fabricCanvasRef.current.loadFromJSON(canvasState, () => {
-//   //               fabricCanvasRef.current.renderAll();
-//   //               console.log('✅ Canvas loaded from Yjs');
-//   //               addConnectionLog('Canvas loaded from Yjs');
-//   //             });
-//   //           } catch (error) {
-//   //             console.error('Error loading canvas from Yjs:', error);
-//   //             addConnectionLog(`Error loading canvas: ${error.message}`);
-//   //           }
-//   //         }
-          
-//   //         // Listen for remote changes
-//   //         yCanvasArray.observe(event => {
-//   //           if (!fabricCanvasRef.current) return;
-            
-//   //           // Skip local changes
-//   //           if (event.transaction.origin === ydoc.clientID) {
-//   //             console.log('📤 Local change, skipping');
-//   //             return;
-//   //           }
-            
-//   //           console.log('🔄 Remote change received');
-//   //           addConnectionLog('Remote change received');
-            
-//   //           try {
-//   //             const canvasState = yCanvasArray.toJSON();
-//   //             fabricCanvasRef.current.loadFromJSON(canvasState, () => {
-//   //               fabricCanvasRef.current.renderAll();
-//   //               console.log('✅ Canvas updated from remote');
-//   //             });
-//   //           } catch (error) {
-//   //             console.error('Error updating canvas:', error);
-//   //             addConnectionLog(`Error updating canvas: ${error.message}`);
-//   //           }
-//   //         });
-//   //       }
-//   //     });
-      
-//   //     // Handle connection errors
-//   //     provider.on('connection-error', (error) => {
-//   //       console.error('❌ Yjs Connection Error:', error);
-//   //       addConnectionLog(`Connection Error: ${error.message || error}`);
-//   //       setConnectionStatus('error');
-        
-//   //       // Retry after 3 seconds
-//   //       setTimeout(() => {
-//   //         console.log('🔄 Retrying connection...');
-//   //         addConnectionLog('Retrying connection...');
-//   //         initCollaboration();
-//   //       }, 3000);
-//   //     });
-      
-//   //     // Handle synced event
-//   //     provider.on('synced', (isSynced) => {
-//   //       console.log('🔄 Yjs Synced:', isSynced);
-//   //       addConnectionLog(`Yjs Synced: ${isSynced}`);
-//   //     });
-      
-//   //     console.log('✅ Yjs provider created');
-//   //     addConnectionLog('Yjs provider created');
-      
-//   //   } catch (error) {
-//   //     console.error('❌ Error in collaboration setup:', error);
-//   //     addConnectionLog(`Setup Error: ${error.message}`);
-//   //   }
-//   // }, [sessionId, roomCode, connectionAttempt]);
-
-
-// // WhiteboardComponent.js में initCollaboration function update करें
-// // const initCollaboration = useCallback(() => {
-// //   console.log('🔗 initCollaboration called! Attempt:', connectionAttempt + 1);
-// //   addConnectionLog(`Initializing collaboration (Attempt ${connectionAttempt + 1})`);
+//   // Canvas state
+//   const lastPointRef = useRef({ x: 0, y: 0 });
+//   const isPanningRef = useRef(false);
+//   const panStartRef = useRef({ x: 0, y: 0 });
+//   const canvasOffsetRef = useRef({ x: 0, y: 0 });
   
-// //   setConnectionAttempt(prev => prev + 1);
-  
-// //   try {
-// //     // Create Yjs document
-// //     const ydoc = new Y.Doc();
-// //     ydocRef.current = ydoc;
-// //     console.log('✅ Yjs document created');
-// //     addConnectionLog('Yjs document created');
+//   // Initialize Yjs document and WebSocket provider
+//   useEffect(() => {
+//     if (!sessionId || !wsToken) return;
     
-// //     // WebSocket URL
-// //     const wsUrl = 'ws://localhost:9090/yjs';
-// //     console.log('🔌 Connecting to:', wsUrl);
-// //     addConnectionLog(`Connecting to: ${wsUrl}`);
-    
-// //     // Room name
-// //     const roomName = `whiteboard-${sessionId || roomCode || 'default'}`;
-// //     console.log('📝 Room:', roomName);
-// //     addConnectionLog(`Room: ${roomName}`);
-    
-// //     // ✅ FIX: Simple WebSocketProvider without extra options
-// //     const provider = new WebsocketProvider(
-// //       wsUrl,
-// //       roomName,
-// //       ydoc
-// //       // ❌ NO extra options - यही error दे रहा था
-// //     );
-    
-// //     providerRef.current = provider;
-    
-// //     // ✅ CORRECT way to listen to status
-// //     provider.on('status', (event) => {
-// //       console.log('📡 Yjs Status:', event);
-// //       addConnectionLog(`Yjs Status: ${event.status}`);
-// //       setConnectionStatus(event.status);
-      
-// //       if (event.status === 'connected') {
-// //         console.log('🎉🎉🎉 YJS CONNECTED SUCCESSFULLY! 🎉🎉🎉');
-// //         addConnectionLog('✅ Yjs Connected Successfully!');
+//     const initYjs = async () => {
+//       try {
+//         // Create Yjs document
+//         const ydoc = new Y.Doc();
+//         yDocRef.current = ydoc;
         
-// //         // Setup Yjs array
-// //         const yCanvasArray = ydoc.getArray('canvas');
+//         // WebSocket URL for Yjs
+//         const wsUrl = `${import.meta.env.VITE_WS_URL || 'ws://localhost:9090'}/yjs/${sessionId}?token=${wsToken}&isStreamer=true&allowViewersToDraw=${allowViewersToDraw}&roomCode=${roomCode}`;
         
-// //         // Load initial canvas state if exists
-// //         if (yCanvasArray.length > 0 && fabricCanvasRef.current) {
-// //           try {
-// //             const canvasState = yCanvasArray.toJSON();
-// //             console.log('📥 Loading initial canvas from Yjs');
-// //             addConnectionLog('Loading initial canvas from Yjs');
-            
-// //             fabricCanvasRef.current.loadFromJSON(canvasState, () => {
-// //               fabricCanvasRef.current.renderAll();
-// //               console.log('✅ Canvas loaded from Yjs');
-// //               addConnectionLog('Canvas loaded from Yjs');
-// //             });
-// //           } catch (error) {
-// //             console.error('Error loading canvas from Yjs:', error);
-// //             addConnectionLog(`Error loading canvas: ${error.message}`);
-// //           }
-// //         }
+//         // Create WebSocket provider
+//         const provider = new WebsocketProvider(
+//           wsUrl,
+//           sessionId,
+//           ydoc,
+//           { WebSocketPolyfill: WebSocket }
+//         );
         
-// //         // Listen for remote changes
-// //         yCanvasArray.observe(event => {
-// //           if (!fabricCanvasRef.current) return;
-          
-// //           // Skip local changes
-// //           if (event.transaction.origin === ydoc.clientID) {
-// //             console.log('📤 Local change, skipping');
-// //             return;
-// //           }
-          
-// //           console.log('🔄 Remote change received');
-// //           addConnectionLog('Remote change received');
-          
-// //           try {
-// //             const canvasState = yCanvasArray.toJSON();
-// //             fabricCanvasRef.current.loadFromJSON(canvasState, () => {
-// //               fabricCanvasRef.current.renderAll();
-// //               console.log('✅ Canvas updated from remote');
-// //             });
-// //           } catch (error) {
-// //             console.error('Error updating canvas:', error);
-// //             addConnectionLog(`Error updating canvas: ${error.message}`);
-// //           }
-// //         });
-// //       }
-// //     });
-    
-// //     // Handle synced event
-// //     provider.on('synced', (isSynced) => {
-// //       console.log('🔄 Yjs Synced:', isSynced);
-// //       addConnectionLog(`Yjs Synced: ${isSynced}`);
-// //     });
-    
-// //     // ✅ Handle connection errors differently
-// //     provider.ws.addEventListener('error', (error) => {
-// //       console.error('❌ WebSocket Error:', error);
-// //       addConnectionLog(`WebSocket Error: ${error.message}`);
-// //       setConnectionStatus('error');
-// //     });
-    
-// //     provider.ws.addEventListener('close', () => {
-// //       console.log('🔌 WebSocket closed');
-// //       addConnectionLog('WebSocket closed');
-// //       setConnectionStatus('disconnected');
-// //     });
-    
-// //     console.log('✅ Yjs provider created');
-// //     addConnectionLog('Yjs provider created');
-    
-// //   } catch (error) {
-// //     console.error('❌ Error in collaboration setup:', error);
-// //     addConnectionLog(`Setup Error: ${error.message}`);
-// //   }
-// // }, [sessionId, roomCode, connectionAttempt]);
-
-
-// // WhiteboardComponent.js में initCollaboration function
-// const initCollaboration = useCallback(() => {
-//   console.log('🔗 Starting Yjs collaboration...');
-//   addConnectionLog('Starting Yjs collaboration');
-  
-//   try {
-//     // Create Yjs document
-//     const ydoc = new Y.Doc();
-//     ydocRef.current = ydoc;
-    
-//     // ✅ FIXED URL - NO ROOM PARAMETER NEEDED
-//     const wsUrl = 'ws://localhost:9090/yjs';
-//     console.log('🔌 Connecting to:', wsUrl);
-//     addConnectionLog(`Connecting to: ${wsUrl}`);
-    
-//     // ✅ FIXED ROOM NAME
-//     const roomName = 'collaborative-whiteboard';
-//     console.log('🎯 Room:', roomName);
-//     addConnectionLog(`Room: ${roomName}`);
-    
-//     // Create WebSocket Provider with fixed room
-//     const provider = new WebsocketProvider(
-//       wsUrl,
-//       roomName, // Fixed room name
-//       ydoc
-//     );
-    
-//     providerRef.current = provider;
-    
-//     // Connection status
-//     provider.on('status', (event) => {
-//       console.log('📡 Yjs Status:', event.status);
-//       addConnectionLog(`Status: ${event.status}`);
-//       setConnectionStatus(event.status);
-      
-//       if (event.status === 'connected') {
-//         console.log('✅✅✅ YJS CONNECTED!');
-//         addConnectionLog('✅ Connected successfully');
+//         yProviderRef.current = provider;
         
-//         // Setup Yjs array for canvas
-//         const yCanvasArray = ydoc.getArray('canvas');
+//         // Get or create shared whiteboard array
+//         const yWhiteboard = ydoc.getArray('whiteboard');
+//         yWhiteboardRef.current = yWhiteboard;
         
-//         // Load existing canvas data if any
-//         if (yCanvasArray.length > 0 && fabricCanvasRef.current) {
-//           try {
-//             const canvasState = yCanvasArray.toJSON();
-//             console.log('📥 Loading existing canvas data');
-//             addConnectionLog('Loading existing canvas');
-            
-//             fabricCanvasRef.current.loadFromJSON(canvasState, () => {
-//               fabricCanvasRef.current.renderAll();
-//               console.log('✅ Canvas loaded from Yjs');
-//               addConnectionLog('Canvas loaded');
-//             });
-//           } catch (error) {
-//             console.error('Error loading canvas:', error);
-//             addConnectionLog(`Load error: ${error.message}`);
-//           }
-//         }
+//         // Get or create settings map
+//         const ySettings = ydoc.getMap('room_settings');
+//         ySettingsRef.current = ySettings;
         
-//         // Listen for remote changes
-//         yCanvasArray.observe(event => {
-//           if (!fabricCanvasRef.current) return;
+//         // Setup awareness
+//         provider.awareness.setLocalState({
+//           userId: sessionInfo?.streamerId || 'streamer',
+//           userName: sessionInfo?.streamerName || 'Streamer',
+//           role: 'STREAMER',
+//           isStreamer: true,
+//           color: color,
+//           tool: tool,
+//           cursor: null
+//         });
+        
+//         // Listen for awareness updates
+//         provider.awareness.on('change', () => {
+//           const states = Array.from(provider.awareness.getStates().entries());
+//           const participantsList = states
+//             .map(([clientId, state]) => ({
+//               clientId,
+//               ...state
+//             }))
+//             .filter(p => p.userId);
           
-//           // Skip local changes
-//           if (event.transaction.origin === ydoc.clientID) {
-//             console.log('📤 Local change (skipping sync)');
-//             return;
-//           }
-          
-//           console.log('🔄 Remote change detected');
-//           addConnectionLog('Remote change received');
-          
-//           try {
-//             const canvasState = yCanvasArray.toJSON();
-//             fabricCanvasRef.current.loadFromJSON(canvasState, () => {
-//               fabricCanvasRef.current.renderAll();
-//               console.log('✅ Canvas updated from remote');
-//             });
-//           } catch (error) {
-//             console.error('Error updating canvas:', error);
-//             addConnectionLog(`Update error: ${error.message}`);
+//           setParticipants(participantsList);
+//         });
+        
+//         // Listen for Yjs sync status
+//         provider.on('sync', (isSynced) => {
+//           setIsConnected(isSynced);
+//           if (isSynced) {
+//             loadWhiteboardState();
 //           }
 //         });
+        
+//         // Setup undo manager
+//         yUndoManagerRef.current = new Y.UndoManager(yWhiteboard, {
+//           captureTimeout: 100,
+//           trackedOrigins: new Set([ydoc.clientID])
+//         });
+        
+//         // Persist to IndexedDB for offline support
+//         const indexeddbProvider = new IndexeddbPersistence(
+//           `whiteboard-${sessionId}`,
+//           ydoc
+//         );
+        
+//       } catch (error) {
+//         console.error('Failed to initialize Yjs:', error);
+//         toast.error('Failed to connect to whiteboard server');
 //       }
-//     });
-    
-//     // Handle sync events
-//     provider.on('sync', (isSynced) => {
-//       console.log('🔄 Yjs Sync:', isSynced);
-//       addConnectionLog(`Sync: ${isSynced}`);
-//     });
-    
-//     console.log('🎯 Yjs provider created');
-//     addConnectionLog('Provider created');
-    
-//   } catch (error) {
-//     console.error('❌ Collaboration error:', error);
-//     addConnectionLog(`Error: ${error.message}`);
-//   }
-// }, []); // ✅ No dependencies needed for fixed room
-
-// // Frontend WhiteboardComponent.js में
-// const syncCanvasToYjs = useCallback(() => {
-//   if (!fabricCanvasRef.current || !providerRef.current) {
-//     console.log('❌ Cannot sync: Canvas or provider not ready');
-//     return;
-//   }
-  
-//   try {
-//     console.log('📤 Syncing canvas to WebSocket...');
-    
-//     const canvas = fabricCanvasRef.current;
-//     const canvasState = canvas.toJSON();
-    
-//     // ✅ FIX: Send as JSON instead of Yjs binary
-//     const message = {
-//       type: 'canvas-update',
-//       data: canvasState,
-//       timestamp: Date.now(),
-//       userId: user?.id || 'anonymous'
 //     };
     
-//     // Send via WebSocket directly
-//     if (providerRef.current.ws && providerRef.current.ws.readyState === 1) {
-//       providerRef.current.ws.send(JSON.stringify(message));
-//       console.log('✅ Canvas sent via WebSocket');
-//     } else {
-//       console.log('❌ WebSocket not ready');
+//     initYjs();
+    
+//     return () => {
+//       // Cleanup Yjs resources
+//       if (yProviderRef.current) {
+//         yProviderRef.current.disconnect();
+//         yProviderRef.current.destroy();
+//       }
+//       if (yDocRef.current) {
+//         yDocRef.current.destroy();
+//       }
+//     };
+//   }, [sessionId, roomCode, wsToken, allowViewersToDraw]);
+  
+//   // Load whiteboard state from Yjs
+//   const loadWhiteboardState = useCallback(() => {
+//     if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return;
+    
+//     try {
+//       const state = yWhiteboardRef.current.toArray()[0] || {};
+      
+//       // Set background color
+//       if (state.background) {
+//         setBackgroundColor(state.background);
+//       }
+      
+//       // Load drawings
+//       if (state.objects && Array.isArray(state.objects)) {
+//         redrawCanvas(state.objects);
+//       }
+      
+//     } catch (error) {
+//       console.error('Error loading whiteboard state:', error);
+//     }
+//   }, []);
+  
+//   // Initialize canvas
+//   useEffect(() => {
+//     if (!canvasRef.current || !backgroundCanvasRef.current) return;
+    
+//     const canvas = canvasRef.current;
+//     const bgCanvas = backgroundCanvasRef.current;
+//     const container = canvas.parentElement;
+    
+//     // Set canvas dimensions
+//     const resizeCanvas = () => {
+//       const containerWidth = container.clientWidth;
+//       const containerHeight = container.clientHeight;
+      
+//       canvas.width = containerWidth;
+//       canvas.height = containerHeight;
+//       bgCanvas.width = containerWidth;
+//       bgCanvas.height = containerHeight;
+      
+//       setCanvasDimensions({ width: containerWidth, height: containerHeight });
+      
+//       // Set contexts
+//       const ctx = canvas.getContext('2d');
+//       const bgCtx = bgCanvas.getContext('2d');
+      
+//       ctxRef.current = ctx;
+//       bgCtxRef.current = bgCtx;
+      
+//       // Apply initial styles
+//       ctx.lineCap = 'round';
+//       ctx.lineJoin = 'round';
+      
+//       // Redraw after resize
+//       if (yWhiteboardRef.current) {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         redrawCanvas(state.objects || []);
+//       }
+//     };
+    
+//     resizeCanvas();
+//     window.addEventListener('resize', resizeCanvas);
+    
+//     return () => window.removeEventListener('resize', resizeCanvas);
+//   }, []);
+  
+//   // Redraw canvas from objects
+//   const redrawCanvas = useCallback((objects) => {
+//     if (!ctxRef.current || !bgCtxRef.current) return;
+    
+//     const ctx = ctxRef.current;
+//     const bgCtx = bgCtxRef.current;
+//     const canvas = canvasRef.current;
+    
+//     // Clear canvases
+//     ctx.clearRect(0, 0, canvas.width, canvas.height);
+//     bgCtx.clearRect(0, 0, canvas.width, canvas.height);
+    
+//     // Draw background
+//     bgCtx.fillStyle = backgroundColor;
+//     bgCtx.fillRect(0, 0, canvas.width, canvas.height);
+    
+//     // Draw grid if visible
+//     if (isGridVisible) {
+//       drawGrid(bgCtx, canvas.width, canvas.height);
 //     }
     
-//   } catch (error) {
-//     console.error('❌ Error syncing:', error);
-//   }
-// }, [user]);
-
-//   // ✅ Initialize Canvas
-//   const initCanvas = useCallback(() => {
-//     console.log('🎨 initCanvas called!');
-//     addConnectionLog('Initializing canvas...');
+//     // Apply zoom and pan
+//     ctx.save();
+//     ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//     ctx.scale(currentZoom, currentZoom);
     
-//     if (!containerRef.current) {
-//       console.log('❌ Container not ready, retrying...');
-//       addConnectionLog('Container not ready, retrying...');
-//       setTimeout(() => initCanvas(), 500);
+//     // Draw all objects
+//     objects.forEach(obj => {
+//       drawObject(ctx, obj);
+//     });
+    
+//     ctx.restore();
+//   }, [backgroundColor, isGridVisible, currentZoom]);
+  
+//   // Draw individual object
+//   const drawObject = (ctx, obj) => {
+//     ctx.save();
+//     ctx.strokeStyle = obj.color || '#000000';
+//     ctx.fillStyle = obj.fillColor || 'transparent';
+//     ctx.lineWidth = (obj.strokeWidth || 2) / currentZoom;
+//     ctx.globalAlpha = obj.opacity || 1;
+    
+//     switch (obj.type) {
+//       case 'pen':
+//       case 'pencil':
+//         ctx.beginPath();
+//         ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//         obj.points.forEach(point => {
+//           ctx.lineTo(point.x, point.y);
+//         });
+//         ctx.stroke();
+//         break;
+        
+//       case 'line':
+//         ctx.beginPath();
+//         ctx.moveTo(obj.x1, obj.y1);
+//         ctx.lineTo(obj.x2, obj.y2);
+//         ctx.stroke();
+//         break;
+        
+//       case 'rectangle':
+//         if (obj.fillColor) {
+//           ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
+//         }
+//         ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
+//         break;
+        
+//       case 'circle':
+//         ctx.beginPath();
+//         ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
+//         if (obj.fillColor) {
+//           ctx.fill();
+//         }
+//         ctx.stroke();
+//         break;
+        
+//       case 'text':
+//         ctx.font = `${obj.fontSize || 16}px Arial`;
+//         ctx.fillStyle = obj.color;
+//         ctx.fillText(obj.text, obj.x, obj.y);
+//         break;
+        
+//       case 'eraser':
+//         ctx.save();
+//         ctx.globalCompositeOperation = 'destination-out';
+//         ctx.beginPath();
+//         ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//         obj.points.forEach(point => {
+//           ctx.lineTo(point.x, point.y);
+//         });
+//         ctx.stroke();
+//         ctx.restore();
+//         break;
+//     }
+    
+//     ctx.restore();
+//   };
+  
+//   // Draw grid
+//   const drawGrid = (ctx, width, height) => {
+//     ctx.save();
+//     ctx.strokeStyle = '#e0e0e0';
+//     ctx.lineWidth = 0.5;
+//     ctx.globalAlpha = 0.3;
+    
+//     const gridSize = 20;
+    
+//     // Vertical lines
+//     for (let x = 0; x <= width; x += gridSize) {
+//       ctx.beginPath();
+//       ctx.moveTo(x, 0);
+//       ctx.lineTo(x, height);
+//       ctx.stroke();
+//     }
+    
+//     // Horizontal lines
+//     for (let y = 0; y <= height; y += gridSize) {
+//       ctx.beginPath();
+//       ctx.moveTo(0, y);
+//       ctx.lineTo(width, y);
+//       ctx.stroke();
+//     }
+    
+//     ctx.restore();
+//   };
+  
+//   // Add object to Yjs document
+//   const addObject = useCallback((obj) => {
+//     if (!yWhiteboardRef.current) return;
+    
+//     setIsLocalDrawing(true);
+    
+//     try {
+//       const currentState = yWhiteboardRef.current.toArray()[0] || {
+//         version: '1.0.0',
+//         objects: [],
+//         background: backgroundColor,
+//         createdAt: new Date().toISOString()
+//       };
+      
+//       const updatedState = {
+//         ...currentState,
+//         objects: [...(currentState.objects || []), obj],
+//         updatedBy: sessionInfo?.streamerId,
+//         updatedAt: new Date().toISOString()
+//       };
+      
+//       // Update Yjs document
+//       if (yWhiteboardRef.current.length === 0) {
+//         yWhiteboardRef.current.insert(0, [updatedState]);
+//       } else {
+//         yWhiteboardRef.current.delete(0, 1);
+//         yWhiteboardRef.current.insert(0, [updatedState]);
+//       }
+      
+//     } catch (error) {
+//       console.error('Error adding object to Yjs:', error);
+//     } finally {
+//       setIsLocalDrawing(false);
+//     }
+//   }, [backgroundColor, sessionInfo]);
+  
+//   // Handle mouse events for drawing
+//   const handleMouseDown = useCallback((e) => {
+//     e.preventDefault();
+    
+//     const rect = canvasRef.current.getBoundingClientRect();
+//     const scaleX = canvasRef.current.width / rect.width;
+//     const scaleY = canvasRef.current.height / rect.height;
+    
+//     const x = (e.clientX - rect.left) * scaleX;
+//     const y = (e.clientY - rect.top) * scaleY;
+    
+//     // Pan tool
+//     if (tool === 'pan' || e.buttons === 4 || e.ctrlKey) {
+//       isPanningRef.current = true;
+//       panStartRef.current = { x: e.clientX, y: e.clientY };
+//       canvasRef.current.style.cursor = 'grabbing';
 //       return;
 //     }
     
-//     console.log('✅ Container ready');
-//     addConnectionLog('Container ready');
+//     setIsDrawing(true);
     
-//     // Clean up existing canvas
-//     if (fabricCanvasRef.current) {
-//       console.log('🧹 Cleaning up existing canvas');
-//       fabricCanvasRef.current.dispose();
-//       fabricCanvasRef.current = null;
-//     }
+//     const transformedX = (x - canvasOffsetRef.current.x) / currentZoom;
+//     const transformedY = (y - canvasOffsetRef.current.y) / currentZoom;
     
-//     // Create new canvas
-//     const canvas = new fabric.Canvas(canvasRef.current, {
-//       width: containerRef.current.clientWidth,
-//       height: containerRef.current.clientHeight,
-//       backgroundColor: '#ffffff',
-//       selection: true,
-//       preserveObjectStacking: true,
-//     });
+//     lastPointRef.current = { x: transformedX, y: transformedY };
     
-//     fabricCanvasRef.current = canvas;
-//     console.log('✅ Fabric canvas created');
-//     addConnectionLog('Fabric canvas created');
-    
-//     // Setup drawing
-//     canvas.isDrawingMode = false;
-//     canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
-//     canvas.freeDrawingBrush.width = brushWidth;
-//     canvas.freeDrawingBrush.color = brushColor;
-    
-//     // Event Listeners
-//     canvas.on('mouse:move', (e) => {
-//       if (!e.absolutePointer) return;
+//     // Start drawing based on tool
+//     if (tool === 'pen' || tool === 'eraser') {
+//       const points = [{ x: transformedX, y: transformedY }];
       
-//       setCursorPosition({
-//         x: Math.round(e.absolutePointer.x),
-//         y: Math.round(e.absolutePointer.y)
-//       });
-//     });
-    
-//     canvas.on('object:added', (e) => {
-//       if (e.target) {
-//         console.log('➕ Object added:', e.target.type);
-        
-//         // Generate ID if not exists
-//         if (!e.target.id) {
-//           e.target.id = `obj_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-//         }
-        
-//         // Save state
-//         saveState();
-        
-//         // Sync to Yjs
-//         setTimeout(() => {
-//           syncCanvasToYjs();
-//         }, 100);
-//       }
-//     });
-    
-//     canvas.on('object:modified', (e) => {
-//       if (e.target) {
-//         console.log('✏️ Object modified');
-        
-//         setTimeout(() => {
-//           saveState();
-//           syncCanvasToYjs();
-//         }, 100);
-//       }
-//     });
-    
-//     canvas.on('object:removed', (e) => {
-//       if (e.target) {
-//         console.log('➖ Object removed');
-        
-//         setTimeout(() => {
-//           saveState();
-//           syncCanvasToYjs();
-//         }, 100);
-//       }
-//     });
-    
-//     // Window resize handler
-//     const handleResize = () => {
-//       if (containerRef.current && canvas) {
-//         canvas.setDimensions({
-//           width: containerRef.current.clientWidth,
-//           height: containerRef.current.clientHeight
-//         });
-//         canvas.renderAll();
-//       }
-//     };
-    
-//     window.addEventListener('resize', handleResize);
-    
-//     // Initial save
-//     saveState();
-    
-//     console.log('✅ Canvas initialization complete');
-//     addConnectionLog('Canvas initialization complete');
-    
-//     // Start collaboration after canvas is ready
-//     setTimeout(() => {
-//       console.log('🚀 Starting collaboration...');
-//       addConnectionLog('Starting collaboration...');
-//       initCollaboration();
-//     }, 1000);
-    
-//     return () => {
-//       window.removeEventListener('resize', handleResize);
-//       if (canvas) {
-//         canvas.dispose();
-//       }
-//     };
-//   }, [initCollaboration, brushWidth, brushColor, syncCanvasToYjs]);
-
-//   // ✅ Save State for Undo/Redo
-//   const saveState = () => {
-//     if (!fabricCanvasRef.current) return;
-    
-//     const state = fabricCanvasRef.current.toJSON();
-//     const newHistory = [...history.slice(0, historyIndex + 1), state];
-    
-//     setHistory(newHistory);
-//     setHistoryIndex(newHistory.length - 1);
-//   };
-
-//   // ✅ Undo
-//   const handleUndo = () => {
-//     if (historyIndex > 0) {
-//       const newIndex = historyIndex - 1;
-//       setHistoryIndex(newIndex);
-      
-//       fabricCanvasRef.current.loadFromJSON(history[newIndex], () => {
-//         fabricCanvasRef.current.renderAll();
-//         syncCanvasToYjs();
+//       addObject({
+//         type: tool,
+//         points,
+//         color: tool === 'eraser' ? '#ffffff' : color,
+//         strokeWidth,
+//         opacity,
+//         timestamp: Date.now()
 //       });
 //     }
-//   };
-
-//   // ✅ Redo
-//   const handleRedo = () => {
-//     if (historyIndex < history.length - 1) {
-//       const newIndex = historyIndex + 1;
-//       setHistoryIndex(newIndex);
+//   }, [tool, color, strokeWidth, opacity, currentZoom, addObject]);
+  
+//   const handleMouseMove = useCallback((e) => {
+//     if (isPanningRef.current) {
+//       const dx = e.clientX - panStartRef.current.x;
+//       const dy = e.clientY - panStartRef.current.y;
       
-//       fabricCanvasRef.current.loadFromJSON(history[newIndex], () => {
-//         fabricCanvasRef.current.renderAll();
-//         syncCanvasToYjs();
-//       });
-//     }
-//   };
-
-//   // ✅ Tool Handlers
-//   const handleToolSelect = (selectedTool) => {
-//     console.log(`🛠️ Tool selected: ${selectedTool}`);
-//     setTool(selectedTool);
-//     const canvas = fabricCanvasRef.current;
-    
-//     if (!canvas) return;
-    
-//     switch (selectedTool) {
-//       case 'select':
-//         canvas.isDrawingMode = false;
-//         canvas.selection = true;
-//         break;
-//       case 'draw':
-//         canvas.isDrawingMode = true;
-//         canvas.freeDrawingBrush.width = brushWidth;
-//         canvas.freeDrawingBrush.color = brushColor;
-//         break;
-//       case 'rectangle':
-//         addRectangle();
-//         break;
-//       case 'circle':
-//         addCircle();
-//         break;
-//       case 'triangle':
-//         addTriangle();
-//         break;
-//       case 'text':
-//         addText();
-//         break;
-//       case 'sticky':
-//         addStickyNote();
-//         break;
-//       case 'image':
-//         uploadImage();
-//         break;
-//       case 'eraser':
-//         activateEraser();
-//         break;
-//       case 'line':
-//         startDrawingLine();
-//         break;
-//       case 'arrow':
-//         startDrawingArrow();
-//         break;
-//       case 'star':
-//         addStar();
-//         break;
-//       case 'hexagon':
-//         addHexagon();
-//         break;
-//     }
-//   };
-
-//   // Drawing Functions
-//   const addRectangle = () => {
-//     const rect = new fabric.Rect({
-//       left: 100,
-//       top: 100,
-//       width: 100,
-//       height: 100,
-//       fill: fillColor,
-//       stroke: brushColor,
-//       strokeWidth: brushWidth,
-//       opacity: opacity,
-//       selectable: true
-//     });
-    
-//     fabricCanvasRef.current.add(rect);
-//     fabricCanvasRef.current.setActiveObject(rect);
-//     setTool('select');
-//   };
-
-//   const addCircle = () => {
-//     const circle = new fabric.Circle({
-//       left: 100,
-//       top: 100,
-//       radius: 50,
-//       fill: fillColor,
-//       stroke: brushColor,
-//       strokeWidth: brushWidth,
-//       opacity: opacity,
-//       selectable: true
-//     });
-    
-//     fabricCanvasRef.current.add(circle);
-//     fabricCanvasRef.current.setActiveObject(circle);
-//     setTool('select');
-//   };
-
-//   const addTriangle = () => {
-//     const triangle = new fabric.Triangle({
-//       left: 100,
-//       top: 100,
-//       width: 100,
-//       height: 100,
-//       fill: fillColor,
-//       stroke: brushColor,
-//       strokeWidth: brushWidth,
-//       opacity: opacity,
-//       selectable: true
-//     });
-    
-//     fabricCanvasRef.current.add(triangle);
-//     fabricCanvasRef.current.setActiveObject(triangle);
-//     setTool('select');
-//   };
-
-//   const addStar = () => {
-//     const star = new fabric.Path('M 100 10 L 123 80 L 200 80 L 138 120 L 160 190 L 100 145 L 40 190 L 62 120 L 0 80 L 77 80 Z', {
-//       left: 100,
-//       top: 100,
-//       fill: fillColor,
-//       stroke: brushColor,
-//       strokeWidth: brushWidth,
-//       opacity: opacity,
-//       selectable: true
-//     });
-    
-//     fabricCanvasRef.current.add(star);
-//     fabricCanvasRef.current.setActiveObject(star);
-//     setTool('select');
-//   };
-
-//   const addHexagon = () => {
-//     const hexagon = new fabric.Polygon([
-//       { x: 50, y: 0 },
-//       { x: 100, y: 25 },
-//       { x: 100, y: 75 },
-//       { x: 50, y: 100 },
-//       { x: 0, y: 75 },
-//       { x: 0, y: 25 }
-//     ], {
-//       left: 100,
-//       top: 100,
-//       fill: fillColor,
-//       stroke: brushColor,
-//       strokeWidth: brushWidth,
-//       opacity: opacity,
-//       selectable: true
-//     });
-    
-//     fabricCanvasRef.current.add(hexagon);
-//     fabricCanvasRef.current.setActiveObject(hexagon);
-//     setTool('select');
-//   };
-
-//   const addText = () => {
-//     const text = new fabric.IText('Double click to edit', {
-//       left: 100,
-//       top: 100,
-//       fontSize: fontSize,
-//       fontFamily: fontFamily,
-//       fill: brushColor,
-//       selectable: true
-//     });
-    
-//     fabricCanvasRef.current.add(text);
-//     fabricCanvasRef.current.setActiveObject(text);
-//     setTool('select');
-//   };
-
-//   const addStickyNote = () => {
-//     const stickyNote = new fabric.Rect({
-//       left: 100,
-//       top: 100,
-//       width: 200,
-//       height: 150,
-//       fill: stickyNoteColor,
-//       stroke: '#d4d4d4',
-//       strokeWidth: 1,
-//       opacity: 0.9,
-//       shadow: 'rgba(0,0,0,0.2) 2px 2px 5px',
-//       selectable: true
-//     });
-    
-//     const text = new fabric.IText('Double click to edit note', {
-//       left: 110,
-//       top: 110,
-//       fontSize: 16,
-//       fontFamily: 'Arial',
-//       fill: '#000000',
-//       selectable: true
-//     });
-    
-//     const group = new fabric.Group([stickyNote, text], {
-//       selectable: true
-//     });
-    
-//     fabricCanvasRef.current.add(group);
-//     fabricCanvasRef.current.setActiveObject(group);
-//     setTool('select');
-//   };
-
-//   const startDrawingLine = () => {
-//     const canvas = fabricCanvasRef.current;
-//     let isDrawing = false;
-//     let line = null;
-    
-//     const mouseDown = (options) => {
-//       isDrawing = true;
-//       const pointer = canvas.getPointer(options.e);
+//       canvasOffsetRef.current.x += dx;
+//       canvasOffsetRef.current.y += dy;
       
-//       line = new fabric.Line([pointer.x, pointer.y, pointer.x, pointer.y], {
-//         stroke: brushColor,
-//         strokeWidth: brushWidth,
-//         selectable: true
-//       });
+//       panStartRef.current = { x: e.clientX, y: e.clientY };
       
-//       canvas.add(line);
-//     };
-    
-//     const mouseMove = (options) => {
-//       if (!isDrawing || !line) return;
-      
-//       const pointer = canvas.getPointer(options.e);
-//       line.set({ x2: pointer.x, y2: pointer.y });
-//       canvas.renderAll();
-//     };
-    
-//     const mouseUp = () => {
-//       isDrawing = false;
-//       canvas.off('mouse:down', mouseDown);
-//       canvas.off('mouse:move', mouseMove);
-//       canvas.off('mouse:up', mouseUp);
-//       setTool('select');
-//     };
-    
-//     canvas.on('mouse:down', mouseDown);
-//     canvas.on('mouse:move', mouseMove);
-//     canvas.on('mouse:up', mouseUp);
-//   };
-
-//   const startDrawingArrow = () => {
-//     const canvas = fabricCanvasRef.current;
-//     let isDrawing = false;
-//     let line = null;
-//     let arrowHead = null;
-    
-//     const mouseDown = (options) => {
-//       isDrawing = true;
-//       const pointer = canvas.getPointer(options.e);
-      
-//       line = new fabric.Line([pointer.x, pointer.y, pointer.x, pointer.y], {
-//         stroke: brushColor,
-//         strokeWidth: brushWidth,
-//         selectable: true
-//       });
-      
-//       arrowHead = new fabric.Triangle({
-//         width: 15,
-//         height: 15,
-//         fill: brushColor,
-//         left: pointer.x,
-//         top: pointer.y,
-//         angle: 0,
-//         selectable: false
-//       });
-      
-//       canvas.add(line);
-//       canvas.add(arrowHead);
-//     };
-    
-//     const mouseMove = (options) => {
-//       if (!isDrawing || !line || !arrowHead) return;
-      
-//       const pointer = canvas.getPointer(options.e);
-//       line.set({ x2: pointer.x, y2: pointer.y });
-      
-//       const dx = pointer.x - line.x1;
-//       const dy = pointer.y - line.y1;
-//       const angle = Math.atan2(dy, dx) * 180 / Math.PI;
-      
-//       arrowHead.set({
-//         left: pointer.x,
-//         top: pointer.y,
-//         angle: angle
-//       });
-      
-//       canvas.renderAll();
-//     };
-    
-//     const mouseUp = () => {
-//       isDrawing = false;
-      
-//       if (line && arrowHead) {
-//         const group = new fabric.Group([line, arrowHead], {
-//           selectable: true
-//         });
-        
-//         canvas.remove(line);
-//         canvas.remove(arrowHead);
-//         canvas.add(group);
+//       // Redraw with new offset
+//       if (yWhiteboardRef.current) {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         redrawCanvas(state.objects || []);
 //       }
       
-//       canvas.off('mouse:down', mouseDown);
-//       canvas.off('mouse:move', mouseMove);
-//       canvas.off('mouse:up', mouseUp);
-//       setTool('select');
-//     };
+//       return;
+//     }
     
-//     canvas.on('mouse:down', mouseDown);
-//     canvas.on('mouse:move', mouseMove);
-//     canvas.on('mouse:up', mouseUp);
-//   };
-
-//   const uploadImage = () => {
-//     const input = document.createElement('input');
-//     input.type = 'file';
-//     input.accept = 'image/*';
+//     if (!isDrawing || !yWhiteboardRef.current) return;
     
-//     input.onchange = (e) => {
-//       const file = e.target.files[0];
-//       if (!file) return;
+//     const rect = canvasRef.current.getBoundingClientRect();
+//     const scaleX = canvasRef.current.width / rect.width;
+//     const scaleY = canvasRef.current.height / rect.height;
+    
+//     const x = (e.clientX - rect.left) * scaleX;
+//     const y = (e.clientY - rect.top) * scaleY;
+    
+//     const transformedX = (x - canvasOffsetRef.current.x) / currentZoom;
+//     const transformedY = (y - canvasOffsetRef.current.y) / currentZoom;
+    
+//     const currentState = yWhiteboardRef.current.toArray()[0] || {};
+//     const objects = [...(currentState.objects || [])];
+//     const lastObject = objects[objects.length - 1];
+    
+//     if (lastObject && (lastObject.type === 'pen' || lastObject.type === 'eraser')) {
+//       // Continue drawing
+//       lastObject.points.push({ x: transformedX, y: transformedY });
       
-//       const reader = new FileReader();
-//       reader.onload = (event) => {
-//         fabric.Image.fromURL(event.target.result, (img) => {
-//           img.set({
-//             left: 100,
-//             top: 100,
-//             scaleX: 0.5,
-//             scaleY: 0.5,
-//             selectable: true
-//           });
-          
-//           fabricCanvasRef.current.add(img);
-//           fabricCanvasRef.current.setActiveObject(img);
-//           setTool('select');
-//         });
+//       const updatedState = {
+//         ...currentState,
+//         objects,
+//         updatedAt: new Date().toISOString()
 //       };
-//       reader.readAsDataURL(file);
-//     };
-    
-//     input.click();
-//   };
-
-//   const activateEraser = () => {
-//     const canvas = fabricCanvasRef.current;
-//     canvas.isDrawingMode = false;
-//     canvas.selection = false;
-    
-//     const mouseDown = (options) => {
-//       const pointer = canvas.getPointer(options.e);
-//       const objects = canvas.getObjects();
       
-//       objects.forEach(obj => {
-//         if (obj.containsPoint(pointer)) {
-//           canvas.remove(obj);
-//         }
-//       });
+//       yWhiteboardRef.current.delete(0, 1);
+//       yWhiteboardRef.current.insert(0, [updatedState]);
       
-//       canvas.renderAll();
-//     };
+//       redrawCanvas(objects);
+//     }
+//   }, [isDrawing, redrawCanvas, currentZoom]);
+  
+//   const handleMouseUp = useCallback(() => {
+//     setIsDrawing(false);
+//     isPanningRef.current = false;
+//     canvasRef.current.style.cursor = tool === 'pan' ? 'grab' : 'crosshair';
+//   }, [tool]);
+  
+//   // Clear whiteboard
+//   const handleClearWhiteboard = useCallback(() => {
+//     if (window.confirm('Clear entire whiteboard?')) {
+//       const emptyState = {
+//         version: '1.0.0',
+//         objects: [],
+//         background: backgroundColor,
+//         clearedAt: new Date().toISOString(),
+//         clearedBy: sessionInfo?.streamerId
+//       };
+      
+//       yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
+//       yWhiteboardRef.current.insert(0, [emptyState]);
+      
+//       redrawCanvas([]);
+//       toast.success('Whiteboard cleared');
+//     }
+//   }, [backgroundColor, sessionInfo, redrawCanvas]);
+  
+//   // Export as image
+//   const handleExport = useCallback(() => {
+//     const canvas = canvasRef.current;
+//     const bgCanvas = backgroundCanvasRef.current;
     
-//     canvas.on('mouse:down', mouseDown);
+//     // Create a combined canvas
+//     const exportCanvas = document.createElement('canvas');
+//     exportCanvas.width = canvas.width;
+//     exportCanvas.height = canvas.height;
     
-//     setTimeout(() => {
-//       canvas.off('mouse:down', mouseDown);
-//       setTool('select');
-//     }, 5000);
-//   };
-
-//   // Export Functions
-//   const exportAsImage = () => {
-//     if (!fabricCanvasRef.current) return;
+//     const exportCtx = exportCanvas.getContext('2d');
     
-//     const dataURL = fabricCanvasRef.current.toDataURL({
-//       format: 'png',
-//       quality: 1,
-//       multiplier: 2
-//     });
+//     // Draw background
+//     exportCtx.drawImage(bgCanvas, 0, 0);
     
+//     // Draw drawings
+//     exportCtx.drawImage(canvas, 0, 0);
+    
+//     // Download
 //     const link = document.createElement('a');
-//     link.href = dataURL;
-//     link.download = `whiteboard-${new Date().toISOString().slice(0, 10)}.png`;
+//     link.download = `whiteboard-${sessionId}-${Date.now()}.png`;
+//     link.href = exportCanvas.toDataURL('image/png');
 //     link.click();
-//   };
-
-//   const exportAsJSON = () => {
-//     if (!fabricCanvasRef.current) return;
     
-//     const json = fabricCanvasRef.current.toJSON();
-//     const dataStr = JSON.stringify(json);
-//     const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-    
-//     const link = document.createElement('a');
-//     link.href = dataUri;
-//     link.download = `whiteboard-${new Date().toISOString().slice(0, 10)}.json`;
-//     link.click();
-//   };
-
-//   const importFromJSON = () => {
-//     const input = document.createElement('input');
-//     input.type = 'file';
-//     input.accept = '.json';
-    
-//     input.onchange = (e) => {
-//       const file = e.target.files[0];
-//       if (!file) return;
-      
-//       const reader = new FileReader();
-//       reader.onload = (event) => {
-//         try {
-//           const json = JSON.parse(event.target.result);
-//           fabricCanvasRef.current.loadFromJSON(json, () => {
-//             fabricCanvasRef.current.renderAll();
-//             saveState();
-//             syncCanvasToYjs();
-//           });
-//         } catch (error) {
-//           console.error('Error loading JSON:', error);
-//         }
-//       };
-//       reader.readAsText(file);
-//     };
-    
-//     input.click();
-//   };
-
-//   // Zoom Functions
-//   const handleZoomIn = () => {
-//     const newZoom = Math.min(zoom * 1.2, 5);
-//     setZoom(newZoom);
-    
-//     if (fabricCanvasRef.current) {
-//       fabricCanvasRef.current.setZoom(newZoom);
-//       fabricCanvasRef.current.renderAll();
+//     toast.success('Whiteboard exported');
+//   }, [sessionId]);
+  
+//   // Undo/Redo
+//   const handleUndo = useCallback(() => {
+//     if (yUndoManagerRef.current) {
+//       yUndoManagerRef.current.undo();
 //     }
-//   };
-
-//   const handleZoomOut = () => {
-//     const newZoom = Math.max(zoom / 1.2, 0.2);
-//     setZoom(newZoom);
-    
-//     if (fabricCanvasRef.current) {
-//       fabricCanvasRef.current.setZoom(newZoom);
-//       fabricCanvasRef.current.renderAll();
-//     }
-//   };
-
-//   const handleZoomReset = () => {
-//     setZoom(1);
-    
-//     if (fabricCanvasRef.current) {
-//       fabricCanvasRef.current.setZoom(1);
-//       fabricCanvasRef.current.setViewportTransform([1, 0, 0, 1, 0, 0]);
-//       fabricCanvasRef.current.renderAll();
-//     }
-//   };
-
-//   // Clear Canvas
-//   const handleClear = () => {
-//     if (window.confirm('Are you sure you want to clear the whiteboard?')) {
-//       fabricCanvasRef.current.clear();
-//       fabricCanvasRef.current.backgroundColor = '#ffffff';
-//       saveState();
-//       syncCanvasToYjs();
-//     }
-//   };
-
-//   // Force Reconnect
-//   const forceReconnect = () => {
-//     console.log('🔁 Forcing reconnection...');
-//     addConnectionLog('Force reconnection initiated');
-    
-//     if (providerRef.current) {
-//       providerRef.current.disconnect();
-//       providerRef.current = null;
-//     }
-    
-//     if (ydocRef.current) {
-//       ydocRef.current.destroy();
-//       ydocRef.current = null;
-//     }
-    
-//     setTimeout(() => {
-//       initCollaboration();
-//     }, 500);
-//   };
-
-//   // ✅ Main Effect - Component Mount/Unmount
-//   useEffect(() => {
-//     console.log('🎯 WhiteboardComponent useEffect - isActive:', isActive);
-    
-//     if (isActive) {
-//       console.log('🚀 Whiteboard ACTIVE - Starting initialization...');
-//       addConnectionLog('Whiteboard activated');
-      
-//       // Small delay to ensure DOM is ready
-//       const timeoutId = setTimeout(() => {
-//         console.log('🎨 Calling initCanvas...');
-//         initCanvas();
-//       }, 300);
-      
-//       return () => {
-//         console.log('🧹 Cleaning up whiteboard timeout');
-//         clearTimeout(timeoutId);
-//       };
-//     } else {
-//       console.log('⏸️ Whiteboard INACTIVE');
-//       addConnectionLog('Whiteboard deactivated');
-//     }
-//   }, [isActive]);
-
-//   // ✅ Cleanup Effect
-//   useEffect(() => {
-//     return () => {
-//       console.log('🧹 WhiteboardComponent UNMOUNTING - Cleanup');
-//       addConnectionLog('Component unmounting');
-      
-//       // Clean up Yjs
-//       if (providerRef.current) {
-//         console.log('Disconnecting Yjs provider...');
-//         providerRef.current.disconnect();
-//         providerRef.current = null;
-//       }
-      
-//       if (ydocRef.current) {
-//         console.log('Destroying Yjs document...');
-//         ydocRef.current.destroy();
-//         ydocRef.current = null;
-//       }
-      
-//       // Clean up fabric canvas
-//       if (fabricCanvasRef.current) {
-//         console.log('Disposing fabric canvas...');
-//         fabricCanvasRef.current.dispose();
-//         fabricCanvasRef.current = null;
-//       }
-//     };
 //   }, []);
-
-//   if (!isActive) {
-//     console.log('⏸️ Whiteboard not active, returning null');
-//     return null;
-//   }
-
-//   console.log('🎨 Whiteboard RENDERING UI');
+  
+//   const handleRedo = useCallback(() => {
+//     if (yUndoManagerRef.current) {
+//       yUndoManagerRef.current.redo();
+//     }
+//   }, []);
+  
+//   // Zoom controls
+//   const handleZoomIn = useCallback(() => {
+//     setCurrentZoom(prev => Math.min(prev + 0.1, 3));
+//   }, []);
+  
+//   const handleZoomOut = useCallback(() => {
+//     setCurrentZoom(prev => Math.max(prev - 0.1, 0.5));
+//   }, []);
+  
+//   const handleZoomReset = useCallback(() => {
+//     setCurrentZoom(1);
+//     canvasOffsetRef.current = { x: 0, y: 0 };
+    
+//     if (yWhiteboardRef.current) {
+//       const state = yWhiteboardRef.current.toArray()[0] || {};
+//       redrawCanvas(state.objects || []);
+//     }
+//   }, [redrawCanvas]);
   
 //   return (
-//     <div className="fixed inset-0 bg-gray-900 z-50 flex flex-col">
+//     <div className={`flex flex-col h-full bg-gray-900 ${mainScreenMode ? 'fixed inset-0 z-50' : ''}`}>
 //       {/* Header */}
-//       <div className="bg-gray-800 border-b border-gray-700 p-4 flex justify-between items-center">
-//         <div className="flex items-center space-x-4">
-//           <h2 className="text-xl font-bold text-white flex items-center">
-//             <FiEdit3 className="mr-2" />
-//             Collaborative Whiteboard
-//           </h2>
-          
-//           <div className="flex items-center space-x-2">
-//             <div className={`w-3 h-3 rounded-full ${
-//               connectionStatus === 'connected' ? 'bg-green-500 animate-pulse' : 
-//               connectionStatus === 'connecting' ? 'bg-yellow-500' : 'bg-red-500'
-//             }`} />
-//             <span className="text-sm text-gray-300">
-//               {connectionStatus === 'connected' ? 'Connected' : 
-//                connectionStatus === 'connecting' ? 'Connecting...' : 
-//                connectionStatus === 'disconnected' ? 'Disconnected' : connectionStatus}
-//             </span>
-            
-//             <span className="text-xs text-gray-400">
-//               Attempt: {connectionAttempt}
-//             </span>
+//       <div className="flex items-center justify-between p-2 bg-gray-800 border-b border-gray-700">
+//         <div className="flex items-center space-x-2">
+//           <h3 className="text-white font-semibold">Whiteboard</h3>
+//           <div className={`px-2 py-1 rounded-full text-xs ${
+//             isConnected ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'
+//           }`}>
+//             {isConnected ? 'Connected' : 'Disconnected'}
 //           </div>
 //         </div>
         
 //         <div className="flex items-center space-x-2">
-//           {/* Debug Buttons */}
+//           {/* Zoom controls */}
 //           <button
-//             onClick={testWebSocketConnection}
-//             className="px-3 py-2 bg-yellow-600 hover:bg-yellow-700 rounded-lg text-white text-sm"
+//             onClick={handleZoomOut}
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//             title="Zoom Out"
 //           >
-//             🧪 Test WS
+//             <FiMinusCircle className="w-4 h-4 text-white" />
 //           </button>
-          
+//           <span className="text-white text-sm">{Math.round(currentZoom * 100)}%</span>
 //           <button
-//             onClick={forceReconnect}
-//             className="px-3 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-white text-sm"
+//             onClick={handleZoomIn}
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//             title="Zoom In"
 //           >
-//             🔁 Reconnect
+//             <FiPlus className="w-4 h-4 text-white" />
 //           </button>
-          
-//           <button
-//             onClick={() => setShowDebug(!showDebug)}
-//             className="px-3 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg text-white text-sm"
-//           >
-//             {showDebug ? 'Hide Debug' : 'Show Debug'}
-//           </button>
-          
 //           <button
 //             onClick={handleZoomReset}
-//             className="p-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-white"
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors ml-1"
+//             title="Reset Zoom"
 //           >
-//             <FiMaximize2 />
+//             <FiRefreshCcw className="w-4 h-4 text-white" />
 //           </button>
           
+//           <div className="w-px h-6 bg-gray-600 mx-2"></div>
+          
+//           {/* Undo/Redo */}
+//           <button
+//             onClick={handleUndo}
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//             title="Undo"
+//           >
+//             <FiRefreshCcw className="w-4 h-4 text-white" />
+//           </button>
+//           <button
+//             onClick={handleRedo}
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//             title="Redo"
+//           >
+//             <FiRefreshCcw className="w-4 h-4 text-white transform scale-x-[-1]" />
+//           </button>
+          
+//           <div className="w-px h-6 bg-gray-600 mx-2"></div>
+          
+//           {/* Clear/Export */}
+//           <button
+//             onClick={handleClearWhiteboard}
+//             className="p-1.5 bg-red-900 hover:bg-red-800 rounded-lg transition-colors"
+//             title="Clear Whiteboard"
+//           >
+//             <FiTrash2 className="w-4 h-4 text-white" />
+//           </button>
+//           <button
+//             onClick={handleExport}
+//             className="p-1.5 bg-blue-900 hover:bg-blue-800 rounded-lg transition-colors"
+//             title="Export as PNG"
+//           >
+//             <FiDownload className="w-4 h-4 text-white" />
+//           </button>
+          
+//           {/* Close button */}
 //           <button
 //             onClick={onClose}
-//             className="p-2 bg-red-600 hover:bg-red-700 rounded-lg text-white"
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors ml-2"
+//             title="Close Whiteboard"
 //           >
-//             <FiX />
+//             <FiDelete className="w-4 h-4 text-white" />
 //           </button>
 //         </div>
 //       </div>
-
-//       {/* Main Area */}
-//       <div className="flex-1 flex overflow-hidden">
-//         {/* Tools Sidebar */}
-//         <div className="w-16 bg-gray-800 border-r border-gray-700 flex flex-col items-center py-4 space-y-4">
-//           {tools.map((toolItem) => (
-//             <button
-//               key={toolItem.id}
-//               onClick={() => handleToolSelect(toolItem.id)}
-//               className={`p-3 rounded-xl transition-all duration-200 ${
-//                 tool === toolItem.id 
-//                   ? 'bg-blue-600 text-white shadow-lg' 
-//                   : 'bg-gray-700 text-gray-300 hover:bg-gray-600 hover:text-white'
-//               }`}
-//               title={toolItem.name}
+      
+//       {/* Toolbar */}
+//       <div className="flex items-center p-2 bg-gray-800 border-b border-gray-700 overflow-x-auto">
+//         {/* Drawing tools */}
+//         <div className="flex items-center space-x-1 bg-gray-700 p-1 rounded-lg">
+//           <button
+//             onClick={() => setTool('pen')}
+//             className={`p-2 rounded-lg transition-colors ${
+//               tool === 'pen' ? 'bg-blue-600 text-white' : 'hover:bg-gray-600 text-gray-300'
+//             }`}
+//             title="Pen"
+//           >
+//             <FaPaintBrush className="w-4 h-4" />
+//           </button>
+          
+//           <button
+//             onClick={() => setTool('eraser')}
+//             className={`p-2 rounded-lg transition-colors ${
+//               tool === 'eraser' ? 'bg-blue-600 text-white' : 'hover:bg-gray-600 text-gray-300'
+//             }`}
+//             title="Eraser"
+//           >
+//             <FaEraser className="w-4 h-4" />
+//           </button>
+          
+//           <button
+//             onClick={() => setTool('line')}
+//             className={`p-2 rounded-lg transition-colors ${
+//               tool === 'line' ? 'bg-blue-600 text-white' : 'hover:bg-gray-600 text-gray-300'
+//             }`}
+//             title="Line"
+//           >
+//             <FiMinus className="w-4 h-4" />
+//           </button>
+          
+//           <button
+//             onClick={() => setTool('rectangle')}
+//             className={`p-2 rounded-lg transition-colors ${
+//               tool === 'rectangle' ? 'bg-blue-600 text-white' : 'hover:bg-gray-600 text-gray-300'
+//             }`}
+//             title="Rectangle"
+//           >
+//             <FiSquare className="w-4 h-4" />
+//           </button>
+          
+//           <button
+//             onClick={() => setTool('circle')}
+//             className={`p-2 rounded-lg transition-colors ${
+//               tool === 'circle' ? 'bg-blue-600 text-white' : 'hover:bg-gray-600 text-gray-300'
+//             }`}
+//             title="Circle"
+//           >
+//             <FiCircle className="w-4 h-4" />
+//           </button>
+          
+//           <button
+//             onClick={() => setTool('text')}
+//             className={`p-2 rounded-lg transition-colors ${
+//               tool === 'text' ? 'bg-blue-600 text-white' : 'hover:bg-gray-600 text-gray-300'
+//             }`}
+//             title="Text"
+//           >
+//             <FiType className="w-4 h-4" />
+//           </button>
+          
+//           <button
+//             onClick={() => setTool('pan')}
+//             className={`p-2 rounded-lg transition-colors ${
+//               tool === 'pan' ? 'bg-blue-600 text-white' : 'hover:bg-gray-600 text-gray-300'
+//             }`}
+//             title="Pan (Hold Ctrl or Middle Mouse)"
+//           >
+//             <FiMove className="w-4 h-4" />
+//           </button>
+          
+//           <button
+//             onClick={() => setTool('select')}
+//             className={`p-2 rounded-lg transition-colors ${
+//               tool === 'select' ? 'bg-blue-600 text-white' : 'hover:bg-gray-600 text-gray-300'
+//             }`}
+//             title="Select"
+//           >
+//             <FiMousePointer className="w-4 h-4" />
+//           </button>
+//         </div>
+        
+//         <div className="w-px h-6 bg-gray-600 mx-2"></div>
+        
+//         {/* Color picker */}
+//         <div className="flex items-center space-x-2">
+//           <input
+//             type="color"
+//             value={color}
+//             onChange={(e) => setColor(e.target.value)}
+//             className="w-8 h-8 rounded cursor-pointer"
+//             title="Color"
+//           />
+          
+//           <select
+//             value={strokeWidth}
+//             onChange={(e) => setStrokeWidth(Number(e.target.value))}
+//             className="bg-gray-700 text-white text-sm rounded-lg px-2 py-1.5 border border-gray-600"
+//             title="Stroke Width"
+//           >
+//             <option value="1">1px</option>
+//             <option value="2">2px</option>
+//             <option value="3">3px</option>
+//             <option value="5">5px</option>
+//             <option value="8">8px</option>
+//             <option value="12">12px</option>
+//           </select>
+          
+//           <select
+//             value={opacity}
+//             onChange={(e) => setOpacity(Number(e.target.value))}
+//             className="bg-gray-700 text-white text-sm rounded-lg px-2 py-1.5 border border-gray-600"
+//             title="Opacity"
+//           >
+//             <option value="1">100%</option>
+//             <option value="0.8">80%</option>
+//             <option value="0.6">60%</option>
+//             <option value="0.4">40%</option>
+//             <option value="0.2">20%</option>
+//           </select>
+//         </div>
+        
+//         <div className="w-px h-6 bg-gray-600 mx-2"></div>
+        
+//         {/* Background color */}
+//         <div className="flex items-center space-x-2">
+//           <span className="text-gray-300 text-sm">BG:</span>
+//           <input
+//             type="color"
+//             value={backgroundColor}
+//             onChange={(e) => {
+//               setBackgroundColor(e.target.value);
+              
+//               // Update Yjs settings
+//               if (ySettingsRef.current) {
+//                 ySettingsRef.current.set('background', e.target.value);
+//               }
+              
+//               // Redraw with new background
+//               if (yWhiteboardRef.current) {
+//                 const state = yWhiteboardRef.current.toArray()[0] || {};
+//                 redrawCanvas(state.objects || []);
+//               }
+//             }}
+//             className="w-6 h-6 rounded cursor-pointer"
+//             title="Background Color"
+//           />
+          
+//           <button
+//             onClick={() => setIsGridVisible(!isGridVisible)}
+//             className={`p-1.5 rounded-lg transition-colors ${
+//               isGridVisible ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+//             }`}
+//             title="Toggle Grid"
+//           >
+//             <FiSquare className="w-4 h-4" />
+//           </button>
+//         </div>
+        
+//         {/* Participants indicator */}
+//         <div className="ml-auto flex items-center space-x-1">
+//           <div className="text-gray-400 text-sm mr-2">
+//             {participants.length} {participants.length === 1 ? 'user' : 'users'}
+//           </div>
+//           {participants.map((p, i) => (
+//             <div
+//               key={p.clientId}
+//               className="w-6 h-6 rounded-full bg-blue-600 flex items-center justify-center text-xs font-medium"
+//               title={`${p.userName || 'User'} (${p.role || 'Viewer'})`}
 //             >
-//               {toolItem.icon}
-//             </button>
+//               {p.userName?.charAt(0) || 'U'}
+//             </div>
 //           ))}
 //         </div>
-
-//         {/* Properties Sidebar */}
-//         <div className="w-64 bg-gray-800 border-r border-gray-700 p-4 overflow-y-auto">
-//           <div className="space-y-6">
-//             <div>
-//               <h3 className="text-sm font-semibold text-gray-300 mb-2 flex items-center">
-//                 <BsBrush className="mr-2" />
-//                 Brush Properties
-//               </h3>
-              
-//               <div className="space-y-3">
-//                 <div>
-//                   <label className="text-xs text-gray-400">Width</label>
-//                   <div className="flex flex-wrap gap-1 mt-1">
-//                     {brushSizes.map((size) => (
-//                       <button
-//                         key={size}
-//                         onClick={() => setBrushWidth(size)}
-//                         className={`w-8 h-8 rounded-full flex items-center justify-center ${
-//                           brushWidth === size 
-//                             ? 'bg-blue-600 text-white' 
-//                             : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-//                         }`}
-//                       >
-//                         {size}
-//                       </button>
-//                     ))}
-//                   </div>
-//                 </div>
-
-//                 <div>
-//                   <label className="text-xs text-gray-400">Stroke Color</label>
-//                   <div className="grid grid-cols-7 gap-1 mt-1">
-//                     {colors.map((color) => (
-//                       <button
-//                         key={color}
-//                         onClick={() => setBrushColor(color)}
-//                         className={`w-6 h-6 rounded-full border-2 ${
-//                           brushColor === color ? 'border-white' : 'border-gray-700'
-//                         }`}
-//                         style={{ backgroundColor: color }}
-//                       />
-//                     ))}
-//                   </div>
-//                   <input
-//                     type="color"
-//                     value={brushColor}
-//                     onChange={(e) => setBrushColor(e.target.value)}
-//                     className="w-full mt-2 bg-gray-700 border border-gray-600 rounded"
-//                   />
-//                 </div>
-
-//                 <div>
-//                   <label className="text-xs text-gray-400">Fill Color</label>
-//                   <div className="grid grid-cols-7 gap-1 mt-1">
-//                     {colors.map((color) => (
-//                       <button
-//                         key={color}
-//                         onClick={() => setFillColor(color)}
-//                         className={`w-6 h-6 rounded-full border-2 ${
-//                           fillColor === color ? 'border-white' : 'border-gray-700'
-//                         }`}
-//                         style={{ backgroundColor: color }}
-//                       />
-//                     ))}
-//                   </div>
-//                   <input
-//                     type="color"
-//                     value={fillColor}
-//                     onChange={(e) => setFillColor(e.target.value)}
-//                     className="w-full mt-2 bg-gray-700 border border-gray-600 rounded"
-//                   />
-//                 </div>
-
-//                 <div>
-//                   <label className="text-xs text-gray-400">
-//                     Opacity: {Math.round(opacity * 100)}%
-//                   </label>
-//                   <input
-//                     type="range"
-//                     min="0.1"
-//                     max="1"
-//                     step="0.1"
-//                     value={opacity}
-//                     onChange={(e) => setOpacity(parseFloat(e.target.value))}
-//                     className="w-full mt-1"
-//                   />
-//                 </div>
-//               </div>
-//             </div>
-
-//             {/* View Options */}
-//             <div>
-//               <h3 className="text-sm font-semibold text-gray-300 mb-2">View Options</h3>
-//               <div className="space-y-2">
-//                 <label className="flex items-center space-x-2 cursor-pointer">
-//                   <input
-//                     type="checkbox"
-//                     checked={showGrid}
-//                     onChange={(e) => setShowGrid(e.target.checked)}
-//                     className="rounded bg-gray-700"
-//                   />
-//                   <span className="text-sm text-gray-300">Show Grid</span>
-//                 </label>
-//               </div>
-//             </div>
+//       </div>
+      
+//       {/* Canvas area */}
+//       <div className="flex-1 relative overflow-hidden bg-gray-900">
+//         {/* Background canvas */}
+//         <canvas
+//           ref={backgroundCanvasRef}
+//           className="absolute top-0 left-0 w-full h-full"
+//           style={{ pointerEvents: 'none' }}
+//         />
+        
+//         {/* Main drawing canvas */}
+//         <canvas
+//           ref={canvasRef}
+//           className="absolute top-0 left-0 w-full h-full cursor-crosshair"
+//           onMouseDown={handleMouseDown}
+//           onMouseMove={handleMouseMove}
+//           onMouseUp={handleMouseUp}
+//           onMouseLeave={handleMouseUp}
+//           onContextMenu={(e) => e.preventDefault()}
+//         />
+        
+//         {/* Drawing disabled overlay */}
+//         {!allowViewersToDraw && (
+//           <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-yellow-900 text-yellow-200 px-4 py-2 rounded-lg text-sm">
+//             Viewers cannot draw (enabled by streamer)
 //           </div>
-//         </div>
-
-//         {/* Canvas Area */}
-//         <div className="flex-1 relative overflow-hidden" ref={containerRef}>
-//           <canvas ref={canvasRef} className="absolute inset-0" />
-          
-//           {/* Status Bar */}
-//           <div className="absolute bottom-4 left-4 bg-black/70 text-white text-sm px-3 py-2 rounded-lg">
-//             X: {cursorPosition.x}, Y: {cursorPosition.y} | Zoom: {Math.round(zoom * 100)}% | Tool: {tool}
-//           </div>
-
-//           {/* Zoom Controls */}
-//           <div className="absolute bottom-4 right-4 flex space-x-2">
-//             <button
-//               onClick={handleZoomOut}
-//               className="bg-black/70 text-white p-2 rounded-lg hover:bg-black/80"
-//             >
-//               <FiZoomOut />
-//             </button>
-//             <button
-//               onClick={handleZoomIn}
-//               className="bg-black/70 text-white p-2 rounded-lg hover:bg-black/80"
-//             >
-//               <FiZoomIn />
-//             </button>
-//           </div>
-
-//           {/* Debug Info Panel */}
-//           {showDebug && (
-//             <div className="absolute top-4 left-4 bg-black/80 text-white text-xs p-3 rounded-lg max-w-md max-h-64 overflow-y-auto">
-//               <div className="font-bold mb-2">Debug Info:</div>
-//               <div className="space-y-1">
-//                 <div>Status: <span className={connectionStatus === 'connected' ? 'text-green-400' : 'text-red-400'}>{connectionStatus}</span></div>
-//                 <div>Connection Attempts: {connectionAttempt}</div>
-//                 <div>Room: whiteboard-{sessionId || roomCode || 'default'}</div>
-//                 <div>Canvas: {fabricCanvasRef.current ? 'Loaded' : 'Not loaded'}</div>
-//                 <div>Yjs: {ydocRef.current ? 'Active' : 'Inactive'}</div>
-//                 <div>Provider: {providerRef.current ? 'Connected' : 'Disconnected'}</div>
-                
-//                 <div className="mt-2 font-bold">Connection Logs:</div>
-//                 <div className="text-xs max-h-32 overflow-y-auto">
-//                   {connectionLogs.slice().reverse().map((log, index) => (
-//                     <div key={index} className="border-b border-gray-700 py-1">
-//                       <span className="text-gray-400">[{log.timestamp}]</span> {log.message}
-//                     </div>
-//                   ))}
-//                 </div>
-//               </div>
-//             </div>
-//           )}
-//         </div>
-
-//         {/* Actions Sidebar */}
-//         <div className="w-64 bg-gray-800 border-l border-gray-700 p-4">
-//           <div className="space-y-4">
-//             <div>
-//               <h3 className="text-sm font-semibold text-gray-300 mb-2">History</h3>
-//               <div className="flex space-x-2">
-//                 <button
-//                   onClick={handleUndo}
-//                   disabled={historyIndex <= 0}
-//                   className={`flex-1 p-2 rounded-lg flex items-center justify-center space-x-1 ${
-//                     historyIndex <= 0
-//                       ? 'bg-gray-700 text-gray-500'
-//                       : 'bg-gray-700 hover:bg-gray-600 text-white'
-//                   }`}
-//                 >
-//                   <FaUndo />
-//                   <span>Undo</span>
-//                 </button>
-//                 <button
-//                   onClick={handleRedo}
-//                   disabled={historyIndex >= history.length - 1}
-//                   className={`flex-1 p-2 rounded-lg flex items-center justify-center space-x-1 ${
-//                     historyIndex >= history.length - 1
-//                       ? 'bg-gray-700 text-gray-500'
-//                       : 'bg-gray-700 hover:bg-gray-600 text-white'
-//                   }`}
-//                 >
-//                   <FaRedo />
-//                   <span>Redo</span>
-//                 </button>
-//               </div>
-//             </div>
-
-//             <div>
-//               <h3 className="text-sm font-semibold text-gray-300 mb-2">Actions</h3>
-//               <div className="space-y-2">
-//                 <button
-//                   onClick={handleClear}
-//                   className="w-full p-2 bg-red-600 hover:bg-red-700 rounded-lg text-white flex items-center justify-center space-x-2"
-//                 >
-//                   <FiTrash2 />
-//                   <span>Clear Canvas</span>
-//                 </button>
-//                 <button
-//                   onClick={exportAsImage}
-//                   className="w-full p-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-white flex items-center justify-center space-x-2"
-//                 >
-//                   <FiDownload />
-//                   <span>Export as PNG</span>
-//                 </button>
-//                 <button
-//                   onClick={exportAsJSON}
-//                   className="w-full p-2 bg-purple-600 hover:bg-purple-700 rounded-lg text-white flex items-center justify-center space-x-2"
-//                 >
-//                   <FiSave />
-//                   <span>Export as JSON</span>
-//                 </button>
-//                 <button
-//                   onClick={importFromJSON}
-//                   className="w-full p-2 bg-green-600 hover:bg-green-700 rounded-lg text-white flex items-center justify-center space-x-2"
-//                 >
-//                   <FiUpload />
-//                   <span>Import JSON</span>
-//                 </button>
-//               </div>
-//             </div>
-
-//             <div>
-//               <h3 className="text-sm font-semibold text-gray-300 mb-2">Connection</h3>
-//               <div className="space-y-2">
-//                 <button
-//                   onClick={() => {
-//                     console.log('=== WHITEBOARD STATUS ===');
-//                     console.log('1. Yjs doc:', ydocRef.current);
-//                     console.log('2. Provider:', providerRef.current);
-//                     console.log('3. Fabric canvas:', fabricCanvasRef.current);
-//                     console.log('4. Container:', containerRef.current);
-//                     console.log('5. Canvas element:', canvasRef.current);
-                    
-//                     if (providerRef.current && providerRef.current.ws) {
-//                       console.log('WebSocket readyState:', providerRef.current.ws.readyState);
-//                       console.log('WebSocket URL:', providerRef.current.url);
-//                     }
-//                   }}
-//                   className="w-full p-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-white"
-//                 >
-//                   Check Status
-//                 </button>
-                
-//                 <button
-//                   onClick={() => {
-//                     if (providerRef.current) {
-//                       console.log('Disconnecting provider...');
-//                       providerRef.current.disconnect();
-//                       setTimeout(() => {
-//                         console.log('Reconnecting...');
-//                         providerRef.current.connect();
-//                       }, 1000);
-//                     }
-//                   }}
-//                   className="w-full p-2 bg-yellow-600 hover:bg-yellow-700 rounded-lg text-white"
-//                 >
-//                   Reconnect Yjs
-//                 </button>
-//               </div>
-//             </div>
-//           </div>
+//         )}
+        
+//         {/* Info overlay */}
+//         <div className="absolute bottom-4 right-4 bg-black/50 text-white text-xs px-3 py-2 rounded-lg">
+//           <div>Tool: {tool}</div>
+//           <div>Zoom: {Math.round(currentZoom * 100)}%</div>
+//           <div>Pan: Ctrl + Drag</div>
 //         </div>
 //       </div>
 //     </div>
 //   );
 // };
 
-// export default WhiteboardComponent; 
+// export default StreamerWhiteboard;// import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 
 
@@ -1583,1642 +1777,4311 @@
 
 
 
+// import * as fabric from "fabric";
+// import * as Y from "yjs";
+// import { WebsocketProvider } from "y-websocket";
+// import { useAuth } from "../../../contexts/AuthContext";
 
+// import {
+//   FiSquare,
+//   FiCircle,
+//   FiType,
+//   FiPenTool,
+//   FiMousePointer,
+//   FiTrash2,
+//   FiDownload,
+//   FiUpload,
+//   FiZoomIn,
+//   FiZoomOut,
+//   FiMaximize2,
+//   FiMinimize2,
+//   FiMinus,
+//   FiArrowRight,
+//   FiX,
+//   FiLock,
+//   FiUnlock,
+//   FiChevronLeft,
+//   FiChevronRight,
+//   FiRefreshCw,
+//   FiImage,
+// } from "react-icons/fi";
+// import { FaUndo, FaRedo } from "react-icons/fa";
+// import { BsEraser } from "react-icons/bs";
+// import { LuStickyNote } from "react-icons/lu";
 
-
-
-
-
-
-
-
-
-
-
-
-// import React, { useRef, useEffect, useState, useCallback } from 'react';
-// import * as fabric from 'fabric';
-// import * as Y from 'yjs';
-// import { WebsocketProvider } from 'y-websocket';
-// import { useAuth } from '../../../contexts/AuthContext';
-// import { API_BASE_URL } from '../../../config/api';
-// import { 
-//   FiSquare, FiCircle, FiType, FiPenTool, FiEdit3, FiMousePointer, FiTrash2, 
-//   FiDownload, FiUpload, FiSave, FiZoomIn, FiZoomOut, FiMaximize2,
-//   FiMinimize2, FiImage, FiStar, FiHexagon, FiTriangle, FiMinus, FiArrowRight,
-//   FiX, FiUsers, FiMessageSquare, FiRefreshCw, FiLock, FiUnlock
-// } from 'react-icons/fi';
-// import { FaRedo, FaUndo } from "react-icons/fa";
-// import { BsBrush, BsEraser } from 'react-icons/bs';
-// import { LuStickyNote } from 'react-icons/lu';
-
-// // ✅ DEBUG LOG
-// console.log('⚡⚡⚡ WHITEBOARD COMPONENT LOADED ⚡⚡⚡');
-
-// const WhiteboardComponent = ({ 
-//   sessionId, 
-//   roomCode, 
-//   isActive, 
-//   onClose, 
-//   isStreamer = false 
+// /**
+//  * ✅ WHITEBOARD COMPONENT - STREAMER VERSION (UPDATED)
+//  * ✅ MATCHED WITH VIEWER FIXES:
+//  * 1) ✅ WebsocketProvider URL fixed (baseUrl + roomName + params)
+//  * 2) ✅ Canvas state always at index 0 (single source of truth)
+//  * 3) ✅ Uses ydoc.transact with origin "local-canvas" to prevent self-loop
+//  * 4) ✅ Observer reads get(0) and ignores our own updates by updatedBy + origin
+//  * 5) ✅ No duplicate provider.on('status') handlers
+//  */
+// const WhiteboardComponent = ({
+//   sessionId,
+//   roomCode,
+//   wsToken,
+//   sessionInfo,
+//   isActive,
+//   onClose,
+//   isStreamer = true, // ✅ STREAMER ke liye TRUE
+//   allowViewersToDraw = true,
+//   mainScreenMode = true,
+//   compact = true,
 // }) => {
-//   console.log('🎨 WhiteboardComponent RENDERING:', { 
-//     isActive, 
-//     sessionId, 
-//     roomCode,
-//     isStreamer
+//   const { user } = useAuth();
+
+//   // =========================
+//   // ✅ STABLE REFS (No re-renders)
+//   // =========================
+//   const isMountedRef = useRef(true);
+//   const canvasElRef = useRef(null);
+//   const containerRef = useRef(null);
+//   const fabricCanvasRef = useRef(null);
+//   const ydocRef = useRef(null);
+//   const yProviderRef = useRef(null);
+//   const initCompleteRef = useRef(false);
+
+//   // ✅ Permissions ref
+//   const permissionsRef = useRef({
+//     canDraw: true,
+//     canAddObjects: true,
+//     canDelete: true,
+//     canEdit: true,
+//     isViewer: false,
+//     isStreamer: true,
 //   });
 
-//   const { user, token } = useAuth();
-//   const canvasRef = useRef(null);
-//   const fabricCanvasRef = useRef(null);
-//   const containerRef = useRef(null);
-//   const ydocRef = useRef(null);
-//   const providerRef = useRef(null);
-  
-//   const [tool, setTool] = useState('select');
+//   // Tool ref for avoiding stale closures
+//   const toolRef = useRef("select");
+
+//   // Drawing settings refs
+//   const brushWidthRef = useRef(5);
+//   const brushColorRef = useRef("#000000");
+//   const fillColorRef = useRef("#ffffff");
+//   const opacityRef = useRef(1);
+//   const fontSizeRef = useRef(20);
+
+//   // History refs
+//   const historyRef = useRef([]);
+//   const historyIndexRef = useRef(-1);
+//   const saveQueuedRef = useRef(false);
+
+//   // Debounce refs
+//   const syncTimeoutRef = useRef(null);
+//   const resizeHandlerRef = useRef(null);
+//   const loadTimeoutRef = useRef(null);
+
+//   // =========================
+//   // ✅ UI STATE
+//   // =========================
+//   const [tool, setTool] = useState("select");
 //   const [brushWidth, setBrushWidth] = useState(5);
-//   const [brushColor, setBrushColor] = useState('#000000');
-//   const [fillColor, setFillColor] = useState('#ffffff');
+//   const [brushColor, setBrushColor] = useState("#000000");
+//   const [fillColor, setFillColor] = useState("#ffffff");
 //   const [opacity, setOpacity] = useState(1);
 //   const [fontSize, setFontSize] = useState(20);
-//   const [fontFamily, setFontFamily] = useState('Arial');
 //   const [zoom, setZoom] = useState(1);
-//   const [history, setHistory] = useState([]);
-//   const [historyIndex, setHistoryIndex] = useState(-1);
-//   const [showGrid, setShowGrid] = useState(false);
 //   const [cursorPosition, setCursorPosition] = useState({ x: 0, y: 0 });
-//   const [connectionStatus, setConnectionStatus] = useState('disconnected');
-//   const [stickyNoteColor, setStickyNoteColor] = useState('#ffff88');
-//   const [showDebug, setShowDebug] = useState(false);
-//   const [connectionAttempt, setConnectionAttempt] = useState(0);
-//   const [connectionLogs, setConnectionLogs] = useState([]);
-//   const [activeUsers, setActiveUsers] = useState([]);
-//   const [sessionInfo, setSessionInfo] = useState(null);
-//   const [permissions, setPermissions] = useState({
-//     canDraw: false,
-//     canEdit: false,
-//     canDelete: false,
-//     canChat: true,
-//     canClear: false
-//   });
 //   const [isLoading, setIsLoading] = useState(true);
-  
-//   const tools = [
-//     { id: 'select', name: 'Select', icon: <FiMousePointer /> },
-//     { id: 'draw', name: 'Draw', icon: <FiPenTool /> },
-//     { id: 'line', name: 'Line', icon: <FiMinus /> },
-//     { id: 'arrow', name: 'Arrow', icon: <FiArrowRight /> },
-//     { id: 'rectangle', name: 'Rectangle', icon: <FiSquare /> },
-//     { id: 'circle', name: 'Circle', icon: <FiCircle /> },
-//     { id: 'triangle', name: 'Triangle', icon: <FiTriangle /> },
-//     { id: 'star', name: 'Star', icon: <FiStar /> },
-//     { id: 'hexagon', name: 'Hexagon', icon: <FiHexagon /> },
-//     { id: 'text', name: 'Text', icon: <FiType /> },
-//     { id: 'sticky', name: 'Sticky Note', icon: <LuStickyNote /> },
-//     { id: 'image', name: 'Image', icon: <FiImage /> },
-//     { id: 'eraser', name: 'Eraser', icon: <BsEraser /> },
-//   ];
+//   const [connectionStatus, setConnectionStatus] = useState("disconnected");
+//   const [connectionError, setConnectionError] = useState(null);
+//   const [roomSettings, setRoomSettings] = useState({
+//     allowViewersToDraw,
+//     streamerId: null,
+//     streamerName: null,
+//   });
+//   const [activeUsers, setActiveUsers] = useState([]);
 
-//   const colors = [
-//     '#000000', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF',
-//     '#FFA500', '#800080', '#008000', '#800000', '#008080', '#000080', '#808080'
-//   ];
+//   // UI toggles
+//   const [showTools, setShowTools] = useState(true);
+//   const [showColors, setShowColors] = useState(false);
+//   const [showBrushSizes, setShowBrushSizes] = useState(false);
+//   const [isFullscreen, setIsFullscreen] = useState(false);
 
-//   const brushSizes = [1, 2, 3, 5, 8, 10, 15, 20, 30];
+//   // =========================
+//   // ✅ MEMOIZED CONFIGS
+//   // =========================
+//   const tools = useMemo(
+//     () => [
+//       { id: "select", name: "Select", icon: <FiMousePointer size={16} /> },
+//       { id: "draw", name: "Draw", icon: <FiPenTool size={16} /> },
+//       { id: "rectangle", name: "Rectangle", icon: <FiSquare size={16} /> },
+//       { id: "circle", name: "Circle", icon: <FiCircle size={16} /> },
+//       { id: "line", name: "Line", icon: <FiMinus size={16} /> },
+//       { id: "arrow", name: "Arrow", icon: <FiArrowRight size={16} /> },
+//       { id: "text", name: "Text", icon: <FiType size={16} /> },
+//       { id: "sticky", name: "Sticky", icon: <LuStickyNote size={16} /> },
+//       { id: "eraser", name: "Eraser", icon: <BsEraser size={16} /> },
+//     ],
+//     []
+//   );
 
-//   // ✅ Add connection log
-//   const addConnectionLog = (message) => {
-//     console.log('📝 Connection Log:', message);
-//     setConnectionLogs(prev => [...prev.slice(-10), {
-//       timestamp: new Date().toLocaleTimeString(),
-//       message
-//     }]);
-//   };
+//   const colors = useMemo(
+//     () => [
+//       "#000000",
+//       "#FF0000",
+//       "#00FF00",
+//       "#0000FF",
+//       "#FFFF00",
+//       "#FF00FF",
+//       "#00FFFF",
+//       "#FFA500",
+//       "#800080",
+//       "#008000",
+//       "#800000",
+//       "#008080",
+//       "#000080",
+//       "#808080",
+//     ],
+//     []
+//   );
 
-//   // ✅ Get Session Info from API
-//   const fetchSessionInfo = async () => {
-//     try {
-//       const endpoint = isStreamer 
-//         ? `${API_BASE_URL}/api/live-sessions/streamer/${sessionId}`
-//         : `${API_BASE_URL}/api/live-sessions/join/${roomCode}`;
-      
-//       const response = await fetch(endpoint, {
-//         headers: {
-//           'Authorization': `Bearer ${token}`
-//         }
-//       });
-      
-//       if (!response.ok) {
-//         throw new Error(`Failed to fetch session: ${response.status}`);
-//       }
-      
-//       const data = await response.json();
-//       setSessionInfo(data);
-//       setPermissions(data.permissions || {});
-      
-//       console.log('✅ Session Info:', data);
-//       addConnectionLog(`Session: ${data.title}`);
-      
-//       return data;
-//     } catch (error) {
-//       console.error('❌ Error fetching session:', error);
-//       addConnectionLog(`Error: ${error.message}`);
-//       return null;
+//   const brushSizes = useMemo(() => [1, 2, 3, 5, 8, 10, 15, 20, 30], []);
+
+//   // =========================
+//   // ✅ HELPER FUNCTIONS
+//   // =========================
+//   const getUserId = useCallback(() => {
+//     return user?.id || user?._id || user?.email || `streamer_${Date.now()}`;
+//   }, [user]);
+
+//   const safeSetState = useCallback((fn) => {
+//     if (isMountedRef.current) {
+//       fn();
 //     }
-//   };
+//   }, []);
 
-//   // ✅ Get WebSocket URL with Authentication
-//   const getWebSocketUrl = (wsToken) => {
-//     const baseUrl = process.env.REACT_APP_WS_URL || 'ws://localhost:9090';
-//     const currentToken = wsToken || token;
-    
-//     if (!currentToken) {
-//       console.error('❌ No authentication token found');
-//       return null;
-//     }
-    
-//     const url = `${baseUrl}/yjs?token=${encodeURIComponent(currentToken)}&sessionId=${encodeURIComponent(sessionId)}&roomCode=${encodeURIComponent(roomCode)}`;
-//     console.log('🔌 WebSocket URL:', url);
-//     return url;
-//   };
+//   // =========================
+//   // ✅ WEBSOCKET BASE URL (FIXED)
+//   // =========================
+//   const getWebSocketBaseUrl = useCallback(() => {
+//     const baseUrl = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
+//     return `${baseUrl}/yjs`; // ✅ base endpoint only
+//   }, []);
 
-//   // ✅ Initialize Collaboration with Authentication
-//   const initCollaboration = useCallback(async () => {
-//     console.log('🔗 Starting authenticated collaboration...');
-//     addConnectionLog('Starting collaboration...');
-    
-//     setConnectionAttempt(prev => prev + 1);
-    
-//     if (!user || !token) {
-//       console.error('❌ User not authenticated');
-//       addConnectionLog('Error: User not authenticated');
-//       return;
-//     }
-    
-//     // First get session info with WebSocket token
-//     const sessionData = await fetchSessionInfo();
-//     if (!sessionData || !sessionData.wsToken) {
-//       console.error('❌ Failed to get session data');
-//       addConnectionLog('Error: Failed to get session data');
-//       return;
-//     }
-    
-//     const wsToken = sessionData.wsToken;
-//     const wsUrl = getWebSocketUrl(wsToken);
-//     if (!wsUrl) return;
-    
-//     try {
-//       // Create Yjs document
-//       const ydoc = new Y.Doc();
-//       ydocRef.current = ydoc;
-//       console.log('✅ Yjs document created');
-//       addConnectionLog('Yjs document created');
-      
-//       // Create WebSocket Provider
-//       const provider = new WebsocketProvider(
-//         wsUrl,
-//         sessionId, // Room name = sessionId
-//         ydoc,
-//         {
-//           connect: true,
-//           WebSocketPolyfill: WebSocket,
-//           maxBackoffTime: 3000,
-//           resyncInterval: 1000
-//         }
-//       );
-      
-//       providerRef.current = provider;
-      
-//       // Get Yjs array for whiteboard
-//       const yCanvasArray = ydoc.getArray('whiteboard');
-      
-//       // ✅ Listen for connection status
-//       provider.on('status', (event) => {
-//         console.log('📡 Yjs Status:', event.status);
-//         addConnectionLog(`Status: ${event.status}`);
-//         setConnectionStatus(event.status);
-        
-//         if (event.status === 'connected') {
-//           console.log('🎉 YJS CONNECTED SUCCESSFULLY!');
-//           addConnectionLog('✅ Connected to LiveSession');
-//           setIsLoading(false);
-//         }
-        
-//         if (event.status === 'disconnected') {
-//           // Auto-reconnect after 3 seconds
-//           setTimeout(() => {
-//             console.log('🔄 Attempting to reconnect...');
-//             addConnectionLog('Attempting reconnect');
-//             if (providerRef.current) {
-//               providerRef.current.connect();
-//             }
-//           }, 3000);
-//         }
-//       });
-      
-//       // ✅ Listen for sync events
-//       provider.on('sync', (isSynced) => {
-//         console.log('🔄 Yjs Sync:', isSynced);
-//         addConnectionLog(`Sync: ${isSynced}`);
-        
-//         if (isSynced && fabricCanvasRef.current) {
-//           // Load canvas data from Yjs
-//           if (yCanvasArray.length > 0) {
-//             try {
-//               const canvasData = yCanvasArray.toJSON()[0];
-//               if (canvasData && canvasData.objects) {
-//                 console.log('📥 Loading canvas from Yjs');
-//                 addConnectionLog('Loading canvas from Yjs');
-                
-//                 fabricCanvasRef.current.loadFromJSON(canvasData, () => {
-//                   fabricCanvasRef.current.renderAll();
-//                   console.log('✅ Canvas loaded from Yjs');
-//                   addConnectionLog('Canvas loaded');
-//                 });
-//               }
-//             } catch (error) {
-//               console.error('Error loading canvas:', error);
-//               addConnectionLog(`Load error: ${error.message}`);
-//             }
-//           }
-//         }
-//       });
-      
-//       // ✅ Listen for Yjs updates (remote changes)
-//       yCanvasArray.observe(event => {
-//         if (!fabricCanvasRef.current) return;
-        
-//         // Skip if this is our own change
-//         if (event.transaction.origin === ydoc.clientID) {
-//           console.log('📤 Local change, skipping sync back');
-//           return;
-//         }
-        
-//         console.log('🔄 Remote change detected');
-//         addConnectionLog('Remote change received');
-        
-//         try {
-//           const canvasData = yCanvasArray.toJSON()[0];
-//           if (canvasData) {
-//             fabricCanvasRef.current.loadFromJSON(canvasData, () => {
-//               fabricCanvasRef.current.renderAll();
-//               console.log('✅ Canvas updated from remote');
-//             });
-//           }
-//         } catch (error) {
-//           console.error('Error updating canvas:', error);
-//           addConnectionLog(`Update error: ${error.message}`);
-//         }
-//       });
-      
-//       // ✅ Listen for custom messages
-//       provider.ws.addEventListener('message', (event) => {
-//         try {
-//           if (typeof event.data === 'string') {
-//             const message = JSON.parse(event.data);
-            
-//             switch (message.type) {
-//               case 'welcome':
-//                 console.log('👋 Welcome:', message);
-//                 addConnectionLog(`Welcome to: ${message.sessionTitle}`);
-//                 setPermissions(message.permissions || {});
-//                 break;
-                
-//               case 'user-joined':
-//                 console.log(`👤 ${message.userName} joined`);
-//                 addConnectionLog(`${message.userName} joined`);
-//                 updateActiveUsers('add', message);
-//                 break;
-                
-//               case 'user-left':
-//                 console.log(`👤 ${message.userName} left`);
-//                 addConnectionLog(`${message.userName} left`);
-//                 updateActiveUsers('remove', message);
-//                 break;
-                
-//               case 'active-users':
-//                 setActiveUsers(message.users || []);
-//                 break;
-                
-//               case 'error':
-//                 console.error('❌ Server error:', message);
-//                 addConnectionLog(`Error: ${message.message}`);
-//                 break;
-                
-//               case 'chat-message':
-//                 console.log(`💬 ${message.userName}: ${message.text}`);
-//                 // Handle chat messages if needed
-//                 break;
-//             }
-//           }
-//         } catch (e) {
-//           // Not JSON, ignore
-//         }
-//       });
-      
-//       // ✅ Handle WebSocket errors
-//       provider.ws.addEventListener('error', (error) => {
-//         console.error('❌ WebSocket Error:', error);
-//         addConnectionLog(`WebSocket Error: ${error.message}`);
-//         setConnectionStatus('error');
-//       });
-      
-//       provider.ws.addEventListener('close', () => {
-//         console.log('🔌 WebSocket closed');
-//         addConnectionLog('WebSocket closed');
-//         setConnectionStatus('disconnected');
-//       });
-      
-//       console.log('✅ Yjs provider created');
-//       addConnectionLog('Yjs provider created');
-      
-//     } catch (error) {
-//       console.error('❌ Collaboration setup error:', error);
-//       addConnectionLog(`Setup error: ${error.message}`);
-//     }
-//   }, [sessionId, roomCode, user, token, isStreamer]);
+//   // =========================
+//   // ✅ HISTORY MANAGEMENT
+//   // =========================
+//   const saveState = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
 
-//   // ✅ Update active users list
-//   const updateActiveUsers = (action, userData) => {
-//     setActiveUsers(prev => {
-//       if (action === 'add') {
-//         return [...prev.filter(u => u.userId !== userData.userId), {
-//           userId: userData.userId,
-//           userName: userData.userName,
-//           userRole: userData.userRole,
-//           isStreamer: userData.isStreamer
-//         }];
-//       } else {
-//         return prev.filter(u => u.userId !== userData.userId);
+//     if (saveQueuedRef.current) return;
+//     saveQueuedRef.current = true;
+
+//     queueMicrotask(() => {
+//       saveQueuedRef.current = false;
+//       const c = fabricCanvasRef.current;
+//       if (!c) return;
+
+//       try {
+//         const state = c.toJSON(["id"]);
+//         const hist = historyRef.current;
+//         const idx = historyIndexRef.current;
+
+//         const next = hist.slice(0, idx + 1);
+//         next.push(state);
+
+//         historyRef.current = next;
+//         historyIndexRef.current = next.length - 1;
+//       } catch (e) {
+//         console.error("❌ saveState error:", e);
 //       }
 //     });
-//   };
+//   }, []);
 
-//   // ✅ Sync Canvas to Yjs
-//   const syncCanvasToYjs = useCallback(() => {
-//     if (!fabricCanvasRef.current || !permissions.canDraw || !providerRef.current) {
-//       console.log('❌ Cannot sync: No permission or not ready');
-//       return;
-//     }
-    
+//   const loadFromHistoryIndex = useCallback((idx) => {
+//     const canvas = fabricCanvasRef.current;
+//     const hist = historyRef.current;
+//     if (!canvas || !hist[idx]) return;
+
 //     try {
-//       console.log('📤 Syncing canvas to Yjs...');
-      
-//       const canvas = fabricCanvasRef.current;
-//       const canvasState = canvas.toJSON();
-      
-//       // Update Yjs document
-//       if (ydocRef.current) {
-//         const ydoc = ydocRef.current;
-//         const yCanvasArray = ydoc.getArray('whiteboard');
-        
-//         yCanvasArray.delete(0, yCanvasArray.length);
-//         yCanvasArray.insert(0, [canvasState]);
-        
-//         console.log('✅ Canvas synced to Yjs');
-//         addConnectionLog('Canvas synced');
-//       }
-      
-//     } catch (error) {
-//       console.error('❌ Error syncing canvas:', error);
-//       addConnectionLog(`Sync error: ${error.message}`);
+//       canvas.loadFromJSON(hist[idx], () => {
+//         canvas.renderAll();
+//       });
+//     } catch (e) {
+//       console.error("❌ loadFromHistoryIndex error:", e);
 //     }
-//   }, [permissions]);
+//   }, []);
 
-//   // ✅ Initialize Canvas
-//   const initCanvas = useCallback(() => {
-//     console.log('🎨 initCanvas called!');
-//     addConnectionLog('Initializing canvas...');
-    
-//     if (!containerRef.current) {
-//       console.log('❌ Container not ready, retrying...');
-//       addConnectionLog('Container not ready, retrying...');
-//       setTimeout(() => initCanvas(), 500);
+//   // =========================
+//   // ✅ YJS SYNC FUNCTIONS (FIXED INDEX 0 + transact origin)
+//   // =========================
+//   const updateYjsCanvas = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     const ydoc = ydocRef.current;
+//     if (!canvas || !ydoc) return;
+
+//     try {
+//       const json = canvas.toJSON(["id"]);
+//       const yCanvasArray = ydoc.getArray("whiteboard");
+
+//       const payload = {
+//         ...json,
+//         sessionId,
+//         allowViewersToDraw: roomSettings.allowViewersToDraw,
+//         lastUpdated: new Date().toISOString(),
+//         updatedBy: getUserId(),
+//         updatedByName: user?.name || "Streamer",
+//         version: "5.3.0",
+//       };
+
+//       // ✅ always write at index 0, with origin to prevent self-loop in observers
+//       ydoc.transact(() => {
+//         if (yCanvasArray.length > 0) yCanvasArray.delete(0, yCanvasArray.length);
+//         yCanvasArray.insert(0, [payload]);
+//       }, "local-canvas");
+
+//       console.log("📤 [STREAMER] Canvas state synced to Yjs");
+//     } catch (e) {
+//       console.error("❌ updateYjsCanvas error:", e);
+//     }
+//   }, [getUserId, roomSettings.allowViewersToDraw, sessionId, user?.name]);
+
+//   const loadCanvasFromState = useCallback(
+//     (state) => {
+//       const canvas = fabricCanvasRef.current;
+//       if (!canvas || !state) return;
+
+//       try {
+//         canvas.loadFromJSON(state, () => {
+//           canvas.renderAll();
+//           saveState();
+//         });
+//       } catch (e) {
+//         console.error("❌ loadCanvasFromState error:", e);
+//       }
+//     },
+//     [saveState]
+//   );
+
+//   const handleUndo = useCallback(() => {
+//     const idx = historyIndexRef.current;
+//     if (idx <= 0) return;
+
+//     historyIndexRef.current = idx - 1;
+//     loadFromHistoryIndex(idx - 1);
+
+//     clearTimeout(syncTimeoutRef.current);
+//     syncTimeoutRef.current = setTimeout(() => {
+//       updateYjsCanvas();
+//     }, 250);
+//   }, [loadFromHistoryIndex, updateYjsCanvas]);
+
+//   const handleRedo = useCallback(() => {
+//     const hist = historyRef.current;
+//     const idx = historyIndexRef.current;
+//     if (idx >= hist.length - 1) return;
+
+//     historyIndexRef.current = idx + 1;
+//     loadFromHistoryIndex(idx + 1);
+
+//     clearTimeout(syncTimeoutRef.current);
+//     syncTimeoutRef.current = setTimeout(() => {
+//       updateYjsCanvas();
+//     }, 250);
+//   }, [loadFromHistoryIndex, updateYjsCanvas]);
+
+//   // =========================
+//   // ✅ YJS INITIALIZATION - STREAMER (FIXED)
+//   // =========================
+//   const initYjs = useCallback(() => {
+//     // Clean up provider first
+//     if (yProviderRef.current) {
+//       try {
+//         console.log("🧹 [STREAMER] Destroying old YProvider");
+//         yProviderRef.current.disconnect();
+//         yProviderRef.current.destroy();
+//       } catch (e) {
+//         console.error("❌ [STREAMER] Error destroying provider:", e);
+//       }
+//       yProviderRef.current = null;
+//     }
+
+//     // Clean up Y.Doc
+//     if (ydocRef.current) {
+//       try {
+//         console.log("🧹 [STREAMER] Destroying old Y.Doc with clientID:", ydocRef.current.clientID);
+//         ydocRef.current.destroy();
+//       } catch (e) {
+//         console.error("❌ [STREAMER] Error destroying Y.Doc:", e);
+//       }
+//       ydocRef.current = null;
+//     }
+
+//     // Validate required props
+//     if (!sessionId) {
+//       console.error("❌ [STREAMER] Missing sessionId");
+//       safeSetState(() => setIsLoading(false));
 //       return;
 //     }
-    
-//     console.log('✅ Container ready');
-//     addConnectionLog('Container ready');
-    
+
+//     if (!wsToken) {
+//       console.error("❌ [STREAMER] Missing wsToken");
+//       safeSetState(() => setIsLoading(false));
+//       return;
+//     }
+
+//     const serverUrl = getWebSocketBaseUrl();
+
+//     try {
+//       console.log("📄 [STREAMER] Creating NEW Y.Doc");
+//       const ydoc = new Y.Doc();
+//       ydocRef.current = ydoc;
+
+//       console.log("✅ [STREAMER] New Y.Doc created with clientID:", ydoc.clientID);
+
+//       const yCanvasArray = ydoc.getArray("whiteboard");
+//       const yUsers = ydoc.getMap("users");
+//       const ySettings = ydoc.getMap("room_settings");
+
+//       // ✅ ensure binaryType = arraybuffer in browser ws
+//       class BinaryWebSocket extends WebSocket {
+//         constructor(url, protocols) {
+//           super(url, protocols);
+//           this.binaryType = "arraybuffer";
+//         }
+//       }
+
+//       console.log("🔌 [STREAMER] Creating WebSocketProvider (baseUrl + roomName + params)", {
+//         serverUrl,
+//         roomName: `${sessionId}`,
+//       });
+
+//       const provider = new WebsocketProvider(
+//         serverUrl, // ✅ ws://host:9090/yjs
+//         `${sessionId}`, // ✅ roomName => /yjs/<sessionId>
+//         ydoc,
+//         {
+//           WebSocketPolyfill: BinaryWebSocket,
+//           connect: true,
+//           disableBc: true,
+//           maxBackoffTime: 5000,
+//           params: {
+//             token: wsToken,
+//             roomCode: roomCode || "",
+//             userName: user?.name || user?.userName || "Streamer",
+//             userId: getUserId(),
+//             isStreamer: "true",
+//             allowViewersToDraw: String(!!allowViewersToDraw),
+//             roomName: sessionInfo?.title || "Whiteboard Session",
+//             _t: Date.now(),
+//           },
+//         }
+//       );
+
+//       yProviderRef.current = provider;
+
+//       provider.on("status", (event) => {
+//         const status = event?.status || "unknown";
+//         console.log("📡 [STREAMER] Yjs status:", status, "Y.Doc clientID:", ydoc.clientID);
+//         safeSetState(() => setConnectionStatus(status));
+
+//         if (status === "connected") {
+//           safeSetState(() => {
+//             setIsLoading(false);
+//             setConnectionError(null);
+//           });
+
+//           // ✅ Register streamer
+//           const uid = getUserId();
+//           yUsers.set(uid, {
+//             name: user?.name || "Streamer",
+//             id: uid,
+//             isStreamer: true,
+//             isViewer: false,
+//             permissions: permissionsRef.current,
+//             joinedAt: new Date().toISOString(),
+//             lastActive: new Date().toISOString(),
+//             cursorPosition: { x: 0, y: 0 },
+//             currentTool: toolRef.current || "select",
+//             yjsClientId: ydoc.clientID,
+//             connectionId: `${uid}_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//           });
+
+//           console.log("✅ [STREAMER] Registered with Yjs clientID:", ydoc.clientID);
+
+//           // ✅ Initialize room settings (only if not present)
+//           if (ySettings.get("allowViewersToDraw") === undefined) {
+//             console.log("🎛️ [STREAMER] Initializing room settings");
+//             ySettings.set("allowViewersToDraw", allowViewersToDraw);
+//             ySettings.set("streamerId", uid);
+//             ySettings.set("streamerName", user?.name || "Streamer");
+//             ySettings.set("createdAt", new Date().toISOString());
+//             ySettings.set("updatedAt", new Date().toISOString());
+//           }
+
+//           // ✅ Initialize canvas if empty
+//           if (yCanvasArray.length === 0) {
+//             console.log("🆕 [STREAMER] Creating initial canvas state");
+//             const initialState = {
+//               version: "5.3.0",
+//               objects: [],
+//               background: "#ffffff",
+//               sessionId,
+//               allowViewersToDraw,
+//               createdAt: new Date().toISOString(),
+//               updatedBy: uid,
+//               updatedByName: user?.name || "Streamer",
+//             };
+
+//             ydoc.transact(() => {
+//               yCanvasArray.insert(0, [initialState]);
+//             }, "local-canvas");
+
+//             console.log("✅ [STREAMER] Initial canvas state created");
+//           } else {
+//             console.log("📥 [STREAMER] Existing canvas state found");
+//             const latestState = yCanvasArray.get(0);
+//             if (latestState) loadCanvasFromState(latestState);
+//           }
+//         }
+//       });
+
+//       provider.on("connection-error", (error) => {
+//         console.error("❌ [STREAMER] Yjs connection error:", error);
+//         safeSetState(() => {
+//           setConnectionError(error?.message || "Connection error");
+//           setIsLoading(false);
+//         });
+//       });
+
+//       // ✅ Room settings observer
+//       ySettings.observe(() => {
+//         try {
+//           const s = ySettings.toJSON();
+//           console.log("⚙️ [STREAMER] Room settings changed:", s);
+
+//           safeSetState(() =>
+//             setRoomSettings((prev) => ({
+//               ...prev,
+//               allowViewersToDraw: s.allowViewersToDraw ?? prev.allowViewersToDraw,
+//               streamerId: s.streamerId ?? prev.streamerId,
+//               streamerName: s.streamerName ?? prev.streamerName,
+//             }))
+//           );
+//         } catch (error) {
+//           console.error("❌ [STREAMER] Settings observer error:", error);
+//         }
+//       });
+
+//       // ✅ Users observer
+//       yUsers.observe(() => {
+//         try {
+//           const usersArr = Array.from(yUsers.values());
+//           const others = usersArr.filter((u) => u.id !== getUserId());
+//           safeSetState(() => setActiveUsers(others));
+//         } catch (error) {
+//           console.error("❌ [STREAMER] Users observer error:", error);
+//         }
+//       });
+
+//       // ✅ Canvas observer - Receive updates (from viewers OR ourselves via remote)
+//       yCanvasArray.observe((event) => {
+//         try {
+//           // ✅ ignore our local origin writes
+//           if (event.transaction?.origin === "local-canvas") return;
+
+//           if (yCanvasArray.length === 0) return;
+
+//           // ✅ Always read index 0
+//           const latest = yCanvasArray.get(0);
+//           if (!latest) return;
+
+//           // ✅ ignore if it's our own update by userId too
+//           if (latest.updatedBy === getUserId()) return;
+
+//           console.log("📥 [STREAMER] Incoming canvas update:", {
+//             updatedBy: latest.updatedBy,
+//             updatedByName: latest.updatedByName,
+//             objects: latest.objects?.length || 0,
+//           });
+
+//           // Viewer updates should apply only if viewers can draw
+//           if (roomSettings.allowViewersToDraw) {
+//             loadCanvasFromState(latest);
+//           }
+//         } catch (error) {
+//           console.error("❌ [STREAMER] Canvas observer error:", error);
+//         }
+//       });
+
+//       console.log("✅ [STREAMER] Yjs initialized successfully with clientID:", ydoc.clientID);
+//     } catch (err) {
+//       console.error("❌ [STREAMER] initYjs error:", err);
+//       safeSetState(() => {
+//         setConnectionError(err?.message || "Initialization error");
+//         setIsLoading(false);
+//       });
+//     }
+//   }, [
+//     allowViewersToDraw,
+//     getWebSocketBaseUrl,
+//     roomCode,
+//     sessionId,
+//     sessionInfo?.title,
+//     user?.name,
+//     user?.userName,
+//     wsToken,
+//     getUserId,
+//     loadCanvasFromState,
+//     safeSetState,
+//     roomSettings.allowViewersToDraw,
+//   ]);
+
+//   // =========================
+//   // ✅ FABRIC CANVAS INITIALIZATION
+//   // =========================
+//   const initCanvas = useCallback(() => {
+//     if (!containerRef.current || !canvasElRef.current) return;
+
 //     // Clean up existing canvas
 //     if (fabricCanvasRef.current) {
-//       console.log('🧹 Cleaning up existing canvas');
 //       fabricCanvasRef.current.dispose();
 //       fabricCanvasRef.current = null;
 //     }
-    
-//     // Create new canvas
-//     const canvas = new fabric.Canvas(canvasRef.current, {
-//       width: containerRef.current.clientWidth,
-//       height: containerRef.current.clientHeight,
-//       backgroundColor: '#ffffff',
-//       selection: true,
-//       preserveObjectStacking: true,
-//     });
-    
-//     fabricCanvasRef.current = canvas;
-//     console.log('✅ Fabric canvas created');
-//     addConnectionLog('Fabric canvas created');
-    
-//     // Setup drawing based on permissions
-//     canvas.isDrawingMode = false;
-//     if (permissions.canDraw) {
+
+//     const container = containerRef.current;
+
+//     try {
+//       const canvas = new fabric.Canvas(canvasElRef.current, {
+//         width: container.clientWidth,
+//         height: container.clientHeight,
+//         backgroundColor: "#ffffff",
+//         selection: true,
+//         preserveObjectStacking: true,
+//         renderOnAddRemove: true,
+//       });
+
+//       fabricCanvasRef.current = canvas;
+
+//       // Setup brush
 //       canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
-//       canvas.freeDrawingBrush.width = brushWidth;
-//       canvas.freeDrawingBrush.color = brushColor;
-//     }
-    
-//     // Event Listeners
-//     canvas.on('mouse:move', (e) => {
-//       if (!e.absolutePointer) return;
-      
-//       setCursorPosition({
-//         x: Math.round(e.absolutePointer.x),
-//         y: Math.round(e.absolutePointer.y)
+//       canvas.freeDrawingBrush.width = brushWidthRef.current;
+//       canvas.freeDrawingBrush.color = brushColorRef.current;
+
+//       // Mouse move - cursor position
+//       canvas.on("mouse:move", (e) => {
+//         if (!e.absolutePointer) return;
+//         safeSetState(() =>
+//           setCursorPosition({
+//             x: Math.round(e.absolutePointer.x),
+//             y: Math.round(e.absolutePointer.y),
+//           })
+//         );
 //       });
-//     });
-    
-//     canvas.on('object:added', (e) => {
-//       if (e.target) {
-//         console.log('➕ Object added:', e.target.type);
-        
-//         // Generate ID if not exists
-//         if (!e.target.id) {
-//           e.target.id = `obj_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+//       // Object added
+//       canvas.on("object:added", (e) => {
+//         if (e.target && !e.target.id) {
+//           e.target.id = `obj_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 //         }
-        
-//         // Save state
 //         saveState();
-        
-//         // Sync to Yjs if we have permission
-//         if (permissions.canDraw) {
-//           setTimeout(() => {
-//             syncCanvasToYjs();
-//           }, 100);
+//       });
+
+//       // Object modified
+//       canvas.on("object:modified", () => {
+//         saveState();
+//         clearTimeout(syncTimeoutRef.current);
+//         syncTimeoutRef.current = setTimeout(() => {
+//           updateYjsCanvas();
+//         }, 400);
+//       });
+
+//       // Object removed
+//       canvas.on("object:removed", () => {
+//         saveState();
+//         clearTimeout(syncTimeoutRef.current);
+//         syncTimeoutRef.current = setTimeout(() => {
+//           updateYjsCanvas();
+//         }, 400);
+//       });
+
+//       // Path created
+//       canvas.on("path:created", (e) => {
+//         if (e.path && !e.path.id) {
+//           e.path.id = `path_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 //         }
-//       }
-//     });
-    
-//     canvas.on('object:modified', (e) => {
-//       if (e.target) {
-//         console.log('✏️ Object modified');
-        
-//         setTimeout(() => {
-//           saveState();
-//           if (permissions.canEdit) {
-//             syncCanvasToYjs();
-//           }
-//         }, 100);
-//       }
-//     });
-    
-//     canvas.on('object:removed', (e) => {
-//       if (e.target) {
-//         console.log('➖ Object removed');
-        
-//         setTimeout(() => {
-//           saveState();
-//           if (permissions.canDelete) {
-//             syncCanvasToYjs();
-//           }
-//         }, 100);
-//       }
-//     });
-    
-//     // Window resize handler
-//     const handleResize = () => {
-//       if (containerRef.current && canvas) {
-//         canvas.setDimensions({
-//           width: containerRef.current.clientWidth,
-//           height: containerRef.current.clientHeight
+//         saveState();
+//       });
+
+//       // Mouse up - trigger sync
+//       canvas.on("mouse:up", () => {
+//         clearTimeout(syncTimeoutRef.current);
+//         syncTimeoutRef.current = setTimeout(() => {
+//           updateYjsCanvas();
+//         }, 300);
+//       });
+
+//       // Window resize handler
+//       const handleResize = () => {
+//         const c = fabricCanvasRef.current;
+//         const ctr = containerRef.current;
+//         if (!c || !ctr) return;
+//         c.setDimensions({
+//           width: ctr.clientWidth,
+//           height: ctr.clientHeight,
 //         });
+//         c.renderAll();
+//       };
+
+//       resizeHandlerRef.current = handleResize;
+//       window.addEventListener("resize", handleResize);
+
+//       // Initial save
+//       saveState();
+
+//       console.log("✅ Fabric canvas initialized");
+//     } catch (error) {
+//       console.error("❌ Canvas initialization error:", error);
+//     }
+//   }, [saveState, updateYjsCanvas, safeSetState]);
+
+//   // =========================
+//   // ✅ TOOL FUNCTIONS
+//   // =========================
+//   const setBrushToCanvas = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     if (!canvas.freeDrawingBrush) {
+//       canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
+//     }
+//     canvas.freeDrawingBrush.width = brushWidthRef.current;
+//     canvas.freeDrawingBrush.color = brushColorRef.current;
+//   }, []);
+
+//   const addRectangle = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     const rect = new fabric.Rect({
+//       left: 120,
+//       top: 120,
+//       width: 180,
+//       height: 120,
+//       fill: fillColorRef.current,
+//       stroke: brushColorRef.current,
+//       strokeWidth: brushWidthRef.current,
+//       opacity: opacityRef.current,
+//       selectable: true,
+//       id: `rect_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+
+//     canvas.add(rect);
+//     canvas.setActiveObject(rect);
+//     canvas.renderAll();
+//     setTool("select");
+//     setTimeout(updateYjsCanvas, 100);
+//   }, [updateYjsCanvas]);
+
+//   const addCircle = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     const circle = new fabric.Circle({
+//       left: 140,
+//       top: 140,
+//       radius: 70,
+//       fill: fillColorRef.current,
+//       stroke: brushColorRef.current,
+//       strokeWidth: brushWidthRef.current,
+//       opacity: opacityRef.current,
+//       selectable: true,
+//       id: `circle_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+
+//     canvas.add(circle);
+//     canvas.setActiveObject(circle);
+//     canvas.renderAll();
+//     setTool("select");
+//     setTimeout(updateYjsCanvas, 100);
+//   }, [updateYjsCanvas]);
+
+//   const addText = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     const text = new fabric.IText("Double click to edit", {
+//       left: 140,
+//       top: 140,
+//       fontSize: fontSizeRef.current,
+//       fill: brushColorRef.current,
+//       selectable: true,
+//       id: `text_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+
+//     canvas.add(text);
+//     canvas.setActiveObject(text);
+//     canvas.renderAll();
+//     setTool("select");
+//     setTimeout(updateYjsCanvas, 100);
+//   }, [updateYjsCanvas]);
+
+//   const addSticky = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     const bg = new fabric.Rect({
+//       left: 120,
+//       top: 120,
+//       width: 220,
+//       height: 150,
+//       fill: "#ffff88",
+//       stroke: "#d4d4d4",
+//       strokeWidth: 1,
+//       opacity: 0.92,
+//       selectable: true,
+//       id: `sticky_bg_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+
+//     const tx = new fabric.IText("Edit note...", {
+//       left: 130,
+//       top: 130,
+//       fontSize: 16,
+//       fill: "#000000",
+//       selectable: true,
+//       id: `sticky_text_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+
+//     const group = new fabric.Group([bg, tx], {
+//       left: 120,
+//       top: 120,
+//       selectable: true,
+//       id: `sticky_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+
+//     canvas.add(group);
+//     canvas.setActiveObject(group);
+//     canvas.renderAll();
+//     setTool("select");
+//     setTimeout(updateYjsCanvas, 100);
+//   }, [updateYjsCanvas]);
+
+//   const startLineMode = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     canvas.isDrawingMode = false;
+//     canvas.selection = false;
+
+//     let line = null;
+//     let isDown = false;
+
+//     const onMouseDown = (opt) => {
+//       isDown = true;
+//       const pointer = canvas.getPointer(opt.e);
+//       line = new fabric.Line([pointer.x, pointer.y, pointer.x, pointer.y], {
+//         stroke: brushColorRef.current,
+//         strokeWidth: brushWidthRef.current,
+//         opacity: opacityRef.current,
+//         selectable: true,
+//         id: `line_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//       });
+//       canvas.add(line);
+//     };
+
+//     const onMouseMove = (opt) => {
+//       if (!isDown || !line) return;
+//       const pointer = canvas.getPointer(opt.e);
+//       line.set({ x2: pointer.x, y2: pointer.y });
+//       canvas.renderAll();
+//     };
+
+//     const onMouseUp = () => {
+//       isDown = false;
+//       canvas.off("mouse:down", onMouseDown);
+//       canvas.off("mouse:move", onMouseMove);
+//       canvas.off("mouse:up", onMouseUp);
+//       canvas.selection = true;
+//       setTool("select");
+//       setTimeout(updateYjsCanvas, 100);
+//     };
+
+//     canvas.on("mouse:down", onMouseDown);
+//     canvas.on("mouse:move", onMouseMove);
+//     canvas.on("mouse:up", onMouseUp);
+//   }, [updateYjsCanvas]);
+
+//   const startArrowMode = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     canvas.isDrawingMode = false;
+//     canvas.selection = false;
+
+//     let isDown = false;
+//     let shaft = null;
+//     let head = null;
+
+//     const onMouseDown = (opt) => {
+//       isDown = true;
+//       const pointer = canvas.getPointer(opt.e);
+
+//       shaft = new fabric.Line([pointer.x, pointer.y, pointer.x, pointer.y], {
+//         stroke: brushColorRef.current,
+//         strokeWidth: brushWidthRef.current,
+//         opacity: opacityRef.current,
+//         selectable: false,
+//       });
+
+//       head = new fabric.Triangle({
+//         left: pointer.x,
+//         top: pointer.y,
+//         width: 14,
+//         height: 14,
+//         fill: brushColorRef.current,
+//         angle: 0,
+//         originX: "center",
+//         originY: "center",
+//         selectable: false,
+//       });
+
+//       canvas.add(shaft);
+//       canvas.add(head);
+//     };
+
+//     const onMouseMove = (opt) => {
+//       if (!isDown || !shaft || !head) return;
+//       const pointer = canvas.getPointer(opt.e);
+
+//       shaft.set({ x2: pointer.x, y2: pointer.y });
+
+//       const dx = pointer.x - shaft.x1;
+//       const dy = pointer.y - shaft.y1;
+//       const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+
+//       head.set({
+//         left: pointer.x,
+//         top: pointer.y,
+//         angle: angle + 90,
+//       });
+
+//       canvas.renderAll();
+//     };
+
+//     const onMouseUp = () => {
+//       isDown = false;
+
+//       if (shaft && head) {
+//         const group = new fabric.Group([shaft, head], {
+//           selectable: true,
+//           id: `arrow_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//         });
+//         canvas.remove(shaft);
+//         canvas.remove(head);
+//         canvas.add(group);
+//       }
+
+//       canvas.off("mouse:down", onMouseDown);
+//       canvas.off("mouse:move", onMouseMove);
+//       canvas.off("mouse:up", onMouseUp);
+//       canvas.selection = true;
+//       setTool("select");
+//       setTimeout(updateYjsCanvas, 100);
+//     };
+
+//     canvas.on("mouse:down", onMouseDown);
+//     canvas.on("mouse:move", onMouseMove);
+//     canvas.on("mouse:up", onMouseUp);
+//   }, [updateYjsCanvas]);
+
+//   const activateEraser = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     canvas.isDrawingMode = false;
+//     canvas.selection = false;
+
+//     const onMouseDown = (opt) => {
+//       const pointer = canvas.getPointer(opt.e);
+//       const objects = canvas.getObjects();
+
+//       let removed = false;
+//       objects.forEach((obj) => {
+//         if (obj.containsPoint && obj.containsPoint(pointer)) {
+//           canvas.remove(obj);
+//           removed = true;
+//         }
+//       });
+
+//       if (removed) {
 //         canvas.renderAll();
+//         setTimeout(updateYjsCanvas, 100);
 //       }
 //     };
-    
-//     window.addEventListener('resize', handleResize);
-    
-//     // Initial save
-//     saveState();
-    
-//     console.log('✅ Canvas initialization complete');
-//     addConnectionLog('Canvas initialization complete');
-    
-//     // Start collaboration after canvas is ready
+
+//     canvas.on("mouse:down", onMouseDown);
+
+//     // Auto-disable after 5 seconds
 //     setTimeout(() => {
-//       console.log('🚀 Starting collaboration...');
-//       addConnectionLog('Starting collaboration...');
-//       initCollaboration();
-//     }, 1000);
-    
-//     return () => {
-//       window.removeEventListener('resize', handleResize);
-//     };
-//   }, [initCollaboration, brushWidth, brushColor, permissions, syncCanvasToYjs]);
+//       canvas.off("mouse:down", onMouseDown);
+//       canvas.selection = true;
+//       setTool("select");
+//     }, 5000);
+//   }, [updateYjsCanvas]);
 
-//   // ✅ Save State for Undo/Redo
-//   const saveState = () => {
-//     if (!fabricCanvasRef.current) return;
-    
-//     const state = fabricCanvasRef.current.toJSON();
-//     const newHistory = [...history.slice(0, historyIndex + 1), state];
-    
-//     setHistory(newHistory);
-//     setHistoryIndex(newHistory.length - 1);
-//   };
+//   const handleToolSelect = useCallback(
+//     (toolId) => {
+//       const canvas = fabricCanvasRef.current;
+//       if (!canvas) return;
 
-//   // ✅ Undo
-//   const handleUndo = () => {
-//     if (historyIndex > 0) {
-//       const newIndex = historyIndex - 1;
-//       setHistoryIndex(newIndex);
-      
-//       fabricCanvasRef.current.loadFromJSON(history[newIndex], () => {
-//         fabricCanvasRef.current.renderAll();
-//         if (permissions.canEdit) {
-//           syncCanvasToYjs();
-//         }
-//       });
-//     }
-//   };
+//       toolRef.current = toolId;
+//       setTool(toolId);
 
-//   // ✅ Redo
-//   const handleRedo = () => {
-//     if (historyIndex < history.length - 1) {
-//       const newIndex = historyIndex + 1;
-//       setHistoryIndex(newIndex);
-      
-//       fabricCanvasRef.current.loadFromJSON(history[newIndex], () => {
-//         fabricCanvasRef.current.renderAll();
-//         if (permissions.canEdit) {
-//           syncCanvasToYjs();
-//         }
-//       });
-//     }
-//   };
+//       switch (toolId) {
+//         case "select":
+//           canvas.isDrawingMode = false;
+//           canvas.selection = true;
+//           break;
 
-//   // ✅ Tool Handlers with Permission Check
-//   const handleToolSelect = (selectedTool) => {
-//     console.log(`🛠️ Tool selected: ${selectedTool}`);
-    
-//     // Check permissions
-//     if ((selectedTool === 'draw' || selectedTool === 'eraser') && !permissions.canDraw) {
-//       console.log('🚫 No permission to draw');
-//       addConnectionLog('No permission to draw');
-//       return;
-//     }
-    
-//     setTool(selectedTool);
+//         case "draw":
+//           canvas.selection = false;
+//           canvas.isDrawingMode = true;
+//           setBrushToCanvas();
+//           break;
+
+//         case "rectangle":
+//           addRectangle();
+//           break;
+
+//         case "circle":
+//           addCircle();
+//           break;
+
+//         case "line":
+//           startLineMode();
+//           break;
+
+//         case "arrow":
+//           startArrowMode();
+//           break;
+
+//         case "text":
+//           addText();
+//           break;
+
+//         case "sticky":
+//           addSticky();
+//           break;
+
+//         case "eraser":
+//           activateEraser();
+//           break;
+
+//         default:
+//           break;
+//       }
+//     },
+//     [activateEraser, addCircle, addRectangle, addSticky, addText, setBrushToCanvas, startArrowMode, startLineMode]
+//   );
+
+//   // =========================
+//   // ✅ EXPORT/IMPORT/CLEAR/DELETE
+//   // =========================
+//   const exportAsImage = useCallback(() => {
 //     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     const dataURL = canvas.toDataURL({
+//       format: "png",
+//       quality: 1,
+//       multiplier: 2,
+//     });
+
+//     const link = document.createElement("a");
+//     link.href = dataURL;
+//     link.download = `whiteboard-${sessionInfo?.title || "session"}-${new Date().toISOString().slice(0, 10)}.png`;
+//     link.click();
+//   }, [sessionInfo?.title]);
+
+//   const exportAsJSON = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     const json = canvas.toJSON(["id"]);
+//     const dataStr = JSON.stringify(json, null, 2);
+//     const blob = new Blob([dataStr], { type: "application/json" });
+//     const url = URL.createObjectURL(blob);
+
+//     const link = document.createElement("a");
+//     link.href = url;
+//     link.download = `whiteboard-${sessionInfo?.title || "session"}-${new Date().toISOString().slice(0, 10)}.json`;
+//     link.click();
+
+//     URL.revokeObjectURL(url);
+//   }, [sessionInfo?.title]);
+
+//   const importFromJSON = useCallback(() => {
+//     const input = document.createElement("input");
+//     input.type = "file";
+//     input.accept = ".json,application/json";
+
+//     input.onchange = (e) => {
+//       const file = e.target.files?.[0];
+//       if (!file) return;
+
+//       const reader = new FileReader();
+//       reader.onload = (ev) => {
+//         try {
+//           const json = JSON.parse(ev.target.result);
+//           const canvas = fabricCanvasRef.current;
+//           if (!canvas) return;
+
+//           canvas.loadFromJSON(json, () => {
+//             canvas.renderAll();
+//             saveState();
+//             setTimeout(updateYjsCanvas, 200);
+//           });
+//         } catch (error) {
+//           alert("Invalid JSON file: " + error.message);
+//         }
+//       };
+//       reader.readAsText(file);
+//     };
+
+//     input.click();
+//   }, [saveState, updateYjsCanvas]);
+
+//   const handleClear = useCallback(() => {
+//     if (!window.confirm("Are you sure you want to clear the whiteboard?")) return;
+
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     canvas.clear();
+//     canvas.backgroundColor = "#ffffff";
+//     canvas.renderAll();
+//     saveState();
+//     setTimeout(updateYjsCanvas, 200);
+//   }, [saveState, updateYjsCanvas]);
+
+//   const deleteSelected = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     const activeObject = canvas.getActiveObject();
+//     if (!activeObject) return;
+
+//     canvas.remove(activeObject);
+//     canvas.discardActiveObject();
+//     canvas.renderAll();
+//     saveState();
+//     setTimeout(updateYjsCanvas, 200);
+//   }, [saveState, updateYjsCanvas]);
+
+//   // =========================
+//   // ✅ TOGGLE VIEWER DRAW (FIXED: write to ySettings, keep state in sync)
+//   // =========================
+//   const toggleViewersDraw = useCallback(() => {
+//     const ydoc = ydocRef.current;
+//     if (!ydoc) return;
+
+//     const ySettings = ydoc.getMap("room_settings");
+//     const newValue = !roomSettings.allowViewersToDraw;
+
+//     ySettings.set("allowViewersToDraw", newValue);
+//     ySettings.set("updatedAt", new Date().toISOString());
+//     ySettings.set("updatedBy", getUserId());
+
+//     console.log("🎨 Viewers draw toggled:", newValue ? "ENABLED" : "DISABLED");
+//   }, [getUserId, roomSettings.allowViewersToDraw]);
+
+//   // =========================
+//   // ✅ ZOOM FUNCTIONS
+//   // =========================
+//   const handleZoomIn = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     const newZoom = Math.min(zoom * 1.2, 5);
+//     setZoom(newZoom);
+//     canvas.setZoom(newZoom);
+//     canvas.renderAll();
+//   }, [zoom]);
+
+//   const handleZoomOut = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     const newZoom = Math.max(zoom / 1.2, 0.2);
+//     setZoom(newZoom);
+//     canvas.setZoom(newZoom);
+//     canvas.renderAll();
+//   }, [zoom]);
+
+//   const handleZoomReset = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     setZoom(1);
+//     canvas.setZoom(1);
+//     canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+//     canvas.renderAll();
+//   }, []);
+
+//   const toggleFullscreen = useCallback(() => {
+//     setIsFullscreen((prev) => !prev);
+//   }, []);
+
+//   // =========================
+//   // ✅ SYNC REFS WITH STATE
+//   // =========================
+//   useEffect(() => {
+//     brushWidthRef.current = brushWidth;
+//   }, [brushWidth]);
+//   useEffect(() => {
+//     brushColorRef.current = brushColor;
+//   }, [brushColor]);
+//   useEffect(() => {
+//     fillColorRef.current = fillColor;
+//   }, [fillColor]);
+//   useEffect(() => {
+//     opacityRef.current = opacity;
+//   }, [opacity]);
+//   useEffect(() => {
+//     fontSizeRef.current = fontSize;
+//   }, [fontSize]);
+
+//   // =========================
+//   // ✅ LIFECYCLE - MOUNT
+//   // =========================
+//   useEffect(() => {
+//     isMountedRef.current = true;
+//     return () => {
+//       isMountedRef.current = false;
+//     };
+//   }, []);
+
+//   // =========================
+//   // ✅ LIFECYCLE - INITIALIZATION
+//   // =========================
+//   useEffect(() => {
+//     if (!isActive) return;
+
+//     initCompleteRef.current = false;
+
+//     safeSetState(() => {
+//       setIsLoading(true);
+//       setConnectionStatus("connecting");
+//       setConnectionError(null);
+//     });
+
+//     initCanvas();
+
+//     const timer = setTimeout(() => {
+//       initYjs();
+//     }, 500);
+
+//     return () => {
+//       clearTimeout(timer);
+//       clearTimeout(syncTimeoutRef.current);
+//       clearTimeout(loadTimeoutRef.current);
+//     };
+//   }, [initCanvas, initYjs, isActive, safeSetState]);
+
+//   // =========================
+//   // ✅ LIFECYCLE - CLEANUP
+//   // =========================
+//   useEffect(() => {
+//     return () => {
+//       console.log("🧹 Cleaning up WhiteboardComponent...");
+
+//       if (resizeHandlerRef.current) {
+//         window.removeEventListener("resize", resizeHandlerRef.current);
+//       }
+
+//       if (yProviderRef.current) {
+//         try {
+//           yProviderRef.current.disconnect();
+//           yProviderRef.current.destroy();
+//         } catch (e) {
+//           console.error("Error cleaning up provider:", e);
+//         }
+//         yProviderRef.current = null;
+//       }
+
+//       if (ydocRef.current) {
+//         try {
+//           ydocRef.current.destroy();
+//         } catch (e) {
+//           console.error("Error cleaning up Y.Doc:", e);
+//         }
+//         ydocRef.current = null;
+//       }
+
+//       if (fabricCanvasRef.current) {
+//         try {
+//           fabricCanvasRef.current.dispose();
+//         } catch (e) {
+//           console.error("Error cleaning up canvas:", e);
+//         }
+//         fabricCanvasRef.current = null;
+//       }
+//     };
+//   }, []);
+
+//   // =========================
+//   // ✅ RENDER - UI
+//   // =========================
+//   return (
+//     <div className={`relative w-full h-full ${mainScreenMode ? "bg-black/10" : "bg-black/30"}`}>
+//       {/* Header */}
+//       <div className="absolute top-2 left-2 right-2 z-20 flex items-center justify-between">
+//         <div className="flex items-center gap-2">
+//           <div className="px-3 py-1 rounded-lg bg-black/60 text-white text-xs flex items-center gap-2">
+//             <span className={`w-2 h-2 rounded-full ${connectionStatus === "connected" ? "bg-green-500" : "bg-yellow-500"}`} />
+//             WB • {connectionStatus}
+//           </div>
+//           <div className="px-3 py-1 rounded-lg bg-black/60 text-white text-xs">
+//             {cursorPosition.x}, {cursorPosition.y} • {zoom.toFixed(2)}x
+//           </div>
+//           {connectionError && (
+//             <div className="px-3 py-1 rounded-lg bg-red-600/80 text-white text-xs">⚠️ {connectionError}</div>
+//           )}
+//           {activeUsers.length > 0 && (
+//             <div className="px-3 py-1 rounded-lg bg-black/60 text-white text-xs">
+//               👥 {activeUsers.length} viewer{activeUsers.length !== 1 ? "s" : ""}
+//             </div>
+//           )}
+//         </div>
+
+//         <div className="flex items-center gap-2">
+//           <button
+//             onClick={toggleViewersDraw}
+//             className="px-3 py-1 rounded-lg bg-black/60 text-white text-xs flex items-center gap-2 hover:bg-black/70 transition-colors"
+//             title={roomSettings.allowViewersToDraw ? "Disable viewer drawing" : "Enable viewer drawing"}
+//           >
+//             {roomSettings.allowViewersToDraw ? <FiUnlock size={14} /> : <FiLock size={14} />}
+//             <span className="hidden sm:inline">Viewers: {roomSettings.allowViewersToDraw ? "Can draw" : "View only"}</span>
+//           </button>
+
+//           <button
+//             onClick={toggleFullscreen}
+//             className="p-2 rounded-lg bg-black/60 text-white hover:bg-black/70 transition-colors"
+//             title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+//           >
+//             {isFullscreen ? <FiMinimize2 size={16} /> : <FiMaximize2 size={16} />}
+//           </button>
+
+//           <button
+//             onClick={onClose}
+//             className="p-2 rounded-lg bg-black/60 text-white hover:bg-black/70 transition-colors"
+//             title="Close whiteboard"
+//           >
+//             <FiX size={16} />
+//           </button>
+//         </div>
+//       </div>
+
+//       {/* Floating Toolbar */}
+//       <div className="absolute top-14 right-2 z-20 flex flex-col gap-2">
+//         <div className="flex flex-col rounded-xl bg-black/60 backdrop-blur-sm p-2">
+//           <div className="flex items-center justify-between gap-2 px-1 pb-2 border-b border-white/20">
+//             <button className="text-white/90 hover:text-white p-1" onClick={() => setShowTools((prev) => !prev)} title="Toggle tools">
+//               {showTools ? <FiChevronRight size={16} /> : <FiChevronLeft size={16} />}
+//             </button>
+
+//             <div className="flex items-center gap-2">
+//               <button
+//                 onClick={() => setShowColors((prev) => !prev)}
+//                 className="w-6 h-6 rounded-md border-2 border-white/30 hover:border-white/50 transition-colors"
+//                 style={{ backgroundColor: brushColor }}
+//                 title="Select color"
+//               />
+//               <button
+//                 onClick={() => setShowBrushSizes((prev) => !prev)}
+//                 className="w-6 h-6 rounded-md border border-white/30 text-white text-xs flex items-center justify-center hover:bg-white/10 transition-colors"
+//                 title="Brush size"
+//               >
+//                 {brushWidth}
+//               </button>
+//             </div>
+//           </div>
+
+//           {showTools && (
+//             <div className="flex flex-col gap-1 pt-2">
+//               {tools.map((t) => (
+//                 <button
+//                   key={t.id}
+//                   onClick={() => handleToolSelect(t.id)}
+//                   className={`flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors ${
+//                     tool === t.id ? "bg-white/20" : ""
+//                   }`}
+//                   title={t.name}
+//                 >
+//                   {t.icon}
+//                   {!compact && <span className="text-xs">{t.name}</span>}
+//                 </button>
+//               ))}
+
+//               <div className="my-1 h-px bg-white/20" />
+
+//               <button
+//                 onClick={handleUndo}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Undo"
+//               >
+//                 <FaUndo size={14} />
+//                 {!compact && <span className="text-xs">Undo</span>}
+//               </button>
+//               <button
+//                 onClick={handleRedo}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Redo"
+//               >
+//                 <FaRedo size={14} />
+//                 {!compact && <span className="text-xs">Redo</span>}
+//               </button>
+
+//               <div className="my-1 h-px bg-white/20" />
+
+//               <button
+//                 onClick={deleteSelected}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Delete selected"
+//               >
+//                 <FiTrash2 size={14} />
+//                 {!compact && <span className="text-xs">Delete</span>}
+//               </button>
+
+//               <button
+//                 onClick={handleClear}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Clear all"
+//               >
+//                 <FiRefreshCw size={14} />
+//                 {!compact && <span className="text-xs">Clear</span>}
+//               </button>
+
+//               <div className="my-1 h-px bg-white/20" />
+
+//               <button
+//                 onClick={exportAsImage}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Export as PNG"
+//               >
+//                 <FiDownload size={14} />
+//                 {!compact && <span className="text-xs">PNG</span>}
+//               </button>
+
+//               <button
+//                 onClick={exportAsJSON}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Export as JSON"
+//               >
+//                 <FiDownload size={14} />
+//                 {!compact && <span className="text-xs">JSON</span>}
+//               </button>
+
+//               <button
+//                 onClick={importFromJSON}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Import JSON"
+//               >
+//                 <FiUpload size={14} />
+//                 {!compact && <span className="text-xs">Import</span>}
+//               </button>
+
+//               <div className="my-1 h-px bg-white/20" />
+
+//               <button
+//                 onClick={handleZoomIn}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Zoom in"
+//               >
+//                 <FiZoomIn size={14} />
+//                 {!compact && <span className="text-xs">Zoom+</span>}
+//               </button>
+//               <button
+//                 onClick={handleZoomOut}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Zoom out"
+//               >
+//                 <FiZoomOut size={14} />
+//                 {!compact && <span className="text-xs">Zoom-</span>}
+//               </button>
+//               <button
+//                 onClick={handleZoomReset}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Reset zoom"
+//               >
+//                 <FiRefreshCw size={14} />
+//                 {!compact && <span className="text-xs">Reset</span>}
+//               </button>
+//             </div>
+//           )}
+
+//           {showColors && (
+//             <div className="mt-2 grid grid-cols-7 gap-1 pt-2 border-t border-white/20">
+//               {colors.map((c) => (
+//                 <button
+//                   key={c}
+//                   onClick={() => {
+//                     setBrushColor(c);
+//                     setBrushToCanvas();
+//                   }}
+//                   className={`w-5 h-5 rounded border border-white/30 hover:border-white/50 transition-colors ${
+//                     brushColor === c ? "ring-2 ring-white" : ""
+//                   }`}
+//                   style={{ backgroundColor: c }}
+//                   title={c}
+//                 />
+//               ))}
+//             </div>
+//           )}
+
+//           {showBrushSizes && (
+//             <div className="mt-2 flex flex-wrap gap-1 pt-2 border-t border-white/20">
+//               {brushSizes.map((s) => (
+//                 <button
+//                   key={s}
+//                   onClick={() => {
+//                     setBrushWidth(s);
+//                     setBrushToCanvas();
+//                   }}
+//                   className={`px-2 py-1 rounded-md text-white text-xs border border-white/30 hover:bg-white/10 transition-colors ${
+//                     brushWidth === s ? "bg-white/20" : ""
+//                   }`}
+//                 >
+//                   {s}
+//                 </button>
+//               ))}
+//             </div>
+//           )}
+//         </div>
+//       </div>
+
+//       {/* Canvas Container */}
+//       <div ref={containerRef} className={`absolute inset-0 ${isFullscreen ? "p-0" : "p-2"}`}>
+//         <div className="relative w-full h-full rounded-xl overflow-hidden bg-white shadow-lg">
+//           {isLoading && (
+//             <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+//               <div className="px-4 py-3 rounded-lg bg-black/80 text-white text-sm flex items-center gap-3">
+//                 <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+//                 Loading whiteboard...
+//               </div>
+//             </div>
+//           )}
+//           <canvas ref={canvasElRef} className="w-full h-full" />
+//         </div>
+//       </div>
+//     </div>
+//   );
+// };
+
+// export default WhiteboardComponent;
+
+
+
+
+
+
+
+
+
+
+
+// import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// import * as fabric from "fabric";
+// import * as Y from "yjs";
+// import { WebsocketProvider } from "y-websocket";
+// import { useAuth } from "../../../contexts/AuthContext";
+
+// import {
+//   FiSquare,
+//   FiCircle,
+//   FiType,
+//   FiPenTool,
+//   FiMousePointer,
+//   FiTrash2,
+//   FiDownload,
+//   FiUpload,
+//   FiZoomIn,
+//   FiZoomOut,
+//   FiMaximize2,
+//   FiMinimize2,
+//   FiMinus,
+//   FiArrowRight,
+//   FiX,
+//   FiLock,
+//   FiUnlock,
+//   FiChevronLeft,
+//   FiChevronRight,
+//   FiRefreshCw,
+//   FiImage,
+// } from "react-icons/fi";
+// import { FaUndo, FaRedo } from "react-icons/fa";
+// import { BsEraser } from "react-icons/bs";
+// import { LuStickyNote } from "react-icons/lu";
+
+// /**
+//  * ✅ WHITEBOARD COMPONENT - STREAMER VERSION
+//  * - Extremely stable
+//  * - No infinite loops
+//  * - Proper Yjs initialization
+//  * - Clean state management
+//  */
+// const WhiteboardComponent = ({
+//   sessionId,
+//   roomCode,
+//   wsToken,
+//   sessionInfo,
+//   isActive,
+//   onClose,
+//   isStreamer = true, // ✅ STREAMER ke liye TRUE
+//   allowViewersToDraw = true,
+//   mainScreenMode = true,
+//   compact = true,
+// }) => {
+//   const { user } = useAuth();
+
+//   // =========================
+//   // ✅ STABLE REFS (No re-renders)
+//   // =========================
+//   const isMountedRef = useRef(true);
+//   const canvasElRef = useRef(null);
+//   const containerRef = useRef(null);
+//   const fabricCanvasRef = useRef(null);
+//   const ydocRef = useRef(null);
+//   const yProviderRef = useRef(null);
+//   const initCompleteRef = useRef(false);
+//   // ✅ ADD THIS LINE - Permissions ref
+// const permissionsRef = useRef({
+//   canDraw: true,
+//   canAddObjects: true,
+//   canDelete: true,
+//   canEdit: true,
+//   isViewer: false,
+//   isStreamer: true
+// });
+  
+//   // Tool ref for avoiding stale closures
+//   const toolRef = useRef("select");
+  
+//   // Drawing settings refs
+//   const brushWidthRef = useRef(5);
+//   const brushColorRef = useRef("#000000");
+//   const fillColorRef = useRef("#ffffff");
+//   const opacityRef = useRef(1);
+//   const fontSizeRef = useRef(20);
+  
+//   // History refs
+//   const historyRef = useRef([]);
+//   const historyIndexRef = useRef(-1);
+//   const saveQueuedRef = useRef(false);
+  
+//   // Debounce refs
+//   const syncTimeoutRef = useRef(null);
+//   const resizeHandlerRef = useRef(null);
+//   const loadTimeoutRef = useRef(null);
+
+//   // =========================
+//   // ✅ UI STATE
+//   // =========================
+//   const [tool, setTool] = useState("select");
+//   const [brushWidth, setBrushWidth] = useState(5);
+//   const [brushColor, setBrushColor] = useState("#000000");
+//   const [fillColor, setFillColor] = useState("#ffffff");
+//   const [opacity, setOpacity] = useState(1);
+//   const [fontSize, setFontSize] = useState(20);
+//   const [zoom, setZoom] = useState(1);
+//   const [cursorPosition, setCursorPosition] = useState({ x: 0, y: 0 });
+//   const [isLoading, setIsLoading] = useState(true);
+//   const [connectionStatus, setConnectionStatus] = useState("disconnected");
+//   const [connectionError, setConnectionError] = useState(null);
+//   const [roomSettings, setRoomSettings] = useState({
+//     allowViewersToDraw,
+//     streamerId: null,
+//     streamerName: null,
+//   });
+//   const [activeUsers, setActiveUsers] = useState([]);
+  
+//   // UI toggles
+//   const [showTools, setShowTools] = useState(true);
+//   const [showColors, setShowColors] = useState(false);
+//   const [showBrushSizes, setShowBrushSizes] = useState(false);
+//   const [isFullscreen, setIsFullscreen] = useState(false);
+
+//   // =========================
+//   // ✅ MEMOIZED CONFIGS
+//   // =========================
+//   const tools = useMemo(() => [
+//     { id: "select", name: "Select", icon: <FiMousePointer size={16} /> },
+//     { id: "draw", name: "Draw", icon: <FiPenTool size={16} /> },
+//     { id: "rectangle", name: "Rectangle", icon: <FiSquare size={16} /> },
+//     { id: "circle", name: "Circle", icon: <FiCircle size={16} /> },
+//     { id: "line", name: "Line", icon: <FiMinus size={16} /> },
+//     { id: "arrow", name: "Arrow", icon: <FiArrowRight size={16} /> },
+//     { id: "text", name: "Text", icon: <FiType size={16} /> },
+//     { id: "sticky", name: "Sticky", icon: <LuStickyNote size={16} /> },
+//     { id: "eraser", name: "Eraser", icon: <BsEraser size={16} /> },
+//   ], []);
+
+//   const colors = useMemo(() => [
+//     "#000000", "#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF",
+//     "#00FFFF", "#FFA500", "#800080", "#008000", "#800000", "#008080",
+//     "#000080", "#808080",
+//   ], []);
+
+//   const brushSizes = useMemo(() => [1, 2, 3, 5, 8, 10, 15, 20, 30], []);
+
+//   // =========================
+//   // ✅ HELPER FUNCTIONS
+//   // =========================
+//   const getUserId = useCallback(() => {
+//     return user?.id || user?._id || user?.email || `streamer_${Date.now()}`;
+//   }, [user]);
+
+//   const safeSetState = useCallback((fn) => {
+//     if (isMountedRef.current) {
+//       fn();
+//     }
+//   }, []);
+
+//   // =========================
+//   // ✅ WEBSOCKET URL - STREAMER
+//   // =========================
+//   const getWebSocketUrl = useCallback(() => {
+//     const baseUrl = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
     
+//     if (!sessionId) {
+//       setConnectionError("Session ID is required");
+//       return null;
+//     }
+//     if (!wsToken) {
+//       setConnectionError("Authentication token is required");
+//       return null;
+//     }
+
+//     const queryParams = new URLSearchParams({
+//       token: wsToken,
+//       roomCode: roomCode || "",
+//       userName: user?.name || user?.userName || "Streamer",
+//       userId: getUserId(),
+//       isStreamer: "true", // ✅ STREAMER - ALWAYS TRUE
+//       allowViewersToDraw: String(!!allowViewersToDraw),
+//       roomName: sessionInfo?.title || "Whiteboard Session",
+//     });
+
+//     return `${baseUrl}/yjs/${sessionId}?${queryParams.toString()}`;
+//   }, [allowViewersToDraw, getUserId, roomCode, sessionId, sessionInfo?.title, user?.name, wsToken]);
+
+//   // =========================
+//   // ✅ HISTORY MANAGEMENT
+//   // =========================
+//   const saveState = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     if (saveQueuedRef.current) return;
+//     saveQueuedRef.current = true;
+
+//     queueMicrotask(() => {
+//       saveQueuedRef.current = false;
+//       const c = fabricCanvasRef.current;
+//       if (!c) return;
+
+//       try {
+//         const state = c.toJSON(["id"]);
+//         const hist = historyRef.current;
+//         const idx = historyIndexRef.current;
+
+//         const next = hist.slice(0, idx + 1);
+//         next.push(state);
+
+//         historyRef.current = next;
+//         historyIndexRef.current = next.length - 1;
+//       } catch (e) {
+//         console.error("❌ saveState error:", e);
+//       }
+//     });
+//   }, []);
+
+//   const loadFromHistoryIndex = useCallback((idx) => {
+//     const canvas = fabricCanvasRef.current;
+//     const hist = historyRef.current;
+//     if (!canvas || !hist[idx]) return;
+
+//     try {
+//       canvas.loadFromJSON(hist[idx], () => {
+//         canvas.renderAll();
+//       });
+//     } catch (e) {
+//       console.error("❌ loadFromHistoryIndex error:", e);
+//     }
+//   }, []);
+
+//   const handleUndo = useCallback(() => {
+//     const idx = historyIndexRef.current;
+//     if (idx <= 0) return;
+
+//     historyIndexRef.current = idx - 1;
+//     loadFromHistoryIndex(idx - 1);
+    
+//     clearTimeout(syncTimeoutRef.current);
+//     syncTimeoutRef.current = setTimeout(() => {
+//       updateYjsCanvas();
+//     }, 250);
+//   }, [loadFromHistoryIndex]);
+
+//   const handleRedo = useCallback(() => {
+//     const hist = historyRef.current;
+//     const idx = historyIndexRef.current;
+//     if (idx >= hist.length - 1) return;
+
+//     historyIndexRef.current = idx + 1;
+//     loadFromHistoryIndex(idx + 1);
+    
+//     clearTimeout(syncTimeoutRef.current);
+//     syncTimeoutRef.current = setTimeout(() => {
+//       updateYjsCanvas();
+//     }, 250);
+//   }, [loadFromHistoryIndex]);
+
+//   // =========================
+//   // ✅ YJS SYNC FUNCTIONS
+//   // =========================
+//   const updateYjsCanvas = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     const ydoc = ydocRef.current;
+//     if (!canvas || !ydoc) return;
+
+//     try {
+//       const json = canvas.toJSON(["id"]);
+//       const yCanvasArray = ydoc.getArray("whiteboard");
+
+//       const payload = {
+//         ...json,
+//         sessionId,
+//         allowViewersToDraw: roomSettings.allowViewersToDraw,
+//         lastUpdated: new Date().toISOString(),
+//         updatedBy: getUserId(),
+//         updatedByName: user?.name || "Streamer",
+//         version: "5.3.0",
+//       };
+
+//       // Replace with new state
+//       if (yCanvasArray.length > 0) {
+//         yCanvasArray.delete(0, yCanvasArray.length);
+//       }
+//       yCanvasArray.push([payload]);
+      
+//       console.log("📤 Canvas state synced to Yjs");
+//     } catch (e) {
+//       console.error("❌ updateYjsCanvas error:", e);
+//     }
+//   }, [getUserId, roomSettings.allowViewersToDraw, sessionId, user?.name]);
+
+//   const loadCanvasFromState = useCallback((state) => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas || !state) return;
+
+//     try {
+//       canvas.loadFromJSON(state, () => {
+//         canvas.renderAll();
+//         saveState();
+//       });
+//     } catch (e) {
+//       console.error("❌ loadCanvasFromState error:", e);
+//     }
+//   }, [saveState]);
+
+//   // =========================
+//   // ✅ YJS INITIALIZATION - STREAMER (SIMPLE & STABLE)
+//   // =========================
+// // =========================
+// // COMPLETELY FIXED: Yjs Initialization for STREAMER
+// // ALWAYS create NEW Y.Doc - NEVER reuse existing!
+// // =========================
+// const initYjs = useCallback(() => {
+//   // ✅ CRITICAL FIX #1: ALWAYS destroy old Y.Doc and provider FIRST
+  
+//   // Clean up provider first
+//   if (yProviderRef.current) {
+//     try {
+//       console.log('🧹 [STREAMER] Destroying old YProvider');
+//       yProviderRef.current.disconnect();
+//       yProviderRef.current.destroy();
+//     } catch (e) {
+//       console.error('❌ [STREAMER] Error destroying provider:', e);
+//     }
+//     yProviderRef.current = null;
+//   }
+  
+//   // Clean up Y.Doc
+//   if (ydocRef.current) {
+//     try {
+//       console.log('🧹 [STREAMER] Destroying old Y.Doc with clientID:', ydocRef.current.clientID);
+//       ydocRef.current.destroy();
+//     } catch (e) {
+//       console.error('❌ [STREAMER] Error destroying Y.Doc:', e);
+//     }
+//     ydocRef.current = null;
+//   }
+
+//   // Validate required props
+//   if (!sessionId) {
+//     console.error('❌ [STREAMER] Missing sessionId');
+//     safeSetState(() => setIsLoading(false));
+//     return;
+//   }
+  
+//   if (!wsToken) {
+//     console.error('❌ [STREAMER] Missing wsToken');
+//     safeSetState(() => setIsLoading(false));
+//     return;
+//   }
+
+//   // Build WebSocket URL
+//   const wsUrl = getWebSocketUrl();
+//   if (!wsUrl) {
+//     console.error('❌ [STREAMER] Failed to create WebSocket URL');
+//     safeSetState(() => setIsLoading(false));
+//     return;
+//   }
+
+//   try {
+//     // ✅ CRITICAL FIX #2: ALWAYS create BRAND NEW Y.Doc
+//     console.log('📄 [STREAMER] Creating NEW Y.Doc');
+//     const ydoc = new Y.Doc();
+//     ydocRef.current = ydoc;
+    
+//     console.log('✅ [STREAMER] New Y.Doc created with clientID:', ydoc.clientID);
+
+//     // Get Yjs shared data structures
+//     const yCanvasArray = ydoc.getArray("whiteboard");
+//     const yUsers = ydoc.getMap("users");
+//     const ySettings = ydoc.getMap("room_settings");
+
+//     // ✅ CRITICAL FIX #3: Create NEW WebSocketProvider
+//     console.log('🔌 [STREAMER] Creating WebSocketProvider for session:', sessionId);
+//     const provider = new WebsocketProvider(wsUrl, `whiteboard-${sessionId}`, ydoc, {
+//       WebSocketPolyfill: WebSocket,
+//       connect: true,
+//       disableBc: true,
+//       maxBackoffTime: 5000,
+//     });
+
+//     yProviderRef.current = provider;
+
+//     // Handle connection status
+//     provider.on("status", (event) => {
+//       const status = event?.status || "unknown";
+//       console.log('📡 [STREAMER] Yjs status:', status, 'Y.Doc clientID:', ydoc.clientID);
+//       safeSetState(() => setConnectionStatus(status));
+      
+//       if (status === "connected") {
+//         safeSetState(() => setIsLoading(false));
+        
+//         // ✅ Register streamer in users map
+//         yUsers.set(getUserId(), {
+//           name: user?.name || "Streamer",
+//           id: getUserId(),
+//           isStreamer: true,
+//           isViewer: false,
+//           permissions: permissionsRef.current,
+//           joinedAt: new Date().toISOString(),
+//           lastActive: new Date().toISOString(),
+//           cursorPosition: { x: 0, y: 0 },
+//           currentTool: toolRef.current || "select",
+//           yjsClientId: ydoc.clientID,
+//           connectionId: `${getUserId()}_${Date.now()}_${Math.random().toString(36).slice(2)}`
+//         });
+        
+//         console.log('✅ [STREAMER] Registered with Yjs clientID:', ydoc.clientID);
+//       }
+//     });
+
+//     // Handle connection errors
+//     provider.on("connection-error", (error) => {
+//       console.error("❌ [STREAMER] Yjs connection error:", error);
+//       safeSetState(() => {
+//         setConnectionError(error?.message || "Connection error");
+//         setIsLoading(false);
+//       });
+//     });
+
+//     // ✅ Streamer initializes room settings ONLY ONCE
+//     provider.on("status", (event) => {
+//       if (event?.status === "connected") {
+//         // Check if settings already exist in THIS Y.Doc
+//         if (ySettings.get("allowViewersToDraw") === undefined) {
+//           console.log('🎨 [STREAMER] Initializing room settings:', {
+//             allowViewersToDraw,
+//             streamerId: getUserId(),
+//             streamerName: user?.name || "Streamer"
+//           });
+          
+//           ySettings.set("allowViewersToDraw", allowViewersToDraw);
+//           ySettings.set("streamerId", getUserId());
+//           ySettings.set("streamerName", user?.name || "Streamer");
+//           ySettings.set("createdAt", new Date().toISOString());
+//           ySettings.set("updatedAt", new Date().toISOString());
+//         }
+//       }
+//     });
+
+//     // ✅ Room settings observer
+//     ySettings.observe((event) => {
+//       try {
+//         const s = ySettings.toJSON();
+//         console.log('⚙️ [STREAMER] Room settings changed:', s);
+        
+//         safeSetState(() =>
+//           setRoomSettings((prev) => ({
+//             ...prev,
+//             allowViewersToDraw: s.allowViewersToDraw ?? prev.allowViewersToDraw,
+//             streamerId: s.streamerId ?? prev.streamerId,
+//             streamerName: s.streamerName ?? prev.streamerName,
+//           }))
+//         );
+//       } catch (error) {
+//         console.error('❌ [STREAMER] Settings observer error:', error);
+//       }
+//     });
+
+//     // ✅ Users observer
+//     yUsers.observe(() => {
+//       try {
+//         const users = Array.from(yUsers.values());
+//         const others = users.filter((u) => u.id !== getUserId());
+//         safeSetState(() => setActiveUsers(others));
+//       } catch (error) {
+//         console.error('❌ [STREAMER] Users observer error:', error);
+//       }
+//     });
+
+//     // ✅ Canvas observer - Receive updates from viewers
+//     yCanvasArray.observe((event) => {
+//       try {
+//         if (yCanvasArray.length === 0) return;
+        
+//         const latest = yCanvasArray.get(yCanvasArray.length - 1);
+//         if (!latest) return;
+
+//         // Don't re-apply our own updates
+//         if (latest.updatedBy === getUserId()) {
+//           return;
+//         }
+
+//         console.log('📥 [STREAMER] Loading canvas from viewer:', {
+//           updatedBy: latest.updatedBy,
+//           objects: latest.objects?.length || 0
+//         });
+
+//         // Only load if viewers are allowed to draw
+//         if (roomSettings.allowViewersToDraw) {
+//           loadCanvasFromState(latest);
+//         }
+        
+//       } catch (error) {
+//         console.error('❌ [STREAMER] Canvas observer error:', error);
+//       }
+//     });
+
+//     // ✅ Initialize canvas state if empty
+//     if (yCanvasArray.length === 0) {
+//       console.log('🆕 [STREAMER] Creating initial canvas state');
+      
+//       const initialState = {
+//         version: "5.3.0",
+//         objects: [],
+//         background: "#ffffff",
+//         sessionId,
+//         allowViewersToDraw,
+//         createdAt: new Date().toISOString(),
+//         updatedBy: getUserId(),
+//         updatedByName: user?.name || "Streamer"
+//       };
+      
+//       yCanvasArray.insert(0, [initialState]);
+//       console.log('✅ [STREAMER] Initial canvas state created');
+      
+//     } else {
+//       console.log('📥 [STREAMER] Existing canvas state found with', 
+//         yCanvasArray.length, 'states');
+      
+//       // Load the latest state
+//       const latestState = yCanvasArray.get(yCanvasArray.length - 1);
+//       loadCanvasFromState(latestState);
+//     }
+
+//     console.log('✅ [STREAMER] Yjs initialized successfully with clientID:', ydoc.clientID);
+    
+//   } catch (err) {
+//     console.error("❌ [STREAMER] initYjs error:", err);
+//     safeSetState(() => {
+//       setConnectionError(err?.message || "Initialization error");
+//       setIsLoading(false);
+//     });
+//   }
+// }, [
+//   allowViewersToDraw,
+//   getWebSocketUrl,
+//   loadCanvasFromState,
+//   roomSettings.allowViewersToDraw,
+//   sessionId,
+//   user?.name,
+//   wsToken,
+//   getUserId
+// ]);
+//   // =========================
+//   // ✅ FABRIC CANVAS INITIALIZATION
+//   // =========================
+//   const initCanvas = useCallback(() => {
+//     if (!containerRef.current || !canvasElRef.current) return;
+
+//     // Clean up existing canvas
+//     if (fabricCanvasRef.current) {
+//       fabricCanvasRef.current.dispose();
+//       fabricCanvasRef.current = null;
+//     }
+
+//     const container = containerRef.current;
+    
+//     try {
+//       const canvas = new fabric.Canvas(canvasElRef.current, {
+//         width: container.clientWidth,
+//         height: container.clientHeight,
+//         backgroundColor: "#ffffff",
+//         selection: true,
+//         preserveObjectStacking: true,
+//         renderOnAddRemove: true,
+//       });
+
+//       fabricCanvasRef.current = canvas;
+
+//       // Setup brush
+//       canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
+//       canvas.freeDrawingBrush.width = brushWidthRef.current;
+//       canvas.freeDrawingBrush.color = brushColorRef.current;
+
+//       // Mouse move - cursor position
+//       canvas.on("mouse:move", (e) => {
+//         if (!e.absolutePointer) return;
+//         safeSetState(() =>
+//           setCursorPosition({
+//             x: Math.round(e.absolutePointer.x),
+//             y: Math.round(e.absolutePointer.y),
+//           })
+//         );
+//       });
+
+//       // Object added
+//       canvas.on("object:added", (e) => {
+//         if (e.target && !e.target.id) {
+//           e.target.id = `obj_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+//         }
+//         saveState();
+//       });
+
+//       // Object modified
+//       canvas.on("object:modified", () => {
+//         saveState();
+//         clearTimeout(syncTimeoutRef.current);
+//         syncTimeoutRef.current = setTimeout(() => {
+//           updateYjsCanvas();
+//         }, 400);
+//       });
+
+//       // Object removed
+//       canvas.on("object:removed", () => {
+//         saveState();
+//         clearTimeout(syncTimeoutRef.current);
+//         syncTimeoutRef.current = setTimeout(() => {
+//           updateYjsCanvas();
+//         }, 400);
+//       });
+
+//       // Path created
+//       canvas.on("path:created", (e) => {
+//         if (e.path && !e.path.id) {
+//           e.path.id = `path_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+//         }
+//         saveState();
+//       });
+
+//       // Mouse up - trigger sync
+//       canvas.on("mouse:up", () => {
+//         clearTimeout(syncTimeoutRef.current);
+//         syncTimeoutRef.current = setTimeout(() => {
+//           updateYjsCanvas();
+//         }, 300);
+//       });
+
+//       // Window resize handler
+//       const handleResize = () => {
+//         const c = fabricCanvasRef.current;
+//         const ctr = containerRef.current;
+//         if (!c || !ctr) return;
+//         c.setDimensions({
+//           width: ctr.clientWidth,
+//           height: ctr.clientHeight,
+//         });
+//         c.renderAll();
+//       };
+
+//       resizeHandlerRef.current = handleResize;
+//       window.addEventListener("resize", handleResize);
+
+//       // Initial save
+//       saveState();
+      
+//       console.log("✅ Fabric canvas initialized");
+      
+//     } catch (error) {
+//       console.error("❌ Canvas initialization error:", error);
+//     }
+//   }, [saveState, updateYjsCanvas, safeSetState]);
+
+//   // =========================
+//   // ✅ TOOL FUNCTIONS
+//   // =========================
+//   const setBrushToCanvas = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
 //     if (!canvas) return;
     
-//     switch (selectedTool) {
-//       case 'select':
+//     if (!canvas.freeDrawingBrush) {
+//       canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
+//     }
+//     canvas.freeDrawingBrush.width = brushWidthRef.current;
+//     canvas.freeDrawingBrush.color = brushColorRef.current;
+//   }, []);
+
+//   const addRectangle = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     const rect = new fabric.Rect({
+//       left: 120,
+//       top: 120,
+//       width: 180,
+//       height: 120,
+//       fill: fillColorRef.current,
+//       stroke: brushColorRef.current,
+//       strokeWidth: brushWidthRef.current,
+//       opacity: opacityRef.current,
+//       selectable: true,
+//       id: `rect_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+
+//     canvas.add(rect);
+//     canvas.setActiveObject(rect);
+//     canvas.renderAll();
+//     setTool("select");
+//     setTimeout(updateYjsCanvas, 100);
+//   }, [updateYjsCanvas]);
+
+//   const addCircle = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     const circle = new fabric.Circle({
+//       left: 140,
+//       top: 140,
+//       radius: 70,
+//       fill: fillColorRef.current,
+//       stroke: brushColorRef.current,
+//       strokeWidth: brushWidthRef.current,
+//       opacity: opacityRef.current,
+//       selectable: true,
+//       id: `circle_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+
+//     canvas.add(circle);
+//     canvas.setActiveObject(circle);
+//     canvas.renderAll();
+//     setTool("select");
+//     setTimeout(updateYjsCanvas, 100);
+//   }, [updateYjsCanvas]);
+
+//   const addText = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     const text = new fabric.IText("Double click to edit", {
+//       left: 140,
+//       top: 140,
+//       fontSize: fontSizeRef.current,
+//       fill: brushColorRef.current,
+//       selectable: true,
+//       id: `text_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+
+//     canvas.add(text);
+//     canvas.setActiveObject(text);
+//     canvas.renderAll();
+//     setTool("select");
+//     setTimeout(updateYjsCanvas, 100);
+//   }, [updateYjsCanvas]);
+
+//   const addSticky = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     const bg = new fabric.Rect({
+//       left: 120,
+//       top: 120,
+//       width: 220,
+//       height: 150,
+//       fill: "#ffff88",
+//       stroke: "#d4d4d4",
+//       strokeWidth: 1,
+//       opacity: 0.92,
+//       selectable: true,
+//       id: `sticky_bg_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+
+//     const tx = new fabric.IText("Edit note...", {
+//       left: 130,
+//       top: 130,
+//       fontSize: 16,
+//       fill: "#000000",
+//       selectable: true,
+//       id: `sticky_text_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+
+//     const group = new fabric.Group([bg, tx], {
+//       left: 120,
+//       top: 120,
+//       selectable: true,
+//       id: `sticky_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+
+//     canvas.add(group);
+//     canvas.setActiveObject(group);
+//     canvas.renderAll();
+//     setTool("select");
+//     setTimeout(updateYjsCanvas, 100);
+//   }, [updateYjsCanvas]);
+
+//   const startLineMode = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     canvas.isDrawingMode = false;
+//     canvas.selection = false;
+
+//     let line = null;
+//     let isDown = false;
+
+//     const onMouseDown = (opt) => {
+//       isDown = true;
+//       const pointer = canvas.getPointer(opt.e);
+//       line = new fabric.Line([pointer.x, pointer.y, pointer.x, pointer.y], {
+//         stroke: brushColorRef.current,
+//         strokeWidth: brushWidthRef.current,
+//         opacity: opacityRef.current,
+//         selectable: true,
+//         id: `line_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//       });
+//       canvas.add(line);
+//     };
+
+//     const onMouseMove = (opt) => {
+//       if (!isDown || !line) return;
+//       const pointer = canvas.getPointer(opt.e);
+//       line.set({ x2: pointer.x, y2: pointer.y });
+//       canvas.renderAll();
+//     };
+
+//     const onMouseUp = () => {
+//       isDown = false;
+//       canvas.off("mouse:down", onMouseDown);
+//       canvas.off("mouse:move", onMouseMove);
+//       canvas.off("mouse:up", onMouseUp);
+//       canvas.selection = true;
+//       setTool("select");
+//       setTimeout(updateYjsCanvas, 100);
+//     };
+
+//     canvas.on("mouse:down", onMouseDown);
+//     canvas.on("mouse:move", onMouseMove);
+//     canvas.on("mouse:up", onMouseUp);
+//   }, [updateYjsCanvas]);
+
+//   const startArrowMode = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     canvas.isDrawingMode = false;
+//     canvas.selection = false;
+
+//     let isDown = false;
+//     let shaft = null;
+//     let head = null;
+
+//     const onMouseDown = (opt) => {
+//       isDown = true;
+//       const pointer = canvas.getPointer(opt.e);
+
+//       shaft = new fabric.Line([pointer.x, pointer.y, pointer.x, pointer.y], {
+//         stroke: brushColorRef.current,
+//         strokeWidth: brushWidthRef.current,
+//         opacity: opacityRef.current,
+//         selectable: false,
+//       });
+
+//       head = new fabric.Triangle({
+//         left: pointer.x,
+//         top: pointer.y,
+//         width: 14,
+//         height: 14,
+//         fill: brushColorRef.current,
+//         angle: 0,
+//         originX: "center",
+//         originY: "center",
+//         selectable: false,
+//       });
+
+//       canvas.add(shaft);
+//       canvas.add(head);
+//     };
+
+//     const onMouseMove = (opt) => {
+//       if (!isDown || !shaft || !head) return;
+//       const pointer = canvas.getPointer(opt.e);
+      
+//       shaft.set({ x2: pointer.x, y2: pointer.y });
+
+//       const dx = pointer.x - shaft.x1;
+//       const dy = pointer.y - shaft.y1;
+//       const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+
+//       head.set({
+//         left: pointer.x,
+//         top: pointer.y,
+//         angle: angle + 90,
+//       });
+      
+//       canvas.renderAll();
+//     };
+
+//     const onMouseUp = () => {
+//       isDown = false;
+
+//       if (shaft && head) {
+//         const group = new fabric.Group([shaft, head], {
+//           selectable: true,
+//           id: `arrow_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//         });
+//         canvas.remove(shaft);
+//         canvas.remove(head);
+//         canvas.add(group);
+//       }
+
+//       canvas.off("mouse:down", onMouseDown);
+//       canvas.off("mouse:move", onMouseMove);
+//       canvas.off("mouse:up", onMouseUp);
+//       canvas.selection = true;
+//       setTool("select");
+//       setTimeout(updateYjsCanvas, 100);
+//     };
+
+//     canvas.on("mouse:down", onMouseDown);
+//     canvas.on("mouse:move", onMouseMove);
+//     canvas.on("mouse:up", onMouseUp);
+//   }, [updateYjsCanvas]);
+
+//   const activateEraser = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     canvas.isDrawingMode = false;
+//     canvas.selection = false;
+
+//     const onMouseDown = (opt) => {
+//       const pointer = canvas.getPointer(opt.e);
+//       const objects = canvas.getObjects();
+      
+//       let removed = false;
+//       objects.forEach((obj) => {
+//         if (obj.containsPoint && obj.containsPoint(pointer)) {
+//           canvas.remove(obj);
+//           removed = true;
+//         }
+//       });
+
+//       if (removed) {
+//         canvas.renderAll();
+//         setTimeout(updateYjsCanvas, 100);
+//       }
+//     };
+
+//     canvas.on("mouse:down", onMouseDown);
+
+//     // Auto-disable after 5 seconds
+//     setTimeout(() => {
+//       canvas.off("mouse:down", onMouseDown);
+//       canvas.selection = true;
+//       setTool("select");
+//     }, 5000);
+//   }, [updateYjsCanvas]);
+
+//   const handleToolSelect = useCallback((toolId) => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     toolRef.current = toolId;
+//     setTool(toolId);
+
+//     switch (toolId) {
+//       case "select":
 //         canvas.isDrawingMode = false;
 //         canvas.selection = true;
 //         break;
-//       case 'draw':
-//         if (permissions.canDraw) {
-//           canvas.isDrawingMode = true;
-//           canvas.freeDrawingBrush.width = brushWidth;
-//           canvas.freeDrawingBrush.color = brushColor;
-//         }
-//         break;
-//       case 'rectangle':
-//         if (permissions.canDraw) addRectangle();
-//         break;
-//       case 'circle':
-//         if (permissions.canDraw) addCircle();
-//         break;
-//       case 'triangle':
-//         if (permissions.canDraw) addTriangle();
-//         break;
-//       case 'text':
-//         if (permissions.canDraw) addText();
-//         break;
-//       case 'sticky':
-//         if (permissions.canDraw) addStickyNote();
-//         break;
-//       case 'image':
-//         if (permissions.canDraw) uploadImage();
-//         break;
-//       case 'eraser':
-//         if (permissions.canDelete) activateEraser();
-//         break;
-//       case 'line':
-//         if (permissions.canDraw) startDrawingLine();
-//         break;
-//       case 'arrow':
-//         if (permissions.canDraw) startDrawingArrow();
-//         break;
-//       case 'star':
-//         if (permissions.canDraw) addStar();
-//         break;
-//       case 'hexagon':
-//         if (permissions.canDraw) addHexagon();
-//         break;
-//     }
-//   };
-
-//   // Drawing Functions
-//   const addRectangle = () => {
-//     const rect = new fabric.Rect({
-//       left: 100,
-//       top: 100,
-//       width: 100,
-//       height: 100,
-//       fill: fillColor,
-//       stroke: brushColor,
-//       strokeWidth: brushWidth,
-//       opacity: opacity,
-//       selectable: true
-//     });
-    
-//     fabricCanvasRef.current.add(rect);
-//     fabricCanvasRef.current.setActiveObject(rect);
-//     setTool('select');
-//   };
-
-//   const addCircle = () => {
-//     const circle = new fabric.Circle({
-//       left: 100,
-//       top: 100,
-//       radius: 50,
-//       fill: fillColor,
-//       stroke: brushColor,
-//       strokeWidth: brushWidth,
-//       opacity: opacity,
-//       selectable: true
-//     });
-    
-//     fabricCanvasRef.current.add(circle);
-//     fabricCanvasRef.current.setActiveObject(circle);
-//     setTool('select');
-//   };
-
-//   const addTriangle = () => {
-//     const triangle = new fabric.Triangle({
-//       left: 100,
-//       top: 100,
-//       width: 100,
-//       height: 100,
-//       fill: fillColor,
-//       stroke: brushColor,
-//       strokeWidth: brushWidth,
-//       opacity: opacity,
-//       selectable: true
-//     });
-    
-//     fabricCanvasRef.current.add(triangle);
-//     fabricCanvasRef.current.setActiveObject(triangle);
-//     setTool('select');
-//   };
-
-//   const addStar = () => {
-//     const star = new fabric.Path('M 100 10 L 123 80 L 200 80 L 138 120 L 160 190 L 100 145 L 40 190 L 62 120 L 0 80 L 77 80 Z', {
-//       left: 100,
-//       top: 100,
-//       fill: fillColor,
-//       stroke: brushColor,
-//       strokeWidth: brushWidth,
-//       opacity: opacity,
-//       selectable: true
-//     });
-    
-//     fabricCanvasRef.current.add(star);
-//     fabricCanvasRef.current.setActiveObject(star);
-//     setTool('select');
-//   };
-
-//   const addHexagon = () => {
-//     const hexagon = new fabric.Polygon([
-//       { x: 50, y: 0 },
-//       { x: 100, y: 25 },
-//       { x: 100, y: 75 },
-//       { x: 50, y: 100 },
-//       { x: 0, y: 75 },
-//       { x: 0, y: 25 }
-//     ], {
-//       left: 100,
-//       top: 100,
-//       fill: fillColor,
-//       stroke: brushColor,
-//       strokeWidth: brushWidth,
-//       opacity: opacity,
-//       selectable: true
-//     });
-    
-//     fabricCanvasRef.current.add(hexagon);
-//     fabricCanvasRef.current.setActiveObject(hexagon);
-//     setTool('select');
-//   };
-
-//   const addText = () => {
-//     const text = new fabric.IText('Double click to edit', {
-//       left: 100,
-//       top: 100,
-//       fontSize: fontSize,
-//       fontFamily: fontFamily,
-//       fill: brushColor,
-//       selectable: true
-//     });
-    
-//     fabricCanvasRef.current.add(text);
-//     fabricCanvasRef.current.setActiveObject(text);
-//     setTool('select');
-//   };
-
-//   const addStickyNote = () => {
-//     const stickyNote = new fabric.Rect({
-//       left: 100,
-//       top: 100,
-//       width: 200,
-//       height: 150,
-//       fill: stickyNoteColor,
-//       stroke: '#d4d4d4',
-//       strokeWidth: 1,
-//       opacity: 0.9,
-//       shadow: 'rgba(0,0,0,0.2) 2px 2px 5px',
-//       selectable: true
-//     });
-    
-//     const text = new fabric.IText('Double click to edit note', {
-//       left: 110,
-//       top: 110,
-//       fontSize: 16,
-//       fontFamily: 'Arial',
-//       fill: '#000000',
-//       selectable: true
-//     });
-    
-//     const group = new fabric.Group([stickyNote, text], {
-//       selectable: true
-//     });
-    
-//     fabricCanvasRef.current.add(group);
-//     fabricCanvasRef.current.setActiveObject(group);
-//     setTool('select');
-//   };
-
-//   const startDrawingLine = () => {
-//     const canvas = fabricCanvasRef.current;
-//     let isDrawing = false;
-//     let line = null;
-    
-//     const mouseDown = (options) => {
-//       isDrawing = true;
-//       const pointer = canvas.getPointer(options.e);
-      
-//       line = new fabric.Line([pointer.x, pointer.y, pointer.x, pointer.y], {
-//         stroke: brushColor,
-//         strokeWidth: brushWidth,
-//         selectable: true
-//       });
-      
-//       canvas.add(line);
-//     };
-    
-//     const mouseMove = (options) => {
-//       if (!isDrawing || !line) return;
-      
-//       const pointer = canvas.getPointer(options.e);
-//       line.set({ x2: pointer.x, y2: pointer.y });
-//       canvas.renderAll();
-//     };
-    
-//     const mouseUp = () => {
-//       isDrawing = false;
-//       canvas.off('mouse:down', mouseDown);
-//       canvas.off('mouse:move', mouseMove);
-//       canvas.off('mouse:up', mouseUp);
-//       setTool('select');
-//     };
-    
-//     canvas.on('mouse:down', mouseDown);
-//     canvas.on('mouse:move', mouseMove);
-//     canvas.on('mouse:up', mouseUp);
-//   };
-
-//   const startDrawingArrow = () => {
-//     const canvas = fabricCanvasRef.current;
-//     let isDrawing = false;
-//     let line = null;
-//     let arrowHead = null;
-    
-//     const mouseDown = (options) => {
-//       isDrawing = true;
-//       const pointer = canvas.getPointer(options.e);
-      
-//       line = new fabric.Line([pointer.x, pointer.y, pointer.x, pointer.y], {
-//         stroke: brushColor,
-//         strokeWidth: brushWidth,
-//         selectable: true
-//       });
-      
-//       arrowHead = new fabric.Triangle({
-//         width: 15,
-//         height: 15,
-//         fill: brushColor,
-//         left: pointer.x,
-//         top: pointer.y,
-//         angle: 0,
-//         selectable: false
-//       });
-      
-//       canvas.add(line);
-//       canvas.add(arrowHead);
-//     };
-    
-//     const mouseMove = (options) => {
-//       if (!isDrawing || !line || !arrowHead) return;
-      
-//       const pointer = canvas.getPointer(options.e);
-//       line.set({ x2: pointer.x, y2: pointer.y });
-      
-//       const dx = pointer.x - line.x1;
-//       const dy = pointer.y - line.y1;
-//       const angle = Math.atan2(dy, dx) * 180 / Math.PI;
-      
-//       arrowHead.set({
-//         left: pointer.x,
-//         top: pointer.y,
-//         angle: angle
-//       });
-      
-//       canvas.renderAll();
-//     };
-    
-//     const mouseUp = () => {
-//       isDrawing = false;
-      
-//       if (line && arrowHead) {
-//         const group = new fabric.Group([line, arrowHead], {
-//           selectable: true
-//         });
         
-//         canvas.remove(line);
-//         canvas.remove(arrowHead);
-//         canvas.add(group);
-//       }
-      
-//       canvas.off('mouse:down', mouseDown);
-//       canvas.off('mouse:move', mouseMove);
-//       canvas.off('mouse:up', mouseUp);
-//       setTool('select');
-//     };
-    
-//     canvas.on('mouse:down', mouseDown);
-//     canvas.on('mouse:move', mouseMove);
-//     canvas.on('mouse:up', mouseUp);
-//   };
+//       case "draw":
+//         canvas.selection = false;
+//         canvas.isDrawingMode = true;
+//         setBrushToCanvas();
+//         break;
+        
+//       case "rectangle":
+//         addRectangle();
+//         break;
+        
+//       case "circle":
+//         addCircle();
+//         break;
+        
+//       case "line":
+//         startLineMode();
+//         break;
+        
+//       case "arrow":
+//         startArrowMode();
+//         break;
+        
+//       case "text":
+//         addText();
+//         break;
+        
+//       case "sticky":
+//         addSticky();
+//         break;
+        
+//       case "eraser":
+//         activateEraser();
+//         break;
+        
+//       default:
+//         break;
+//     }
+//   }, [activateEraser, addCircle, addRectangle, addSticky, addText, setBrushToCanvas, startArrowMode, startLineMode]);
 
-//   const uploadImage = () => {
-//     const input = document.createElement('input');
-//     input.type = 'file';
-//     input.accept = 'image/*';
-    
-//     input.onchange = (e) => {
-//       const file = e.target.files[0];
-//       if (!file) return;
-      
-//       const reader = new FileReader();
-//       reader.onload = (event) => {
-//         fabric.Image.fromURL(event.target.result, (img) => {
-//           img.set({
-//             left: 100,
-//             top: 100,
-//             scaleX: 0.5,
-//             scaleY: 0.5,
-//             selectable: true
-//           });
-          
-//           fabricCanvasRef.current.add(img);
-//           fabricCanvasRef.current.setActiveObject(img);
-//           setTool('select');
-//         });
-//       };
-//       reader.readAsDataURL(file);
-//     };
-    
-//     input.click();
-//   };
-
-//   const activateEraser = () => {
+//   // =========================
+//   // ✅ EXPORT/IMPORT/CLEAR/DELETE
+//   // =========================
+//   const exportAsImage = useCallback(() => {
 //     const canvas = fabricCanvasRef.current;
-//     canvas.isDrawingMode = false;
-//     canvas.selection = false;
+//     if (!canvas) return;
     
-//     const mouseDown = (options) => {
-//       const pointer = canvas.getPointer(options.e);
-//       const objects = canvas.getObjects();
-      
-//       objects.forEach(obj => {
-//         if (obj.containsPoint(pointer)) {
-//           canvas.remove(obj);
-//         }
-//       });
-      
-//       canvas.renderAll();
-//     };
-    
-//     canvas.on('mouse:down', mouseDown);
-    
-//     setTimeout(() => {
-//       canvas.off('mouse:down', mouseDown);
-//       setTool('select');
-//     }, 5000);
-//   };
-
-//   // Export Functions
-//   const exportAsImage = () => {
-//     if (!fabricCanvasRef.current) return;
-    
-//     const dataURL = fabricCanvasRef.current.toDataURL({
-//       format: 'png',
+//     const dataURL = canvas.toDataURL({
+//       format: "png",
 //       quality: 1,
-//       multiplier: 2
+//       multiplier: 2,
 //     });
     
-//     const link = document.createElement('a');
+//     const link = document.createElement("a");
 //     link.href = dataURL;
-//     link.download = `whiteboard-${sessionInfo?.title || 'session'}-${new Date().toISOString().slice(0, 10)}.png`;
+//     link.download = `whiteboard-${sessionInfo?.title || "session"}-${new Date().toISOString().slice(0, 10)}.png`;
 //     link.click();
-//   };
+//   }, [sessionInfo?.title]);
 
-//   const exportAsJSON = () => {
-//     if (!fabricCanvasRef.current) return;
+//   const exportAsJSON = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
     
-//     const json = fabricCanvasRef.current.toJSON();
-//     const dataStr = JSON.stringify(json);
-//     const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+//     const json = canvas.toJSON(["id"]);
+//     const dataStr = JSON.stringify(json, null, 2);
+//     const blob = new Blob([dataStr], { type: "application/json" });
+//     const url = URL.createObjectURL(blob);
     
-//     const link = document.createElement('a');
-//     link.href = dataUri;
-//     link.download = `whiteboard-${sessionInfo?.title || 'session'}-${new Date().toISOString().slice(0, 10)}.json`;
+//     const link = document.createElement("a");
+//     link.href = url;
+//     link.download = `whiteboard-${sessionInfo?.title || "session"}-${new Date().toISOString().slice(0, 10)}.json`;
 //     link.click();
-//   };
-
-//   const importFromJSON = () => {
-//     if (!permissions.canEdit) {
-//       console.log('🚫 No permission to import');
-//       return;
-//     }
     
-//     const input = document.createElement('input');
-//     input.type = 'file';
-//     input.accept = '.json';
+//     URL.revokeObjectURL(url);
+//   }, [sessionInfo?.title]);
+
+//   const importFromJSON = useCallback(() => {
+//     const input = document.createElement("input");
+//     input.type = "file";
+//     input.accept = ".json,application/json";
     
 //     input.onchange = (e) => {
-//       const file = e.target.files[0];
+//       const file = e.target.files?.[0];
 //       if (!file) return;
       
 //       const reader = new FileReader();
-//       reader.onload = (event) => {
+//       reader.onload = (ev) => {
 //         try {
-//           const json = JSON.parse(event.target.result);
-//           fabricCanvasRef.current.loadFromJSON(json, () => {
-//             fabricCanvasRef.current.renderAll();
+//           const json = JSON.parse(ev.target.result);
+//           const canvas = fabricCanvasRef.current;
+//           if (!canvas) return;
+          
+//           canvas.loadFromJSON(json, () => {
+//             canvas.renderAll();
 //             saveState();
-//             if (permissions.canEdit) {
-//               syncCanvasToYjs();
-//             }
+//             setTimeout(updateYjsCanvas, 200);
 //           });
 //         } catch (error) {
-//           console.error('Error loading JSON:', error);
+//           alert("Invalid JSON file: " + error.message);
 //         }
 //       };
 //       reader.readAsText(file);
 //     };
     
 //     input.click();
-//   };
+//   }, [saveState, updateYjsCanvas]);
 
-//   // Zoom Functions
-//   const handleZoomIn = () => {
+//   const handleClear = useCallback(() => {
+//     if (!window.confirm("Are you sure you want to clear the whiteboard?")) return;
+    
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+    
+//     canvas.clear();
+//     canvas.backgroundColor = "#ffffff";
+//     canvas.renderAll();
+//     saveState();
+//     setTimeout(updateYjsCanvas, 200);
+//   }, [saveState, updateYjsCanvas]);
+
+//   const deleteSelected = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+    
+//     const activeObject = canvas.getActiveObject();
+//     if (!activeObject) return;
+    
+//     canvas.remove(activeObject);
+//     canvas.discardActiveObject();
+//     canvas.renderAll();
+//     saveState();
+//     setTimeout(updateYjsCanvas, 200);
+//   }, [saveState, updateYjsCanvas]);
+
+//   // =========================
+//   // ✅ TOGGLE VIEWER DRAW
+//   // =========================
+//   const toggleViewersDraw = useCallback(() => {
+//     const ydoc = ydocRef.current;
+//     if (!ydoc) return;
+    
+//     const ySettings = ydoc.getMap("room_settings");
+//     const newValue = !roomSettings.allowViewersToDraw;
+    
+//     ySettings.set("allowViewersToDraw", newValue);
+//     ySettings.set("updatedAt", new Date().toISOString());
+//     ySettings.set("updatedBy", getUserId());
+    
+//     console.log("🎨 Viewers draw toggled:", newValue ? "ENABLED" : "DISABLED");
+//   }, [getUserId, roomSettings.allowViewersToDraw]);
+
+//   // =========================
+//   // ✅ ZOOM FUNCTIONS
+//   // =========================
+//   const handleZoomIn = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+    
 //     const newZoom = Math.min(zoom * 1.2, 5);
 //     setZoom(newZoom);
-    
-//     if (fabricCanvasRef.current) {
-//       fabricCanvasRef.current.setZoom(newZoom);
-//       fabricCanvasRef.current.renderAll();
-//     }
-//   };
+//     canvas.setZoom(newZoom);
+//     canvas.renderAll();
+//   }, [zoom]);
 
-//   const handleZoomOut = () => {
+//   const handleZoomOut = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+    
 //     const newZoom = Math.max(zoom / 1.2, 0.2);
 //     setZoom(newZoom);
-    
-//     if (fabricCanvasRef.current) {
-//       fabricCanvasRef.current.setZoom(newZoom);
-//       fabricCanvasRef.current.renderAll();
-//     }
-//   };
+//     canvas.setZoom(newZoom);
+//     canvas.renderAll();
+//   }, [zoom]);
 
-//   const handleZoomReset = () => {
+//   const handleZoomReset = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+    
 //     setZoom(1);
-    
-//     if (fabricCanvasRef.current) {
-//       fabricCanvasRef.current.setZoom(1);
-//       fabricCanvasRef.current.setViewportTransform([1, 0, 0, 1, 0, 0]);
-//       fabricCanvasRef.current.renderAll();
-//     }
-//   };
+//     canvas.setZoom(1);
+//     canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+//     canvas.renderAll();
+//   }, []);
 
-//   // Clear Canvas with Permission Check
-//   const handleClear = () => {
-//     if (!permissions.canClear) {
-//       console.log('🚫 No permission to clear canvas');
-//       return;
-//     }
-    
-//     if (window.confirm('Are you sure you want to clear the whiteboard?')) {
-//       fabricCanvasRef.current.clear();
-//       fabricCanvasRef.current.backgroundColor = '#ffffff';
-//       saveState();
-//       syncCanvasToYjs();
-//     }
-//   };
+//   const toggleFullscreen = useCallback(() => {
+//     setIsFullscreen(prev => !prev);
+//   }, []);
 
-//   // Force Reconnect
-//   const forceReconnect = () => {
-//     console.log('🔁 Forcing reconnection...');
-//     addConnectionLog('Force reconnection initiated');
-    
-//     if (providerRef.current) {
-//       providerRef.current.disconnect();
-//       providerRef.current = null;
-//     }
-    
-//     if (ydocRef.current) {
-//       ydocRef.current.destroy();
-//       ydocRef.current = null;
-//     }
-    
-//     setTimeout(() => {
-//       initCollaboration();
-//     }, 500);
-//   };
+//   // =========================
+//   // ✅ SYNC REFS WITH STATE
+//   // =========================
+//   useEffect(() => { brushWidthRef.current = brushWidth; }, [brushWidth]);
+//   useEffect(() => { brushColorRef.current = brushColor; }, [brushColor]);
+//   useEffect(() => { fillColorRef.current = fillColor; }, [fillColor]);
+//   useEffect(() => { opacityRef.current = opacity; }, [opacity]);
+//   useEffect(() => { fontSizeRef.current = fontSize; }, [fontSize]);
 
-//   // ✅ Test WebSocket Connection
-//   const testWebSocketConnection = () => {
-//     console.log('🧪 Testing WebSocket connection...');
-//     addConnectionLog('Testing WebSocket connection...');
-    
-//     const wsUrl = getWebSocketUrl();
-//     if (!wsUrl) return;
-    
-//     console.log(`Test URL: ${wsUrl}`);
-//     addConnectionLog(`Testing: ${wsUrl}`);
-    
-//     const testWs = new WebSocket(wsUrl);
-    
-//     testWs.onopen = () => {
-//       console.log(`✅ CONNECTED to: ${wsUrl}`);
-//       addConnectionLog(`✅ Connected to WebSocket`);
-//       testWs.send(JSON.stringify({ 
-//         type: 'test', 
-//         message: 'Whiteboard connection test',
-//         timestamp: new Date().toISOString()
-//       }));
-//       setTimeout(() => testWs.close(), 1000);
-//     };
-    
-//     testWs.onerror = (error) => {
-//       console.log(`❌ FAILED: ${wsUrl}`);
-//       addConnectionLog(`❌ Failed to connect: ${error}`);
-//     };
-    
-//     testWs.onmessage = (event) => {
-//       console.log(`📨 Response:`, event.data);
-//       addConnectionLog(`Response: ${typeof event.data === 'string' ? event.data : 'Binary data'}`);
-//     };
-//   };
-
-//   // ✅ Main Effect - Component Mount/Unmount
+//   // =========================
+//   // ✅ LIFECYCLE - MOUNT
+//   // =========================
 //   useEffect(() => {
-//     console.log('🎯 WhiteboardComponent useEffect - isActive:', isActive);
-    
-//     if (isActive) {
-//       console.log('🚀 Whiteboard ACTIVE - Starting initialization...');
-//       addConnectionLog('Whiteboard activated');
-      
-//       // Small delay to ensure DOM is ready
-//       const timeoutId = setTimeout(() => {
-//         console.log('🎨 Calling initCanvas...');
-//         initCanvas();
-//       }, 300);
-      
-//       return () => {
-//         console.log('🧹 Cleaning up whiteboard timeout');
-//         clearTimeout(timeoutId);
-//       };
-//     } else {
-//       console.log('⏸️ Whiteboard INACTIVE');
-//       addConnectionLog('Whiteboard deactivated');
-//     }
-//   }, [isActive, initCanvas]);
+//     isMountedRef.current = true;
+//     return () => {
+//       isMountedRef.current = false;
+//     };
+//   }, []);
 
-//   // ✅ Cleanup Effect
+//   // =========================
+//   // ✅ LIFECYCLE - INITIALIZATION
+//   // =========================
+//   useEffect(() => {
+//     if (!isActive) return;
+
+//     // Reset initialization flag
+//     initCompleteRef.current = false;
+    
+//     safeSetState(() => {
+//       setIsLoading(true);
+//       setConnectionStatus("connecting");
+//       setConnectionError(null);
+//     });
+
+//     // Initialize canvas immediately
+//     initCanvas();
+
+//     // Initialize Yjs after a short delay
+//     const timer = setTimeout(() => {
+//       initYjs();
+//     }, 500);
+
+//     return () => {
+//       clearTimeout(timer);
+//       clearTimeout(syncTimeoutRef.current);
+//       clearTimeout(loadTimeoutRef.current);
+//     };
+//   }, [initCanvas, initYjs, isActive, safeSetState]);
+
+//   // =========================
+//   // ✅ LIFECYCLE - CLEANUP
+//   // =========================
 //   useEffect(() => {
 //     return () => {
-//       console.log('🧹 WhiteboardComponent UNMOUNTING - Cleanup');
-//       addConnectionLog('Component unmounting');
+//       console.log("🧹 Cleaning up WhiteboardComponent...");
       
-//       // Clean up Yjs
-//       if (providerRef.current) {
-//         console.log('Disconnecting Yjs provider...');
-//         providerRef.current.disconnect();
-//         providerRef.current = null;
+//       // Remove resize listener
+//       if (resizeHandlerRef.current) {
+//         window.removeEventListener("resize", resizeHandlerRef.current);
 //       }
-      
+
+//       // Clean up Yjs provider
+//       if (yProviderRef.current) {
+//         try {
+//           yProviderRef.current.disconnect();
+//           yProviderRef.current.destroy();
+//         } catch (e) {
+//           console.error("Error cleaning up provider:", e);
+//         }
+//         yProviderRef.current = null;
+//       }
+
+//       // Clean up Y.Doc
 //       if (ydocRef.current) {
-//         console.log('Destroying Yjs document...');
-//         ydocRef.current.destroy();
+//         try {
+//           ydocRef.current.destroy();
+//         } catch (e) {
+//           console.error("Error cleaning up Y.Doc:", e);
+//         }
 //         ydocRef.current = null;
 //       }
-      
-//       // Clean up fabric canvas
+
+//       // Clean up Fabric canvas
 //       if (fabricCanvasRef.current) {
-//         console.log('Disposing fabric canvas...');
-//         fabricCanvasRef.current.dispose();
+//         try {
+//           fabricCanvasRef.current.dispose();
+//         } catch (e) {
+//           console.error("Error cleaning up canvas:", e);
+//         }
 //         fabricCanvasRef.current = null;
 //       }
 //     };
 //   }, []);
 
-//   if (!isActive) {
-//     console.log('⏸️ Whiteboard not active, returning null');
-//     return null;
-//   }
-
-//   if (isLoading) {
-//     return (
-//       <div className="fixed inset-0 bg-gray-900 z-50 flex items-center justify-center">
-//         <div className="text-white text-center">
-//           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4"></div>
-//           <div>Connecting to whiteboard...</div>
-//           <div className="text-sm text-gray-400 mt-2">
-//             Session: {sessionId} | Room: {roomCode}
-//           </div>
-//         </div>
-//       </div>
-//     );
-//   }
-
-//   console.log('🎨 Whiteboard RENDERING UI');
-  
+//   // =========================
+//   // ✅ RENDER - UI
+//   // =========================
 //   return (
-//     <div className="fixed inset-0 bg-gray-900 z-50 flex flex-col">
+//     <div className={`relative w-full h-full ${mainScreenMode ? "bg-black/10" : "bg-black/30"}`}>
 //       {/* Header */}
-//       <div className="bg-gray-800 border-b border-gray-700 p-4 flex justify-between items-center">
-//         <div className="flex items-center space-x-4">
-//           <h2 className="text-xl font-bold text-white flex items-center">
-//             <FiEdit3 className="mr-2" />
-//             {sessionInfo?.title || 'Collaborative Whiteboard'}
-//           </h2>
-          
-//           <div className="flex items-center space-x-2">
-//             <div className={`w-3 h-3 rounded-full ${
-//               connectionStatus === 'connected' ? 'bg-green-500 animate-pulse' : 
-//               connectionStatus === 'connecting' ? 'bg-yellow-500' : 'bg-red-500'
-//             }`} />
-//             <span className="text-sm text-gray-300">
-//               {connectionStatus === 'connected' ? 'Connected' : 
-//                connectionStatus === 'connecting' ? 'Connecting...' : 
-//                'Disconnected'}
-//             </span>
-            
-//             <span className="text-xs bg-gray-700 px-2 py-1 rounded">
-//               {isStreamer ? '🎤 Streamer' : '👀 Viewer'}
-//             </span>
-            
-//             {!permissions.canDraw && (
-//               <span className="text-xs bg-yellow-800 px-2 py-1 rounded flex items-center">
-//                 <FiLock className="mr-1" size={10} /> View Only
-//               </span>
-//             )}
+//       <div className="absolute top-2 left-2 right-2 z-20 flex items-center justify-between">
+//         <div className="flex items-center gap-2">
+//           <div className="px-3 py-1 rounded-lg bg-black/60 text-white text-xs flex items-center gap-2">
+//             <span className={`w-2 h-2 rounded-full ${connectionStatus === 'connected' ? 'bg-green-500' : 'bg-yellow-500'}`} />
+//             WB • {connectionStatus}
 //           </div>
-//         </div>
-        
-//         <div className="flex items-center space-x-2">
-//           {/* Active Users */}
-//           <div className="flex items-center space-x-1 text-sm text-gray-300">
-//             <FiUsers />
-//             <span>{activeUsers.length + 1} online</span>
+//           <div className="px-3 py-1 rounded-lg bg-black/60 text-white text-xs">
+//             {cursorPosition.x}, {cursorPosition.y} • {zoom.toFixed(2)}x
 //           </div>
-          
-//           {/* Debug Buttons */}
-//           {showDebug && (
-//             <button
-//               onClick={testWebSocketConnection}
-//               className="px-3 py-2 bg-yellow-600 hover:bg-yellow-700 rounded-lg text-white text-sm"
-//             >
-//               🧪 Test WS
-//             </button>
+//           {connectionError && (
+//             <div className="px-3 py-1 rounded-lg bg-red-600/80 text-white text-xs">
+//               ⚠️ {connectionError}
+//             </div>
 //           )}
-          
+//           {activeUsers.length > 0 && (
+//             <div className="px-3 py-1 rounded-lg bg-black/60 text-white text-xs">
+//               👥 {activeUsers.length} viewer{activeUsers.length !== 1 ? 's' : ''}
+//             </div>
+//           )}
+//         </div>
+
+//         <div className="flex items-center gap-2">
 //           <button
-//             onClick={forceReconnect}
-//             className="px-3 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-white text-sm"
+//             onClick={toggleViewersDraw}
+//             className="px-3 py-1 rounded-lg bg-black/60 text-white text-xs flex items-center gap-2 hover:bg-black/70 transition-colors"
+//             title={roomSettings.allowViewersToDraw ? "Disable viewer drawing" : "Enable viewer drawing"}
 //           >
-//             <FiRefreshCw />
+//             {roomSettings.allowViewersToDraw ? <FiUnlock size={14} /> : <FiLock size={14} />}
+//             <span className="hidden sm:inline">
+//               Viewers: {roomSettings.allowViewersToDraw ? "Can draw" : "View only"}
+//             </span>
 //           </button>
-          
+
 //           <button
-//             onClick={() => setShowDebug(!showDebug)}
-//             className="px-3 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg text-white text-sm"
+//             onClick={toggleFullscreen}
+//             className="p-2 rounded-lg bg-black/60 text-white hover:bg-black/70 transition-colors"
+//             title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
 //           >
-//             {showDebug ? 'Hide Debug' : 'Debug'}
+//             {isFullscreen ? <FiMinimize2 size={16} /> : <FiMaximize2 size={16} />}
 //           </button>
-          
-//           <button
-//             onClick={handleZoomReset}
-//             className="p-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-white"
-//             title="Reset Zoom"
-//           >
-//             <FiMaximize2 />
-//           </button>
-          
+
 //           <button
 //             onClick={onClose}
-//             className="p-2 bg-red-600 hover:bg-red-700 rounded-lg text-white"
-//             title="Close Whiteboard"
+//             className="p-2 rounded-lg bg-black/60 text-white hover:bg-black/70 transition-colors"
+//             title="Close whiteboard"
+//           >
+//             <FiX size={16} />
+//           </button>
+//         </div>
+//       </div>
+
+//       {/* Floating Toolbar */}
+//       <div className="absolute top-14 right-2 z-20 flex flex-col gap-2">
+//         <div className="flex flex-col rounded-xl bg-black/60 backdrop-blur-sm p-2">
+//           <div className="flex items-center justify-between gap-2 px-1 pb-2 border-b border-white/20">
+//             <button
+//               className="text-white/90 hover:text-white p-1"
+//               onClick={() => setShowTools(prev => !prev)}
+//               title="Toggle tools"
+//             >
+//               {showTools ? <FiChevronRight size={16} /> : <FiChevronLeft size={16} />}
+//             </button>
+
+//             <div className="flex items-center gap-2">
+//               <button
+//                 onClick={() => setShowColors(prev => !prev)}
+//                 className="w-6 h-6 rounded-md border-2 border-white/30 hover:border-white/50 transition-colors"
+//                 style={{ backgroundColor: brushColor }}
+//                 title="Select color"
+//               />
+//               <button
+//                 onClick={() => setShowBrushSizes(prev => !prev)}
+//                 className="w-6 h-6 rounded-md border border-white/30 text-white text-xs flex items-center justify-center hover:bg-white/10 transition-colors"
+//                 title="Brush size"
+//               >
+//                 {brushWidth}
+//               </button>
+//             </div>
+//           </div>
+
+//           {showTools && (
+//             <div className="flex flex-col gap-1 pt-2">
+//               {tools.map((t) => (
+//                 <button
+//                   key={t.id}
+//                   onClick={() => handleToolSelect(t.id)}
+//                   className={`flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors ${
+//                     tool === t.id ? "bg-white/20" : ""
+//                   }`}
+//                   title={t.name}
+//                 >
+//                   {t.icon}
+//                   {!compact && <span className="text-xs">{t.name}</span>}
+//                 </button>
+//               ))}
+
+//               <div className="my-1 h-px bg-white/20" />
+
+//               <button
+//                 onClick={handleUndo}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Undo"
+//               >
+//                 <FaUndo size={14} />
+//                 {!compact && <span className="text-xs">Undo</span>}
+//               </button>
+//               <button
+//                 onClick={handleRedo}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Redo"
+//               >
+//                 <FaRedo size={14} />
+//                 {!compact && <span className="text-xs">Redo</span>}
+//               </button>
+
+//               <div className="my-1 h-px bg-white/20" />
+
+//               <button
+//                 onClick={deleteSelected}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Delete selected"
+//               >
+//                 <FiTrash2 size={14} />
+//                 {!compact && <span className="text-xs">Delete</span>}
+//               </button>
+
+//               <button
+//                 onClick={handleClear}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Clear all"
+//               >
+//                 <FiRefreshCw size={14} />
+//                 {!compact && <span className="text-xs">Clear</span>}
+//               </button>
+
+//               <div className="my-1 h-px bg-white/20" />
+
+//               <button
+//                 onClick={exportAsImage}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Export as PNG"
+//               >
+//                 <FiDownload size={14} />
+//                 {!compact && <span className="text-xs">PNG</span>}
+//               </button>
+
+//               <button
+//                 onClick={exportAsJSON}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Export as JSON"
+//               >
+//                 <FiDownload size={14} />
+//                 {!compact && <span className="text-xs">JSON</span>}
+//               </button>
+
+//               <button
+//                 onClick={importFromJSON}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Import JSON"
+//               >
+//                 <FiUpload size={14} />
+//                 {!compact && <span className="text-xs">Import</span>}
+//               </button>
+
+//               <div className="my-1 h-px bg-white/20" />
+
+//               <button
+//                 onClick={handleZoomIn}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Zoom in"
+//               >
+//                 <FiZoomIn size={14} />
+//                 {!compact && <span className="text-xs">Zoom+</span>}
+//               </button>
+//               <button
+//                 onClick={handleZoomOut}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Zoom out"
+//               >
+//                 <FiZoomOut size={14} />
+//                 {!compact && <span className="text-xs">Zoom-</span>}
+//               </button>
+//               <button
+//                 onClick={handleZoomReset}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 transition-colors"
+//                 title="Reset zoom"
+//               >
+//                 <FiRefreshCw size={14} />
+//                 {!compact && <span className="text-xs">Reset</span>}
+//               </button>
+//             </div>
+//           )}
+
+//           {showColors && (
+//             <div className="mt-2 grid grid-cols-7 gap-1 pt-2 border-t border-white/20">
+//               {colors.map((c) => (
+//                 <button
+//                   key={c}
+//                   onClick={() => {
+//                     setBrushColor(c);
+//                     setBrushToCanvas();
+//                   }}
+//                   className={`w-5 h-5 rounded border border-white/30 hover:border-white/50 transition-colors ${
+//                     brushColor === c ? "ring-2 ring-white" : ""
+//                   }`}
+//                   style={{ backgroundColor: c }}
+//                   title={c}
+//                 />
+//               ))}
+//             </div>
+//           )}
+
+//           {showBrushSizes && (
+//             <div className="mt-2 flex flex-wrap gap-1 pt-2 border-t border-white/20">
+//               {brushSizes.map((s) => (
+//                 <button
+//                   key={s}
+//                   onClick={() => {
+//                     setBrushWidth(s);
+//                     setBrushToCanvas();
+//                   }}
+//                   className={`px-2 py-1 rounded-md text-white text-xs border border-white/30 hover:bg-white/10 transition-colors ${
+//                     brushWidth === s ? "bg-white/20" : ""
+//                   }`}
+//                 >
+//                   {s}
+//                 </button>
+//               ))}
+//             </div>
+//           )}
+//         </div>
+//       </div>
+
+//       {/* Canvas Container */}
+//       <div
+//         ref={containerRef}
+//         className={`absolute inset-0 ${isFullscreen ? "p-0" : "p-2"}`}
+//       >
+//         <div className="relative w-full h-full rounded-xl overflow-hidden bg-white shadow-lg">
+//           {isLoading && (
+//             <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+//               <div className="px-4 py-3 rounded-lg bg-black/80 text-white text-sm flex items-center gap-3">
+//                 <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+//                 Loading whiteboard...
+//               </div>
+//             </div>
+//           )}
+//           <canvas ref={canvasElRef} className="w-full h-full" />
+//         </div>
+//       </div>
+//     </div>
+//   );
+// };
+
+// export default WhiteboardComponent;
+
+
+
+
+
+
+
+
+
+
+
+// import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// import * as fabric from "fabric";
+// import * as Y from "yjs";
+// import { WebsocketProvider } from "y-websocket";
+// import { useAuth } from "../../../contexts/AuthContext";
+
+// import {
+//   FiSquare,
+//   FiCircle,
+//   FiType,
+//   FiPenTool,
+//   FiMousePointer,
+//   FiTrash2,
+//   FiDownload,
+//   FiUpload,
+//   FiZoomIn,
+//   FiZoomOut,
+//   FiMaximize2,
+//   FiMinimize2,
+//   FiMinus,
+//   FiArrowRight,
+//   FiX,
+//   FiLock,
+//   FiUnlock,
+//   FiChevronLeft,
+//   FiChevronRight,
+//   FiRefreshCw,
+//   FiImage,
+// } from "react-icons/fi";
+// import { FaUndo, FaRedo } from "react-icons/fa";
+// import { BsEraser } from "react-icons/bs";
+// import { LuStickyNote } from "react-icons/lu";
+
+// /**
+//  * WhiteboardComponent (Fixed)
+//  * - New UI style (compact toolbar)
+//  * - Old stability (debounced sync on mouse:up, no infinite setState loop)
+//  */
+// const WhiteboardComponent = ({
+//   sessionId,
+//   roomCode,
+//   wsToken,
+//   sessionInfo,
+//   isActive,
+//   onClose,
+//   isStreamer = false,
+//   allowViewersToDraw = true,
+//   mainScreenMode = true,
+//   compact = true,
+// }) => {
+//   const { user } = useAuth();
+
+//   // =========================
+//   // Refs
+//   // =========================
+//   const isMountedRef = useRef(false);
+
+//   const canvasElRef = useRef(null);
+//   const containerRef = useRef(null);
+//   const fabricCanvasRef = useRef(null);
+
+//   const ydocRef = useRef(null);
+//   const yProviderRef = useRef(null);
+
+//   // Stable refs for frequently-changing values (avoid re-registering listeners)
+//   const brushWidthRef = useRef(5);
+//   const brushColorRef = useRef("#000000");
+//   const fillColorRef = useRef("#ffffff");
+//   const opacityRef = useRef(1);
+//   const fontSizeRef = useRef(20);
+
+//   const permissionsRef = useRef({
+//     canDraw: isStreamer,
+//     canEdit: isStreamer,
+//     canDelete: isStreamer,
+//     canClear: isStreamer,
+//     canExport: true,
+//     canImport: isStreamer,
+//   });
+
+//   // Undo/Redo history in refs (NO render-loop)
+//   const historyRef = useRef([]);
+//   const historyIndexRef = useRef(-1);
+//   const saveQueuedRef = useRef(false);
+
+//   // Debounce timers
+//   const syncTimeoutRef = useRef(null);
+//   const resizeHandlerRef = useRef(null);
+
+//   // =========================
+//   // UI State
+//   // =========================
+//   const [tool, setTool] = useState("select");
+//   const [brushWidth, setBrushWidth] = useState(5);
+//   const [brushColor, setBrushColor] = useState("#000000");
+//   const [fillColor, setFillColor] = useState("#ffffff");
+//   const [opacity, setOpacity] = useState(1);
+//   const [fontSize, setFontSize] = useState(20);
+
+//   const [zoom, setZoom] = useState(1);
+//   const [cursorPosition, setCursorPosition] = useState({ x: 0, y: 0 });
+
+//   const [isLoading, setIsLoading] = useState(true);
+//   const [connectionStatus, setConnectionStatus] = useState("disconnected");
+
+//   const [roomSettings, setRoomSettings] = useState({
+//     allowViewersToDraw,
+//     streamerId: null,
+//     streamerName: null,
+//   });
+
+//   // Compact UI toggles
+//   const [showTools, setShowTools] = useState(true);
+//   const [showColors, setShowColors] = useState(false);
+//   const [showBrushSizes, setShowBrushSizes] = useState(false);
+//   const [isFullscreen, setIsFullscreen] = useState(false);
+
+//   // =========================
+//   // Memo: Tools config
+//   // =========================
+//   const tools = useMemo(
+//     () => [
+//       { id: "select", name: "Select", icon: <FiMousePointer size={16} /> },
+//       { id: "draw", name: "Draw", icon: <FiPenTool size={16} /> },
+//       { id: "rectangle", name: "Rectangle", icon: <FiSquare size={16} /> },
+//       { id: "circle", name: "Circle", icon: <FiCircle size={16} /> },
+//       { id: "line", name: "Line", icon: <FiMinus size={16} /> },
+//       { id: "arrow", name: "Arrow", icon: <FiArrowRight size={16} /> },
+//       { id: "text", name: "Text", icon: <FiType size={16} /> },
+//       { id: "sticky", name: "Sticky", icon: <LuStickyNote size={16} /> },
+//       { id: "eraser", name: "Eraser", icon: <BsEraser size={16} /> },
+//     ],
+//     []
+//   );
+
+//   const colors = useMemo(
+//     () => [
+//       "#000000",
+//       "#FF0000",
+//       "#00FF00",
+//       "#0000FF",
+//       "#FFFF00",
+//       "#FF00FF",
+//       "#00FFFF",
+//       "#FFA500",
+//       "#800080",
+//       "#008000",
+//       "#800000",
+//       "#008080",
+//       "#000080",
+//       "#808080",
+//     ],
+//     []
+//   );
+
+//   const brushSizes = useMemo(() => [1, 2, 3, 5, 8, 10, 15, 20, 30], []);
+
+//   // =========================
+//   // Keep refs updated
+//   // =========================
+//   useEffect(() => {
+//     brushWidthRef.current = brushWidth;
+//   }, [brushWidth]);
+//   useEffect(() => {
+//     brushColorRef.current = brushColor;
+//   }, [brushColor]);
+//   useEffect(() => {
+//     fillColorRef.current = fillColor;
+//   }, [fillColor]);
+//   useEffect(() => {
+//     opacityRef.current = opacity;
+//   }, [opacity]);
+//   useEffect(() => {
+//     fontSizeRef.current = fontSize;
+//   }, [fontSize]);
+
+//   // Permissions derived from settings
+//   useEffect(() => {
+//     const perms = {
+//       canDraw: isStreamer || !!roomSettings.allowViewersToDraw,
+//       canEdit: isStreamer || !!roomSettings.allowViewersToDraw,
+//       canDelete: isStreamer,
+//       canClear: isStreamer,
+//       canExport: true,
+//       canImport: isStreamer,
+//     };
+//     permissionsRef.current = perms;
+//   }, [isStreamer, roomSettings.allowViewersToDraw]);
+
+//   // =========================
+//   // Helpers
+//   // =========================
+//   const getUserId = () => user?.id || user?._id || "anonymous";
+
+//   const getWebSocketUrl = useCallback(() => {
+//     const baseUrl = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
+//     if (!sessionId || !wsToken) return null;
+
+//     const queryParams = new URLSearchParams({
+//       token: wsToken,
+//       roomCode: roomCode || "",
+//       userName: user?.name || "Anonymous",
+//       userId: getUserId(),
+//       isStreamer: String(!!isStreamer),
+//       allowViewersToDraw: String(!!allowViewersToDraw),
+//       roomName: sessionInfo?.title || "Whiteboard Session",
+//     });
+
+//     return `${baseUrl}/yjs/${sessionId}?${queryParams.toString()}`;
+//   }, [allowViewersToDraw, isStreamer, roomCode, sessionId, sessionInfo?.title, user?.name, wsToken]);
+
+//   const safeSetState = (setter) => {
+//     if (isMountedRef.current) setter();
+//   };
+
+//   // =========================
+//   // History / SaveState (SAFE)
+//   // =========================
+//   const saveState = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     // throttle: avoid saving multiple times in same tick (prevents depth loops)
+//     if (saveQueuedRef.current) return;
+//     saveQueuedRef.current = true;
+
+//     queueMicrotask(() => {
+//       saveQueuedRef.current = false;
+//       const c = fabricCanvasRef.current;
+//       if (!c) return;
+
+//       const state = c.toJSON(["id"]);
+//       const hist = historyRef.current;
+//       const idx = historyIndexRef.current;
+
+//       const next = hist.slice(0, idx + 1);
+//       next.push(state);
+
+//       historyRef.current = next;
+//       historyIndexRef.current = next.length - 1;
+//     });
+//   }, []);
+
+//   const loadFromHistoryIndex = useCallback(
+//     (idx) => {
+//       const canvas = fabricCanvasRef.current;
+//       const hist = historyRef.current;
+//       if (!canvas) return;
+//       if (!hist[idx]) return;
+
+//       canvas.loadFromJSON(hist[idx], () => {
+//         canvas.renderAll();
+//       });
+//     },
+//     []
+//   );
+
+//   const handleUndo = useCallback(() => {
+//     if (!permissionsRef.current.canEdit) return;
+//     const idx = historyIndexRef.current;
+//     if (idx <= 0) return;
+
+//     const nextIdx = idx - 1;
+//     historyIndexRef.current = nextIdx;
+//     loadFromHistoryIndex(nextIdx);
+
+//     // sync after undo (debounced)
+//     clearTimeout(syncTimeoutRef.current);
+//     syncTimeoutRef.current = setTimeout(() => {
+//       updateYjsCanvas();
+//     }, 250);
+//   }, [loadFromHistoryIndex]);
+
+//   const handleRedo = useCallback(() => {
+//     if (!permissionsRef.current.canEdit) return;
+
+//     const hist = historyRef.current;
+//     const idx = historyIndexRef.current;
+//     if (idx >= hist.length - 1) return;
+
+//     const nextIdx = idx + 1;
+//     historyIndexRef.current = nextIdx;
+//     loadFromHistoryIndex(nextIdx);
+
+//     clearTimeout(syncTimeoutRef.current);
+//     syncTimeoutRef.current = setTimeout(() => {
+//       updateYjsCanvas();
+//     }, 250);
+//   }, [loadFromHistoryIndex]);
+
+//   // =========================
+//   // Yjs Sync
+//   // =========================
+//   const loadCanvasFromState = useCallback((state) => {
+//     const canvas = fabricCanvasRef.current;
+//     if (!canvas) return;
+
+//     try {
+//       canvas.loadFromJSON(state, () => {
+//         canvas.renderAll();
+//         // Save to history but do NOT cause sync back immediately
+//         saveState();
+//       });
+//     } catch (e) {
+//       console.error("❌ loadCanvasFromState error:", e);
+//     }
+//   }, [saveState]);
+
+//   const updateYjsCanvas = useCallback(() => {
+//     const canvas = fabricCanvasRef.current;
+//     const ydoc = ydocRef.current;
+//     if (!canvas || !ydoc) return;
+
+//     try {
+//       const json = canvas.toJSON(["id"]);
+//       const hasObjects = Array.isArray(json.objects) && json.objects.length > 0;
+
+//       // Don’t spam empty updates
+//       if (!hasObjects) return;
+
+//       const yCanvasArray = ydoc.getArray("whiteboard");
+//       const payload = {
+//         ...json,
+//         sessionId,
+//         allowViewersToDraw: roomSettings.allowViewersToDraw,
+//         lastUpdated: new Date().toISOString(),
+//         updatedBy: getUserId(),
+//         updatedByName: user?.name || "User",
+//         version: "5.3.0",
+//       };
+
+//       // Replace last snapshot
+//       if (yCanvasArray.length > 0) yCanvasArray.delete(0, yCanvasArray.length);
+//       yCanvasArray.push([payload]);
+//     } catch (e) {
+//       console.error("❌ updateYjsCanvas error:", e);
+//     }
+//   }, [roomSettings.allowViewersToDraw, sessionId, user?.name]);
+
+//   const toggleViewersDraw = useCallback(() => {
+//     if (!isStreamer || !ydocRef.current) return;
+//     const ySettings = ydocRef.current.getMap("room_settings");
+//     const newValue = !roomSettings.allowViewersToDraw;
+//     ySettings.set("allowViewersToDraw", newValue);
+//     ySettings.set("updatedAt", new Date().toISOString());
+//     ySettings.set("updatedBy", getUserId());
+//   }, [isStreamer, roomSettings.allowViewersToDraw]);
+
+//   const initYjs = useCallback(() => {
+//     // cleanup any previous
+//     if (yProviderRef.current) {
+//       try {
+//         yProviderRef.current.disconnect();
+//         yProviderRef.current.destroy();
+//       } catch {}
+//       yProviderRef.current = null;
+//     }
+//     if (ydocRef.current) {
+//       try {
+//         ydocRef.current.destroy();
+//       } catch {}
+//       ydocRef.current = null;
+//     }
+
+//     if (!sessionId || !wsToken) {
+//       safeSetState(() => setIsLoading(false));
+//       return;
+//     }
+
+//     const wsUrl = getWebSocketUrl();
+//     if (!wsUrl) {
+//       safeSetState(() => setIsLoading(false));
+//       return;
+//     }
+
+//     const ydoc = new Y.Doc();
+//     ydocRef.current = ydoc;
+
+//     const provider = new WebsocketProvider(wsUrl, `whiteboard-${sessionId}`, ydoc, {
+//       WebSocketPolyfill: WebSocket,
+//       connect: true,
+//       disableBc: true,
+//       maxBackoffTime: 5000,
+//     });
+
+//     yProviderRef.current = provider;
+
+//     provider.on("status", (event) => {
+//       const status = event?.status || "unknown";
+//       safeSetState(() => setConnectionStatus(status));
+//       if (status === "connected") safeSetState(() => setIsLoading(false));
+//     });
+
+//     const ySettings = ydoc.getMap("room_settings");
+
+//     // streamer initializes settings once
+//     provider.on("status", (event) => {
+//       if (event?.status === "connected") {
+//         if (isStreamer && ySettings.get("allowViewersToDraw") === undefined) {
+//           ySettings.set("allowViewersToDraw", allowViewersToDraw);
+//           ySettings.set("streamerId", getUserId());
+//           ySettings.set("streamerName", user?.name || "Streamer");
+//         }
+//       }
+//     });
+
+//     ySettings.observe(() => {
+//       const s = ySettings.toJSON();
+//       safeSetState(() =>
+//         setRoomSettings((prev) => ({
+//           ...prev,
+//           allowViewersToDraw: s.allowViewersToDraw ?? prev.allowViewersToDraw,
+//           streamerId: s.streamerId ?? prev.streamerId,
+//           streamerName: s.streamerName ?? prev.streamerName,
+//         }))
+//       );
+//     });
+
+//     const yCanvasArray = ydoc.getArray("whiteboard");
+//     yCanvasArray.observe(() => {
+//       if (yCanvasArray.length === 0) return;
+//       const latest = yCanvasArray.get(yCanvasArray.length - 1);
+//       if (!latest) return;
+
+//       // prevent echo: don’t re-apply own update
+//       if (latest.updatedBy === getUserId()) return;
+
+//       loadCanvasFromState(latest);
+//     });
+
+//     // create initial state if empty
+//     if (yCanvasArray.length === 0) {
+//       yCanvasArray.insert(0, [
+//         {
+//           version: "5.3.0",
+//           objects: [],
+//           background: "#ffffff",
+//           sessionId,
+//           allowViewersToDraw,
+//           createdAt: new Date().toISOString(),
+//           updatedBy: "system",
+//         },
+//       ]);
+//     }
+//   }, [allowViewersToDraw, getWebSocketUrl, isStreamer, loadCanvasFromState, sessionId, user?.name, wsToken]);
+
+//   // =========================
+//   // Fabric Canvas Init
+//   // =========================
+//   const initCanvas = useCallback(() => {
+//     if (!containerRef.current || !canvasElRef.current) return;
+
+//     // dispose previous
+//     if (fabricCanvasRef.current) {
+//       try {
+//         fabricCanvasRef.current.dispose();
+//       } catch {}
+//       fabricCanvasRef.current = null;
+//     }
+
+//     const container = containerRef.current;
+//     const canvas = new fabric.Canvas(canvasElRef.current, {
+//       width: container.clientWidth,
+//       height: container.clientHeight,
+//       backgroundColor: "#ffffff",
+//       selection: true,
+//       preserveObjectStacking: true,
+//       renderOnAddRemove: true,
+//     });
+
+//     fabricCanvasRef.current = canvas;
+
+//     // brush setup
+//     canvas.isDrawingMode = false;
+//     canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
+//     canvas.freeDrawingBrush.width = brushWidthRef.current;
+//     canvas.freeDrawingBrush.color = brushColorRef.current;
+
+//     // cursor display
+//     canvas.on("mouse:move", (e) => {
+//       if (!e.absolutePointer) return;
+//       safeSetState(() =>
+//         setCursorPosition({
+//           x: Math.round(e.absolutePointer.x),
+//           y: Math.round(e.absolutePointer.y),
+//         })
+//       );
+//     });
+
+//     // Object added -> generate id + saveState
+//     canvas.on("object:added", (e) => {
+//       if (e?.target && !e.target.id) {
+//         e.target.id = `obj_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+//       }
+//       saveState();
+//     });
+
+//     // Object modified -> saveState and debounce sync
+//     canvas.on("object:modified", () => {
+//       saveState();
+//       if (!permissionsRef.current.canEdit) return;
+
+//       clearTimeout(syncTimeoutRef.current);
+//       syncTimeoutRef.current = setTimeout(() => {
+//         updateYjsCanvas();
+//       }, 400);
+//     });
+
+//     // path created -> saveState ONLY (NO sync here)
+//     canvas.on("path:created", (e) => {
+//       if (e?.path && !e.path.id) {
+//         e.path.id = `path_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+//       }
+//       saveState();
+//     });
+
+//     // mouse up -> debounce sync (main sync point)
+//     canvas.on("mouse:up", () => {
+//       if (!permissionsRef.current.canEdit) return;
+//       clearTimeout(syncTimeoutRef.current);
+//       syncTimeoutRef.current = setTimeout(() => {
+//         updateYjsCanvas();
+//       }, 250);
+//     });
+
+//     // resize
+//     const handleResize = () => {
+//       const c = fabricCanvasRef.current;
+//       const ctr = containerRef.current;
+//       if (!c || !ctr) return;
+//       c.setDimensions({ width: ctr.clientWidth, height: ctr.clientHeight });
+//       c.renderAll();
+//     };
+
+//     resizeHandlerRef.current = handleResize;
+//     window.addEventListener("resize", handleResize);
+
+//     // initial history snapshot
+//     saveState();
+//   }, [saveState, updateYjsCanvas]);
+
+//   // =========================
+//   // Tools actions
+//   // =========================
+//   const setBrushToCanvas = useCallback(() => {
+//     const c = fabricCanvasRef.current;
+//     if (!c) return;
+//     if (!c.freeDrawingBrush) c.freeDrawingBrush = new fabric.PencilBrush(c);
+//     c.freeDrawingBrush.width = brushWidthRef.current;
+//     c.freeDrawingBrush.color = brushColorRef.current;
+//   }, []);
+
+//   const addRectangle = useCallback(() => {
+//     if (!permissionsRef.current.canDraw) return;
+//     const c = fabricCanvasRef.current;
+//     if (!c) return;
+//     const rect = new fabric.Rect({
+//       left: 120,
+//       top: 120,
+//       width: 180,
+//       height: 120,
+//       fill: fillColorRef.current,
+//       stroke: brushColorRef.current,
+//       strokeWidth: brushWidthRef.current,
+//       opacity: opacityRef.current,
+//       selectable: true,
+//       id: `rect_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+//     c.add(rect);
+//     c.setActiveObject(rect);
+//     c.renderAll();
+//     setTool("select");
+//     setTimeout(updateYjsCanvas, 80);
+//   }, [updateYjsCanvas]);
+
+//   const addCircle = useCallback(() => {
+//     if (!permissionsRef.current.canDraw) return;
+//     const c = fabricCanvasRef.current;
+//     if (!c) return;
+//     const circle = new fabric.Circle({
+//       left: 140,
+//       top: 140,
+//       radius: 70,
+//       fill: fillColorRef.current,
+//       stroke: brushColorRef.current,
+//       strokeWidth: brushWidthRef.current,
+//       opacity: opacityRef.current,
+//       selectable: true,
+//       id: `circle_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+//     c.add(circle);
+//     c.setActiveObject(circle);
+//     c.renderAll();
+//     setTool("select");
+//     setTimeout(updateYjsCanvas, 80);
+//   }, [updateYjsCanvas]);
+
+//   const addText = useCallback(() => {
+//     if (!permissionsRef.current.canDraw) return;
+//     const c = fabricCanvasRef.current;
+//     if (!c) return;
+//     const text = new fabric.IText("Double click to edit", {
+//       left: 140,
+//       top: 140,
+//       fontSize: fontSizeRef.current,
+//       fill: brushColorRef.current,
+//       selectable: true,
+//       id: `text_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+//     c.add(text);
+//     c.setActiveObject(text);
+//     c.renderAll();
+//     setTool("select");
+//     setTimeout(updateYjsCanvas, 80);
+//   }, [updateYjsCanvas]);
+
+//   const addSticky = useCallback(() => {
+//     if (!permissionsRef.current.canDraw) return;
+//     const c = fabricCanvasRef.current;
+//     if (!c) return;
+
+//     const bg = new fabric.Rect({
+//       left: 120,
+//       top: 120,
+//       width: 220,
+//       height: 150,
+//       fill: "#ffff88",
+//       stroke: "#d4d4d4",
+//       strokeWidth: 1,
+//       opacity: 0.92,
+//       selectable: true,
+//       id: `sticky_bg_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+
+//     const tx = new fabric.IText("Edit note...", {
+//       left: 130,
+//       top: 130,
+//       fontSize: 16,
+//       fill: "#000000",
+//       selectable: true,
+//       id: `sticky_text_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+
+//     const group = new fabric.Group([bg, tx], {
+//       left: 120,
+//       top: 120,
+//       selectable: true,
+//       id: `sticky_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//     });
+
+//     c.add(group);
+//     c.setActiveObject(group);
+//     c.renderAll();
+//     setTool("select");
+//     setTimeout(updateYjsCanvas, 80);
+//   }, [updateYjsCanvas]);
+
+//   const startLineMode = useCallback(() => {
+//     if (!permissionsRef.current.canDraw) return;
+//     const c = fabricCanvasRef.current;
+//     if (!c) return;
+//     c.isDrawingMode = false;
+//     c.selection = false;
+
+//     let line = null;
+//     let isDown = false;
+
+//     const onDown = (opt) => {
+//       isDown = true;
+//       const p = c.getPointer(opt.e);
+//       line = new fabric.Line([p.x, p.y, p.x, p.y], {
+//         stroke: brushColorRef.current,
+//         strokeWidth: brushWidthRef.current,
+//         opacity: opacityRef.current,
+//         selectable: true,
+//         id: `line_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//       });
+//       c.add(line);
+//     };
+
+//     const onMove = (opt) => {
+//       if (!isDown || !line) return;
+//       const p = c.getPointer(opt.e);
+//       line.set({ x2: p.x, y2: p.y });
+//       c.renderAll();
+//     };
+
+//     const onUp = () => {
+//       isDown = false;
+//       c.off("mouse:down", onDown);
+//       c.off("mouse:move", onMove);
+//       c.off("mouse:up", onUp);
+//       c.selection = true;
+//       setTool("select");
+//       setTimeout(updateYjsCanvas, 80);
+//     };
+
+//     c.on("mouse:down", onDown);
+//     c.on("mouse:move", onMove);
+//     c.on("mouse:up", onUp);
+//   }, [updateYjsCanvas]);
+
+//   const startArrowMode = useCallback(() => {
+//     if (!permissionsRef.current.canDraw) return;
+//     const c = fabricCanvasRef.current;
+//     if (!c) return;
+//     c.isDrawingMode = false;
+//     c.selection = false;
+
+//     let isDown = false;
+//     let shaft = null;
+//     let head = null;
+
+//     const onDown = (opt) => {
+//       isDown = true;
+//       const p = c.getPointer(opt.e);
+
+//       shaft = new fabric.Line([p.x, p.y, p.x, p.y], {
+//         stroke: brushColorRef.current,
+//         strokeWidth: brushWidthRef.current,
+//         opacity: opacityRef.current,
+//         selectable: false,
+//       });
+
+//       head = new fabric.Triangle({
+//         left: p.x,
+//         top: p.y,
+//         width: 14,
+//         height: 14,
+//         fill: brushColorRef.current,
+//         angle: 0,
+//         originX: "center",
+//         originY: "center",
+//         selectable: false,
+//       });
+
+//       c.add(shaft);
+//       c.add(head);
+//     };
+
+//     const onMove = (opt) => {
+//       if (!isDown || !shaft || !head) return;
+//       const p = c.getPointer(opt.e);
+//       shaft.set({ x2: p.x, y2: p.y });
+
+//       const dx = p.x - shaft.x1;
+//       const dy = p.y - shaft.y1;
+//       const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+
+//       head.set({ left: p.x, top: p.y, angle: angle + 90 });
+//       c.renderAll();
+//     };
+
+//     const onUp = () => {
+//       isDown = false;
+
+//       if (shaft && head) {
+//         const group = new fabric.Group([shaft, head], {
+//           selectable: true,
+//           id: `arrow_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+//         });
+//         c.remove(shaft);
+//         c.remove(head);
+//         c.add(group);
+//       }
+
+//       c.off("mouse:down", onDown);
+//       c.off("mouse:move", onMove);
+//       c.off("mouse:up", onUp);
+//       c.selection = true;
+//       setTool("select");
+//       setTimeout(updateYjsCanvas, 80);
+//     };
+
+//     c.on("mouse:down", onDown);
+//     c.on("mouse:move", onMove);
+//     c.on("mouse:up", onUp);
+//   }, [updateYjsCanvas]);
+
+//   const activateEraser = useCallback(() => {
+//     if (!permissionsRef.current.canDelete) return;
+//     const c = fabricCanvasRef.current;
+//     if (!c) return;
+//     c.isDrawingMode = false;
+//     c.selection = false;
+
+//     const onDown = (opt) => {
+//       const p = c.getPointer(opt.e);
+//       const objs = c.getObjects();
+//       let removed = 0;
+//       objs.forEach((obj) => {
+//         if (obj.containsPoint && obj.containsPoint(p)) {
+//           c.remove(obj);
+//           removed++;
+//         }
+//       });
+//       c.renderAll();
+//       if (removed > 0) setTimeout(updateYjsCanvas, 80);
+//     };
+
+//     c.on("mouse:down", onDown);
+
+//     // auto-off
+//     setTimeout(() => {
+//       c.off("mouse:down", onDown);
+//       c.selection = true;
+//       setTool("select");
+//     }, 5000);
+//   }, [updateYjsCanvas]);
+
+//   const handleToolSelect = useCallback(
+//     (t) => {
+//       const c = fabricCanvasRef.current;
+//       if (!c) return;
+
+//       // permission checks
+//       if ((t === "draw" || t === "rectangle" || t === "circle" || t === "line" || t === "arrow" || t === "text" || t === "sticky") && !permissionsRef.current.canDraw) {
+//         alert("You do not have permission to draw.");
+//         return;
+//       }
+//       if (t === "eraser" && !permissionsRef.current.canDelete) {
+//         alert("Only the streamer can erase/delete.");
+//         return;
+//       }
+
+//       setTool(t);
+
+//       switch (t) {
+//         case "select":
+//           c.isDrawingMode = false;
+//           c.selection = true;
+//           break;
+
+//         case "draw":
+//           c.selection = false;
+//           c.isDrawingMode = true;
+//           setBrushToCanvas();
+//           break;
+
+//         case "rectangle":
+//           addRectangle();
+//           break;
+
+//         case "circle":
+//           addCircle();
+//           break;
+
+//         case "line":
+//           startLineMode();
+//           break;
+
+//         case "arrow":
+//           startArrowMode();
+//           break;
+
+//         case "text":
+//           addText();
+//           break;
+
+//         case "sticky":
+//           addSticky();
+//           break;
+
+//         case "eraser":
+//           activateEraser();
+//           break;
+
+//         default:
+//           break;
+//       }
+//     },
+//     [activateEraser, addCircle, addRectangle, addSticky, addText, setBrushToCanvas, startArrowMode, startLineMode]
+//   );
+
+//   // =========================
+//   // Export / Import / Clear / Delete
+//   // =========================
+//   const exportAsImage = useCallback(() => {
+//     const c = fabricCanvasRef.current;
+//     if (!c) return;
+//     const dataURL = c.toDataURL({ format: "png", quality: 1, multiplier: 2 });
+//     const fileName = `whiteboard-${sessionInfo?.title || "session"}-${new Date().toISOString().slice(0, 10)}.png`;
+//     const link = document.createElement("a");
+//     link.href = dataURL;
+//     link.download = fileName;
+//     link.click();
+//   }, [sessionInfo?.title]);
+
+//   const exportAsJSON = useCallback(() => {
+//     const c = fabricCanvasRef.current;
+//     if (!c) return;
+//     const json = c.toJSON(["id"]);
+//     const dataStr = JSON.stringify(json);
+//     const dataUri = "data:application/json;charset=utf-8," + encodeURIComponent(dataStr);
+//     const fileName = `whiteboard-${sessionInfo?.title || "session"}-${new Date().toISOString().slice(0, 10)}.json`;
+//     const link = document.createElement("a");
+//     link.href = dataUri;
+//     link.download = fileName;
+//     link.click();
+//   }, [sessionInfo?.title]);
+
+//   const importFromJSON = useCallback(() => {
+//     if (!permissionsRef.current.canImport) {
+//       alert("Only streamer can import JSON.");
+//       return;
+//     }
+//     const input = document.createElement("input");
+//     input.type = "file";
+//     input.accept = ".json,application/json";
+//     input.onchange = (e) => {
+//       const file = e.target.files?.[0];
+//       if (!file) return;
+//       const reader = new FileReader();
+//       reader.onload = (ev) => {
+//         try {
+//           const json = JSON.parse(ev.target.result);
+//           const c = fabricCanvasRef.current;
+//           if (!c) return;
+//           c.loadFromJSON(json, () => {
+//             c.renderAll();
+//             saveState();
+//             setTimeout(updateYjsCanvas, 80);
+//           });
+//         } catch {
+//           alert("Invalid JSON file.");
+//         }
+//       };
+//       reader.readAsText(file);
+//     };
+//     input.click();
+//   }, [saveState, updateYjsCanvas]);
+
+//   const handleClear = useCallback(() => {
+//     if (!permissionsRef.current.canClear) {
+//       alert("Only streamer can clear the board.");
+//       return;
+//     }
+//     if (!window.confirm("Clear the whiteboard?")) return;
+//     const c = fabricCanvasRef.current;
+//     if (!c) return;
+//     c.clear();
+//     c.backgroundColor = "#ffffff";
+//     c.renderAll();
+//     saveState();
+//     setTimeout(updateYjsCanvas, 80);
+//   }, [saveState, updateYjsCanvas]);
+
+//   const deleteSelected = useCallback(() => {
+//     if (!permissionsRef.current.canDelete) {
+//       alert("Only streamer can delete objects.");
+//       return;
+//     }
+//     const c = fabricCanvasRef.current;
+//     if (!c) return;
+//     const active = c.getActiveObject();
+//     if (!active) return;
+//     c.remove(active);
+//     c.discardActiveObject();
+//     c.renderAll();
+//     saveState();
+//     setTimeout(updateYjsCanvas, 80);
+//   }, [saveState, updateYjsCanvas]);
+
+//   // =========================
+//   // Zoom / Fullscreen
+//   // =========================
+//   const handleZoomIn = useCallback(() => {
+//     const c = fabricCanvasRef.current;
+//     if (!c) return;
+//     const newZoom = Math.min(zoom * 1.2, 5);
+//     setZoom(newZoom);
+//     c.setZoom(newZoom);
+//     c.renderAll();
+//   }, [zoom]);
+
+//   const handleZoomOut = useCallback(() => {
+//     const c = fabricCanvasRef.current;
+//     if (!c) return;
+//     const newZoom = Math.max(zoom / 1.2, 0.2);
+//     setZoom(newZoom);
+//     c.setZoom(newZoom);
+//     c.renderAll();
+//   }, [zoom]);
+
+//   const toggleFullscreen = useCallback(() => {
+//     setIsFullscreen((p) => !p);
+//   }, []);
+
+//   // =========================
+//   // Main lifecycle
+//   // =========================
+//   useEffect(() => {
+//     isMountedRef.current = true;
+//     return () => {
+//       isMountedRef.current = false;
+//     };
+//   }, []);
+
+//   useEffect(() => {
+//     if (!isActive) return;
+
+//     safeSetState(() => {
+//       setIsLoading(true);
+//       setConnectionStatus("connecting");
+//     });
+
+//     initCanvas();
+
+//     const t = setTimeout(() => {
+//       initYjs();
+//     }, 600);
+
+//     return () => clearTimeout(t);
+//   }, [initCanvas, initYjs, isActive]);
+
+//   // cleanup on unmount
+//   useEffect(() => {
+//     return () => {
+//       clearTimeout(syncTimeoutRef.current);
+
+//       if (resizeHandlerRef.current) {
+//         window.removeEventListener("resize", resizeHandlerRef.current);
+//       }
+
+//       if (yProviderRef.current) {
+//         try {
+//           yProviderRef.current.disconnect();
+//           yProviderRef.current.destroy();
+//         } catch {}
+//         yProviderRef.current = null;
+//       }
+
+//       if (ydocRef.current) {
+//         try {
+//           ydocRef.current.destroy();
+//         } catch {}
+//         ydocRef.current = null;
+//       }
+
+//       if (fabricCanvasRef.current) {
+//         try {
+//           fabricCanvasRef.current.dispose();
+//         } catch {}
+//         fabricCanvasRef.current = null;
+//       }
+//     };
+//   }, []);
+
+//   // =========================
+//   // UI
+//   // =========================
+//   const canDraw = permissionsRef.current.canDraw;
+
+//   return (
+//     <div
+//       className={`relative w-full h-full ${
+//         mainScreenMode ? "bg-black/10" : "bg-black/30"
+//       }`}
+//     >
+//       {/* Header (compact) */}
+//       <div className="absolute top-2 left-2 right-2 z-20 flex items-center justify-between">
+//         <div className="flex items-center gap-2">
+//           <div className="px-3 py-1 rounded-lg bg-black/60 text-white text-xs">
+//             WB • {connectionStatus}
+//             {roomSettings.streamerName ? ` • Host: ${roomSettings.streamerName}` : ""}
+//           </div>
+//           <div className="px-3 py-1 rounded-lg bg-black/60 text-white text-xs">
+//             {cursorPosition.x}, {cursorPosition.y} • Zoom {zoom.toFixed(2)}
+//           </div>
+//         </div>
+
+//         <div className="flex items-center gap-2">
+//           {isStreamer && (
+//             <button
+//               onClick={toggleViewersDraw}
+//               className="px-3 py-1 rounded-lg bg-black/60 text-white text-xs flex items-center gap-2 hover:bg-black/70"
+//               title="Toggle viewer draw"
+//             >
+//               {roomSettings.allowViewersToDraw ? <FiUnlock /> : <FiLock />}
+//               <span className="hidden sm:inline">
+//                 Viewers: {roomSettings.allowViewersToDraw ? "Can draw" : "View only"}
+//               </span>
+//             </button>
+//           )}
+
+//           <button
+//             onClick={toggleFullscreen}
+//             className="p-2 rounded-lg bg-black/60 text-white hover:bg-black/70"
+//             title="Fullscreen"
+//           >
+//             {isFullscreen ? <FiMinimize2 /> : <FiMaximize2 />}
+//           </button>
+
+//           <button
+//             onClick={onClose}
+//             className="p-2 rounded-lg bg-black/60 text-white hover:bg-black/70"
+//             title="Close"
 //           >
 //             <FiX />
 //           </button>
 //         </div>
 //       </div>
 
-//       {/* Main Area */}
-//       <div className="flex-1 flex overflow-hidden">
-//         {/* Tools Sidebar */}
-//         <div className="w-16 bg-gray-800 border-r border-gray-700 flex flex-col items-center py-4 space-y-4">
-//           {tools.map((toolItem) => (
+//       {/* Toolbar */}
+//       <div className="absolute top-14 right-2 z-20 flex flex-col gap-2">
+//         <div className="flex flex-col rounded-xl bg-black/60 p-2">
+//           <div className="flex items-center justify-between gap-2 px-1 pb-2">
 //             <button
-//               key={toolItem.id}
-//               onClick={() => handleToolSelect(toolItem.id)}
-//               className={`p-3 rounded-xl transition-all duration-200 ${
-//                 tool === toolItem.id 
-//                   ? 'bg-blue-600 text-white shadow-lg' 
-//                   : 'bg-gray-700 text-gray-300 hover:bg-gray-600 hover:text-white'
-//               } ${
-//                 ((toolItem.id === 'draw' || toolItem.id === 'eraser') && !permissions.canDraw) ||
-//                 (toolItem.id === 'eraser' && !permissions.canDelete) ||
-//                 (['rectangle', 'circle', 'triangle', 'text', 'sticky', 'image', 'line', 'arrow', 'star', 'hexagon'].includes(toolItem.id) && !permissions.canDraw)
-//                   ? 'opacity-50 cursor-not-allowed'
-//                   : ''
-//               }`}
-//               title={toolItem.name}
-//               disabled={
-//                 ((toolItem.id === 'draw' || toolItem.id === 'eraser') && !permissions.canDraw) ||
-//                 (toolItem.id === 'eraser' && !permissions.canDelete) ||
-//                 (['rectangle', 'circle', 'triangle', 'text', 'sticky', 'image', 'line', 'arrow', 'star', 'hexagon'].includes(toolItem.id) && !permissions.canDraw)
-//               }
+//               className="text-white/90 hover:text-white"
+//               onClick={() => setShowTools((p) => !p)}
+//               title="Toggle tools"
 //             >
-//               {toolItem.icon}
+//               {showTools ? <FiChevronRight /> : <FiChevronLeft />}
 //             </button>
-//           ))}
-//         </div>
 
-//         {/* Properties Sidebar */}
-//         <div className="w-64 bg-gray-800 border-r border-gray-700 p-4 overflow-y-auto">
-//           <div className="space-y-6">
-//             <div>
-//               <h3 className="text-sm font-semibold text-gray-300 mb-2 flex items-center">
-//                 <BsBrush className="mr-2" />
-//                 Brush Properties
-//                 {!permissions.canDraw && (
-//                   <FiLock className="ml-auto" size={12} />
-//                 )}
-//               </h3>
-              
-//               <div className="space-y-3">
-//                 <div>
-//                   <label className="text-xs text-gray-400">Width</label>
-//                   <div className="flex flex-wrap gap-1 mt-1">
-//                     {brushSizes.map((size) => (
-//                       <button
-//                         key={size}
-//                         onClick={() => setBrushWidth(size)}
-//                         className={`w-8 h-8 rounded-full flex items-center justify-center ${
-//                           brushWidth === size 
-//                             ? 'bg-blue-600 text-white' 
-//                             : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-//                         } ${!permissions.canDraw ? 'opacity-50 cursor-not-allowed' : ''}`}
-//                         disabled={!permissions.canDraw}
-//                       >
-//                         {size}
-//                       </button>
-//                     ))}
-//                   </div>
-//                 </div>
-
-//                 <div>
-//                   <label className="text-xs text-gray-400">Stroke Color</label>
-//                   <div className="grid grid-cols-7 gap-1 mt-1">
-//                     {colors.map((color) => (
-//                       <button
-//                         key={color}
-//                         onClick={() => setBrushColor(color)}
-//                         className={`w-6 h-6 rounded-full border-2 ${
-//                           brushColor === color ? 'border-white' : 'border-gray-700'
-//                         } ${!permissions.canDraw ? 'opacity-50' : ''}`}
-//                         style={{ backgroundColor: color }}
-//                         disabled={!permissions.canDraw}
-//                       />
-//                     ))}
-//                   </div>
-//                   <input
-//                     type="color"
-//                     value={brushColor}
-//                     onChange={(e) => setBrushColor(e.target.value)}
-//                     className={`w-full mt-2 bg-gray-700 border border-gray-600 rounded ${!permissions.canDraw ? 'opacity-50 cursor-not-allowed' : ''}`}
-//                     disabled={!permissions.canDraw}
-//                   />
-//                 </div>
-
-//                 <div>
-//                   <label className="text-xs text-gray-400">Fill Color</label>
-//                   <div className="grid grid-cols-7 gap-1 mt-1">
-//                     {colors.map((color) => (
-//                       <button
-//                         key={color}
-//                         onClick={() => setFillColor(color)}
-//                         className={`w-6 h-6 rounded-full border-2 ${
-//                           fillColor === color ? 'border-white' : 'border-gray-700'
-//                         } ${!permissions.canDraw ? 'opacity-50' : ''}`}
-//                         style={{ backgroundColor: color }}
-//                         disabled={!permissions.canDraw}
-//                       />
-//                     ))}
-//                   </div>
-//                   <input
-//                     type="color"
-//                     value={fillColor}
-//                     onChange={(e) => setFillColor(e.target.value)}
-//                     className={`w-full mt-2 bg-gray-700 border border-gray-600 rounded ${!permissions.canDraw ? 'opacity-50 cursor-not-allowed' : ''}`}
-//                     disabled={!permissions.canDraw}
-//                   />
-//                 </div>
-
-//                 <div>
-//                   <label className="text-xs text-gray-400">
-//                     Opacity: {Math.round(opacity * 100)}%
-//                   </label>
-//                   <input
-//                     type="range"
-//                     min="0.1"
-//                     max="1"
-//                     step="0.1"
-//                     value={opacity}
-//                     onChange={(e) => setOpacity(parseFloat(e.target.value))}
-//                     className={`w-full mt-1 ${!permissions.canDraw ? 'opacity-50 cursor-not-allowed' : ''}`}
-//                     disabled={!permissions.canDraw}
-//                   />
-//                 </div>
-//               </div>
+//             <div className="flex items-center gap-2">
+//               <button
+//                 onClick={() => setShowColors((p) => !p)}
+//                 className="w-6 h-6 rounded-md border border-white/30"
+//                 style={{ background: brushColor }}
+//                 title="Colors"
+//               />
+//               <button
+//                 onClick={() => setShowBrushSizes((p) => !p)}
+//                 className="w-6 h-6 rounded-md border border-white/30 text-white text-xs flex items-center justify-center"
+//                 title="Brush size"
+//               >
+//                 {brushWidth}
+//               </button>
 //             </div>
-
-//             {/* Session Info */}
-//             {sessionInfo && (
-//               <div className="pt-4 border-t border-gray-700">
-//                 <h3 className="text-sm font-semibold text-gray-300 mb-2">Session Info</h3>
-//                 <div className="text-xs text-gray-400 space-y-1">
-//                   <div>Title: {sessionInfo.title}</div>
-//                   <div>Room: {sessionInfo.roomCode}</div>
-//                   {sessionInfo.streamerName && (
-//                     <div>Host: {sessionInfo.streamerName}</div>
-//                   )}
-//                   <div>Participants: {activeUsers.length + 1}</div>
-//                   <div className="pt-2">
-//                     <div className="text-gray-300">Permissions:</div>
-//                     <div className="flex flex-wrap gap-1 mt-1">
-//                       {permissions.canDraw && (
-//                         <span className="bg-green-900 px-2 py-1 rounded text-xs">Draw</span>
-//                       )}
-//                       {permissions.canEdit && (
-//                         <span className="bg-blue-900 px-2 py-1 rounded text-xs">Edit</span>
-//                       )}
-//                       {permissions.canDelete && (
-//                         <span className="bg-red-900 px-2 py-1 rounded text-xs">Delete</span>
-//                       )}
-//                     </div>
-//                   </div>
-//                 </div>
-//               </div>
-//             )}
-//           </div>
-//         </div>
-
-//         {/* Canvas Area */}
-//         <div className="flex-1 relative overflow-hidden" ref={containerRef}>
-//           <canvas ref={canvasRef} className="absolute inset-0" />
-          
-//           {/* Loading Overlay */}
-//           {connectionStatus !== 'connected' && (
-//             <div className="absolute inset-0 bg-black/70 flex items-center justify-center">
-//               <div className="text-white text-center">
-//                 <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4"></div>
-//                 <div>Connecting to whiteboard...</div>
-//                 <div className="text-sm text-gray-400 mt-2">
-//                   Status: {connectionStatus}
-//                 </div>
-//               </div>
-//             </div>
-//           )}
-          
-//           {/* View Only Overlay */}
-//           {!permissions.canDraw && connectionStatus === 'connected' && (
-//             <div className="absolute top-4 right-4 bg-yellow-800/80 text-white text-xs px-3 py-2 rounded-lg">
-//               👀 View Only Mode
-//             </div>
-//           )}
-          
-//           {/* Status Bar */}
-//           <div className="absolute bottom-4 left-4 bg-black/70 text-white text-sm px-3 py-2 rounded-lg">
-//             X: {cursorPosition.x}, Y: {cursorPosition.y} | Zoom: {Math.round(zoom * 100)}% | Tool: {tool}
 //           </div>
 
-//           {/* Zoom Controls */}
-//           <div className="absolute bottom-4 right-4 flex space-x-2">
-//             <button
-//               onClick={handleZoomOut}
-//               className="bg-black/70 text-white p-2 rounded-lg hover:bg-black/80"
-//               title="Zoom Out"
-//             >
-//               <FiZoomOut />
-//             </button>
-//             <button
-//               onClick={handleZoomIn}
-//               className="bg-black/70 text-white p-2 rounded-lg hover:bg-black/80"
-//               title="Zoom In"
-//             >
-//               <FiZoomIn />
-//             </button>
-//           </div>
-
-//           {/* Debug Info Panel */}
-//           {showDebug && (
-//             <div className="absolute top-4 left-4 bg-black/80 text-white text-xs p-3 rounded-lg max-w-md max-h-64 overflow-y-auto">
-//               <div className="font-bold mb-2">Debug Info:</div>
-//               <div className="space-y-1">
-//                 <div>Status: <span className={connectionStatus === 'connected' ? 'text-green-400' : 'text-red-400'}>{connectionStatus}</span></div>
-//                 <div>Connection Attempts: {connectionAttempt}</div>
-//                 <div>Session ID: {sessionId}</div>
-//                 <div>Room Code: {roomCode}</div>
-//                 <div>User: {user?.name || 'Anonymous'}</div>
-//                 <div>Role: {isStreamer ? 'Streamer' : 'Viewer'}</div>
-//                 <div>Canvas: {fabricCanvasRef.current ? 'Loaded' : 'Not loaded'}</div>
-//                 <div>Yjs: {ydocRef.current ? 'Active' : 'Inactive'}</div>
-//                 <div>Provider: {providerRef.current ? 'Connected' : 'Disconnected'}</div>
-                
-//                 <div className="mt-2 font-bold">Permissions:</div>
-//                 <div className="grid grid-cols-2 gap-1">
-//                   <div>Draw: {permissions.canDraw ? '✅' : '❌'}</div>
-//                   <div>Edit: {permissions.canEdit ? '✅' : '❌'}</div>
-//                   <div>Delete: {permissions.canDelete ? '✅' : '❌'}</div>
-//                   <div>Clear: {permissions.canClear ? '✅' : '❌'}</div>
-//                 </div>
-                
-//                 <div className="mt-2 font-bold">Connection Logs:</div>
-//                 <div className="text-xs max-h-32 overflow-y-auto">
-//                   {connectionLogs.slice().reverse().map((log, index) => (
-//                     <div key={index} className="border-b border-gray-700 py-1">
-//                       <span className="text-gray-400">[{log.timestamp}]</span> {log.message}
-//                     </div>
-//                   ))}
-//                 </div>
-//               </div>
-//             </div>
-//           )}
-//         </div>
-
-//         {/* Actions Sidebar */}
-//         <div className="w-64 bg-gray-800 border-l border-gray-700 p-4">
-//           <div className="space-y-4">
-//             <div>
-//               <h3 className="text-sm font-semibold text-gray-300 mb-2">History</h3>
-//               <div className="flex space-x-2">
+//           {showTools && (
+//             <div className="flex flex-col gap-1">
+//               {tools.map((t) => (
 //                 <button
-//                   onClick={handleUndo}
-//                   disabled={historyIndex <= 0 || !permissions.canEdit}
-//                   className={`flex-1 p-2 rounded-lg flex items-center justify-center space-x-1 ${
-//                     historyIndex <= 0 || !permissions.canEdit
-//                       ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-//                       : 'bg-gray-700 hover:bg-gray-600 text-white'
-//                   }`}
+//                   key={t.id}
+//                   onClick={() => handleToolSelect(t.id)}
+//                   className={`flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10 ${
+//                     tool === t.id ? "bg-white/15" : ""
+//                   } ${!canDraw && t.id !== "select" && !isStreamer ? "opacity-50" : ""}`}
+//                   title={t.name}
 //                 >
-//                   <FaUndo />
-//                   <span>Undo</span>
+//                   {t.icon}
+//                   {!compact && <span className="text-xs">{t.name}</span>}
 //                 </button>
-//                 <button
-//                   onClick={handleRedo}
-//                   disabled={historyIndex >= history.length - 1 || !permissions.canEdit}
-//                   className={`flex-1 p-2 rounded-lg flex items-center justify-center space-x-1 ${
-//                     historyIndex >= history.length - 1 || !permissions.canEdit
-//                       ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-//                       : 'bg-gray-700 hover:bg-gray-600 text-white'
-//                   }`}
-//                 >
-//                   <FaRedo />
-//                   <span>Redo</span>
-//                 </button>
-//               </div>
-//             </div>
+//               ))}
 
-//             <div>
-//               <h3 className="text-sm font-semibold text-gray-300 mb-2">Actions</h3>
-//               <div className="space-y-2">
+//               <div className="my-1 h-px bg-white/15" />
+
+//               <button
+//                 onClick={handleUndo}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10"
+//                 title="Undo"
+//               >
+//                 <FaUndo />
+//                 {!compact && <span className="text-xs">Undo</span>}
+//               </button>
+//               <button
+//                 onClick={handleRedo}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10"
+//                 title="Redo"
+//               >
+//                 <FaRedo />
+//                 {!compact && <span className="text-xs">Redo</span>}
+//               </button>
+
+//               <div className="my-1 h-px bg-white/15" />
+
+//               <button
+//                 onClick={deleteSelected}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10"
+//                 title="Delete selected"
+//               >
+//                 <FiTrash2 />
+//                 {!compact && <span className="text-xs">Delete</span>}
+//               </button>
+
+//               {isStreamer && (
 //                 <button
 //                   onClick={handleClear}
-//                   disabled={!permissions.canClear}
-//                   className={`w-full p-2 rounded-lg flex items-center justify-center space-x-2 ${
-//                     permissions.canClear
-//                       ? 'bg-red-600 hover:bg-red-700 text-white'
-//                       : 'bg-gray-700 text-gray-500 cursor-not-allowed'
-//                   }`}
+//                   className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10"
+//                   title="Clear"
 //                 >
-//                   <FiTrash2 />
-//                   <span>Clear Canvas</span>
+//                   <FiRefreshCw />
+//                   {!compact && <span className="text-xs">Clear</span>}
 //                 </button>
-//                 <button
-//                   onClick={exportAsImage}
-//                   className="w-full p-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-white flex items-center justify-center space-x-2"
-//                 >
-//                   <FiDownload />
-//                   <span>Export as PNG</span>
-//                 </button>
-//                 <button
-//                   onClick={exportAsJSON}
-//                   className="w-full p-2 bg-purple-600 hover:bg-purple-700 rounded-lg text-white flex items-center justify-center space-x-2"
-//                 >
-//                   <FiSave />
-//                   <span>Export as JSON</span>
-//                 </button>
+//               )}
+
+//               <div className="my-1 h-px bg-white/15" />
+
+//               <button
+//                 onClick={exportAsImage}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10"
+//                 title="Export PNG"
+//               >
+//                 <FiDownload />
+//                 {!compact && <span className="text-xs">PNG</span>}
+//               </button>
+
+//               <button
+//                 onClick={exportAsJSON}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10"
+//                 title="Export JSON"
+//               >
+//                 <FiDownload />
+//                 {!compact && <span className="text-xs">JSON</span>}
+//               </button>
+
+//               {isStreamer && (
 //                 <button
 //                   onClick={importFromJSON}
-//                   disabled={!permissions.canEdit}
-//                   className={`w-full p-2 rounded-lg flex items-center justify-center space-x-2 ${
-//                     permissions.canEdit
-//                       ? 'bg-green-600 hover:bg-green-700 text-white'
-//                       : 'bg-gray-700 text-gray-500 cursor-not-allowed'
-//                   }`}
+//                   className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10"
+//                   title="Import JSON"
 //                 >
 //                   <FiUpload />
-//                   <span>Import JSON</span>
+//                   {!compact && <span className="text-xs">Import</span>}
 //                 </button>
-//               </div>
-//             </div>
+//               )}
 
-//             <div>
-//               <h3 className="text-sm font-semibold text-gray-300 mb-2">Active Users</h3>
-//               <div className="space-y-2 max-h-40 overflow-y-auto">
-//                 <div className="flex items-center space-x-2 p-2 bg-gray-700 rounded">
-//                   <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-//                   <span className="text-sm text-white">You ({user?.name || 'Anonymous'})</span>
-//                   <span className="text-xs bg-blue-900 px-2 py-1 rounded ml-auto">
-//                     {isStreamer ? 'Streamer' : 'Viewer'}
-//                   </span>
-//                 </div>
-//                 {activeUsers.map((activeUser, index) => (
-//                   <div key={index} className="flex items-center space-x-2 p-2 bg-gray-700 rounded">
-//                     <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-//                     <span className="text-sm text-gray-300">{activeUser.userName}</span>
-//                     <span className="text-xs bg-gray-800 px-2 py-1 rounded ml-auto">
-//                       {activeUser.isStreamer ? 'Streamer' : activeUser.userRole}
-//                     </span>
-//                   </div>
-//                 ))}
-//               </div>
-//             </div>
+//               <div className="my-1 h-px bg-white/15" />
 
-//             <div>
-//               <h3 className="text-sm font-semibold text-gray-300 mb-2">Connection</h3>
-//               <div className="space-y-2">
+//               <button
+//                 onClick={handleZoomIn}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10"
+//                 title="Zoom in"
+//               >
+//                 <FiZoomIn />
+//                 {!compact && <span className="text-xs">Zoom+</span>}
+//               </button>
+//               <button
+//                 onClick={handleZoomOut}
+//                 className="flex items-center gap-2 px-2 py-2 rounded-lg text-white hover:bg-white/10"
+//                 title="Zoom out"
+//               >
+//                 <FiZoomOut />
+//                 {!compact && <span className="text-xs">Zoom-</span>}
+//               </button>
+//             </div>
+//           )}
+
+//           {showColors && (
+//             <div className="mt-2 grid grid-cols-7 gap-1">
+//               {colors.map((c) => (
 //                 <button
+//                   key={c}
 //                   onClick={() => {
-//                     console.log('=== WHITEBOARD STATUS ===');
-//                     console.log('1. Session ID:', sessionId);
-//                     console.log('2. Room Code:', roomCode);
-//                     console.log('3. User:', user);
-//                     console.log('4. Permissions:', permissions);
-//                     console.log('5. Yjs doc:', ydocRef.current);
-//                     console.log('6. Provider:', providerRef.current);
-//                     console.log('7. Canvas:', fabricCanvasRef.current);
-                    
-//                     if (providerRef.current && providerRef.current.ws) {
-//                       console.log('8. WebSocket readyState:', providerRef.current.ws.readyState);
-//                     }
+//                     setBrushColor(c);
+//                     setBrushToCanvas();
 //                   }}
-//                   className="w-full p-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-white text-sm"
+//                   className="w-5 h-5 rounded border border-white/20"
+//                   style={{ background: c }}
+//                   title={c}
+//                 />
+//               ))}
+//             </div>
+//           )}
+
+//           {showBrushSizes && (
+//             <div className="mt-2 flex flex-wrap gap-1">
+//               {brushSizes.map((s) => (
+//                 <button
+//                   key={s}
+//                   onClick={() => {
+//                     setBrushWidth(s);
+//                     setBrushToCanvas();
+//                   }}
+//                   className={`px-2 py-1 rounded-md text-white text-xs border border-white/20 hover:bg-white/10 ${
+//                     brushWidth === s ? "bg-white/15" : ""
+//                   }`}
 //                 >
-//                   Check Status
+//                   {s}
 //                 </button>
+//               ))}
+//             </div>
+//           )}
+//         </div>
+//       </div>
+
+//       {/* Canvas container */}
+//       <div
+//         ref={containerRef}
+//         className={`absolute inset-0 ${
+//           isFullscreen ? "p-0" : "p-2"
+//         }`}
+//       >
+//         <div className="w-full h-full rounded-xl overflow-hidden bg-white">
+//           {isLoading && (
+//             <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/20">
+//               <div className="px-4 py-2 rounded-lg bg-black/70 text-white text-sm">
+//                 Loading whiteboard...
 //               </div>
 //             </div>
-//           </div>
+//           )}
+//           <canvas ref={canvasElRef} className="w-full h-full" />
 //         </div>
 //       </div>
 //     </div>
@@ -3239,19 +6102,36 @@
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
 // import React, { useRef, useEffect, useState, useCallback } from 'react';
 // import * as fabric from 'fabric';
 // import * as Y from 'yjs';
+// import { WebsocketProvider } from 'y-websocket';
 // import { useAuth } from '../../../contexts/AuthContext';
 // import { 
 //   FiSquare, FiCircle, FiType, FiPenTool, FiEdit3, FiMousePointer, FiTrash2, 
 //   FiDownload, FiUpload, FiSave, FiZoomIn, FiZoomOut, FiMaximize2,
 //   FiMinimize2, FiImage, FiStar, FiHexagon, FiTriangle, FiMinus, FiArrowRight,
-//   FiX, FiUsers, FiMessageSquare, FiRefreshCw, FiLock, FiUnlock
+//   FiX, FiUsers, FiMessageSquare, FiRefreshCw, FiLock, FiUnlock, FiCheck
 // } from 'react-icons/fi';
 // import { FaRedo, FaUndo } from "react-icons/fa";
 // import { BsBrush, BsEraser } from 'react-icons/bs';
 // import { LuStickyNote } from 'react-icons/lu';
+
+// console.log('===================================================');
+// console.log('🎨 WHITEBOARD COMPONENT STARTING - FIXED VERSION');
+// console.log('===================================================');
 
 // const WhiteboardComponent = ({ 
 //   sessionId, 
@@ -3263,21 +6143,41 @@
 //   isStreamer = false,
 //   allowViewersToDraw = true
 // }) => {
-//   console.log('🎨 WhiteboardComponent RENDERING:', { 
-//     isActive, 
-//     sessionId, 
+//   console.log('🚀 WhiteboardComponent FUNCTION CALLED');
+//   console.log('📋 PROPS RECEIVED:', {
+//     sessionId,
 //     roomCode,
-//     isStreamer,
-//     wsToken: !!wsToken,
+//     hasWsToken: !!wsToken,
 //     sessionInfo,
+//     isActive,
+//     isStreamer,
 //     allowViewersToDraw
 //   });
 
 //   const { user } = useAuth();
+//   console.log('🔐 Auth Context - User:', user);
+  
 //   const canvasRef = useRef(null);
 //   const fabricCanvasRef = useRef(null);
 //   const containerRef = useRef(null);
+//   const ydocRef = useRef(null);
+//   const yProviderRef = useRef(null);
   
+//   // Refs for stable values
+//   const permissionsRef = useRef({
+//     canDraw: isStreamer,
+//     canEdit: isStreamer,
+//     canDelete: isStreamer,
+//     canClear: isStreamer,
+//     canChat: true,
+//     canExport: true,
+//     canImport: isStreamer
+//   });
+  
+//   const brushWidthRef = useRef(5);
+//   const brushColorRef = useRef('#000000');
+  
+//   // State declarations
 //   const [tool, setTool] = useState('select');
 //   const [brushWidth, setBrushWidth] = useState(5);
 //   const [brushColor, setBrushColor] = useState('#000000');
@@ -3306,11 +6206,21 @@
 //     canExport: true,
 //     canImport: isStreamer
 //   });
-  
-//   const [ws, setWs] = useState(null);
 //   const [cursorPositions, setCursorPositions] = useState({});
 //   const [userTools, setUserTools] = useState({});
-  
+//   const [authenticated, setAuthenticated] = useState(false);
+//   const [connectionError, setConnectionError] = useState(null);
+//   const [roomSettings, setRoomSettings] = useState({
+//     allowViewersToDraw: allowViewersToDraw,
+//     streamerId: null,
+//     streamerName: null
+//   });
+
+//   // Update refs when state changes
+//   brushWidthRef.current = brushWidth;
+//   brushColorRef.current = brushColor;
+//   permissionsRef.current = permissions;
+
 //   const tools = [
 //     { id: 'select', name: 'Select', icon: <FiMousePointer /> },
 //     { id: 'draw', name: 'Draw', icon: <FiPenTool /> },
@@ -3334,336 +6244,422 @@
 
 //   const brushSizes = [1, 2, 3, 5, 8, 10, 15, 20, 30];
 
-//   // ✅ Add connection log
+//   // Connection log function
 //   const addConnectionLog = (message) => {
-//     console.log('📝 Connection Log:', message);
-//     setConnectionLogs(prev => [...prev.slice(-10), {
-//       timestamp: new Date().toLocaleTimeString(),
-//       message
-//     }]);
+//     const timestamp = new Date().toLocaleTimeString();
+//     console.log(`📝 ${timestamp}: ${message}`);
+//     setConnectionLogs(prev => [
+//       ...prev.slice(-10),
+//       { timestamp, message }
+//     ]);
 //   };
 
-//   // ✅ Get WebSocket URL
+//   // WebSocket URL builder
 //   const getWebSocketUrl = () => {
-//     const baseUrl = process.env.REACT_APP_WS_URL || 'ws://localhost:9090';
-//     console.log('🔌 WebSocket Configuration:');
-//     console.log('  - REACT_APP_WS_URL:', process.env.REACT_APP_WS_URL);
-//     console.log('  - Using Base URL:', baseUrl);
-//     console.log('  - wsToken:', wsToken ? `✅ Present` : '❌ MISSING');
-//     console.log('  - sessionId:', sessionId);
-//     console.log('  - roomCode:', roomCode);
-//     console.log('  - isStreamer:', isStreamer);
-//     console.log('  - allowViewersToDraw:', allowViewersToDraw);
-    
-  
-    
-//     const url = `${baseUrl}/yjs?token=${encodeURIComponent(wsToken)}&sessionId=${encodeURIComponent(sessionId)}&roomCode=${encodeURIComponent(roomCode)}&isStreamer=${isStreamer}&allowViewersToDraw=${allowViewersToDraw}`;
-//     console.log('🔌 WebSocket URL:', url);
+//     console.log('🔗 getWebSocketUrl function called');
+
+//     const baseUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:9090';
+
+//     if (!sessionId) {
+//       console.error('❌ CRITICAL ERROR: sessionId is null or undefined');
+//       setConnectionError('Session ID is required');
+//       return null;
+//     }
+
+//     if (!wsToken) {
+//       console.error('❌ CRITICAL ERROR: WebSocket token is required');
+//       setConnectionError('Authentication token is required');
+//       return null;
+//     }
+
+//     const queryParams = new URLSearchParams({
+//       token: wsToken,
+//       roomCode: roomCode || '',
+//       userName: user?.name || 'Anonymous',
+//       userId: user?.id || user?._id || 'anonymous',
+//       isStreamer: String(!!isStreamer),
+//       allowViewersToDraw: String(!!allowViewersToDraw),
+//       roomName: sessionInfo?.title || 'Whiteboard Session',
+//     });
+
+//     const url = `${baseUrl}/yjs/${sessionId}?${queryParams.toString()}`;
+
+//     console.log('🔗 Constructed WebSocket URL:', {
+//       urlBase: `${baseUrl}/yjs/${sessionId}`,
+//       hasToken: !!wsToken,
+//       tokenLength: wsToken?.length,
+//       isStreamer: !!isStreamer,
+//       allowViewersToDraw: !!allowViewersToDraw
+//     });
+
 //     return url;
+//   };
+
+//   // ✅ FIXED: Load canvas from Yjs state
+//   const loadCanvasFromState = useCallback((state) => {
+//     console.log('🎨 loadCanvasFromState called');
+    
+//     if (!fabricCanvasRef.current) {
+//       console.error('❌ Canvas not initialized');
+//       return;
+//     }
+    
+//     try {
+//       console.log('📦 Loading state:', {
+//         objects: state.objects?.length || 0,
+//         background: state.background,
+//         version: state.version,
+//         from: state.updatedBy
+//       });
+      
+//       fabricCanvasRef.current.loadFromJSON(state, () => {
+//         console.log('✅ Canvas loaded from state');
+//         fabricCanvasRef.current.renderAll();
+//         saveState();
+//       });
+//     } catch (error) {
+//       console.error('❌ Error loading canvas state:', error);
+//     }
+//   }, []);
+
+//   // ✅ FIXED: Update Yjs canvas - ONLY sends when there are ACTUAL objects
+//   const updateYjsCanvas = useCallback(() => {
+//     console.log('📤 updateYjsCanvas called');
+    
+//     if (!ydocRef.current || !fabricCanvasRef.current) {
+//       console.error('❌ Cannot update: Yjs or Canvas not ready');
+//       return;
+//     }
+    
+//     try {
+//       const yCanvasArray = ydocRef.current.getArray('whiteboard');
+//       const canvasState = fabricCanvasRef.current.toJSON();
+      
+//       // 🚨🚨🚨 CRITICAL: Check if there are ACTUAL objects
+//       const hasRealObjects = canvasState.objects && 
+//                             Array.isArray(canvasState.objects) && 
+//                             canvasState.objects.length > 0;
+      
+//       // Log what we're sending
+//       if (hasRealObjects) {
+//         console.log(`🎨 Canvas has ${canvasState.objects.length} objects:`);
+//         canvasState.objects.forEach((obj, i) => {
+//           console.log(`   ${i+1}. ${obj.type || 'unknown'} - id: ${obj.id || 'no-id'}`);
+//         });
+//       }
+      
+//       // 🚨🚨🚨 CRITICAL: ONLY send if there are actual objects
+//       if (!hasRealObjects) {
+//         console.log('⚠️ Skipping empty canvas update - no objects to sync');
+//         return;
+//       }
+      
+//       // Add metadata
+//       canvasState.sessionId = sessionId;
+//       canvasState.allowViewersToDraw = roomSettings.allowViewersToDraw;
+//       canvasState.lastUpdated = new Date().toISOString();
+//       canvasState.updatedBy = user?.id || user?._id || 'streamer';
+//       canvasState.updatedByName = user?.name || 'Streamer';
+//       canvasState.version = '5.3.0';
+//       canvasState.updateId = `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+//       console.log('📤 STREAMER sending canvas update:', {
+//         objects: canvasState.objects?.length || 0,
+//         user: canvasState.updatedBy,
+//         updateId: canvasState.updateId,
+//         timestamp: canvasState.lastUpdated
+//       });
+      
+//       // 🚨🚨🚨 CRITICAL: Replace last state (don't append infinitely)
+//       if (yCanvasArray.length > 0) {
+//         yCanvasArray.delete(0, yCanvasArray.length);
+//       }
+//       yCanvasArray.push([canvasState]);
+      
+//       console.log(`✅ Streamer canvas state sent to Yjs`);
+      
+//     } catch (error) {
+//       console.error('❌ Error updating Yjs canvas:', error);
+//     }
+//   }, [sessionId, roomSettings.allowViewersToDraw, user]);
+
+//   // ✅ FIXED: Handle canvas changes - ONLY on mouse up!
+//   const handleCanvasChange = useCallback(() => {
+//     console.log('🔄 handleCanvasChange called - but we now use mouse:up instead!');
+//     // This function is now only called on mouse:up, not on every path:created
+//   }, []);
+
+//   // ✅ Save State for Undo/Redo
+//   const saveState = () => {
+//     if (!fabricCanvasRef.current) return;
+    
+//     const state = fabricCanvasRef.current.toJSON();
+//     const newHistory = [...history.slice(0, historyIndex + 1), state];
+//     setHistory(newHistory);
+//     setHistoryIndex(newHistory.length - 1);
+//     console.log('💾 State saved, history length:', newHistory.length);
+//   };
+
+//   // ✅ Undo
+//   const handleUndo = () => {
+//     if (historyIndex > 0 && permissionsRef.current.canEdit) {
+//       const newIndex = historyIndex - 1;
+//       setHistoryIndex(newIndex);
+//       fabricCanvasRef.current.loadFromJSON(history[newIndex], () => {
+//         fabricCanvasRef.current.renderAll();
+//         console.log('✅ Undo applied');
+//         // Only sync after undo if there are objects
+//         const objects = fabricCanvasRef.current.getObjects();
+//         if (objects.length > 0) {
+//           setTimeout(() => updateYjsCanvas(), 100);
+//         }
+//       });
+//     }
+//   };
+
+//   // ✅ Redo
+//   const handleRedo = () => {
+//     if (historyIndex < history.length - 1 && permissionsRef.current.canEdit) {
+//       const newIndex = historyIndex + 1;
+//       setHistoryIndex(newIndex);
+//       fabricCanvasRef.current.loadFromJSON(history[newIndex], () => {
+//         fabricCanvasRef.current.renderAll();
+//         console.log('✅ Redo applied');
+//         const objects = fabricCanvasRef.current.getObjects();
+//         if (objects.length > 0) {
+//           setTimeout(() => updateYjsCanvas(), 100);
+//         }
+//       });
+//     }
+//   };
+
+//   // ✅ Toggle viewers drawing permission (Streamer only)
+//   const toggleViewersDraw = () => {
+//     if (!isStreamer || !ydocRef.current) return;
+    
+//     const ySettings = ydocRef.current.getMap('room_settings');
+//     const newValue = !roomSettings.allowViewersToDraw;
+    
+//     ySettings.set('allowViewersToDraw', newValue);
+//     ySettings.set('updatedAt', new Date().toISOString());
+//     ySettings.set('updatedBy', user?.id);
+    
+//     setRoomSettings(prev => ({
+//       ...prev,
+//       allowViewersToDraw: newValue
+//     }));
+    
+//     console.log(`🔄 Viewers can now ${newValue ? 'draw' : 'view only'}`);
+//     addConnectionLog(`Streamer changed viewer permissions: ${newValue ? 'Can draw' : 'View only'}`);
 //   };
 
 //   // ✅ Initialize Yjs
 //   const initYjs = useCallback(() => {
-//     if (!wsToken || !sessionId || !roomCode) {
-//       console.error('❌ Missing required data for Yjs');
-//       return;
+//     console.log('🔄 initYjs callback called');
+
+//     if (yProviderRef.current) {
+//       try {
+//         yProviderRef.current.disconnect();
+//         yProviderRef.current.destroy();
+//       } catch (error) {
+//         console.error('❌ Error destroying previous provider:', error);
+//       }
+//       yProviderRef.current = null;
 //     }
 
-//     const ydoc = new Y.Doc();
-//     const yCanvasArray = ydoc.getArray('whiteboard');
-
-//     // Initialize with empty canvas if not exists
-//     if (yCanvasArray.length === 0) {
-//       yCanvasArray.insert(0, [{
-//         version: '5.3.0',
-//         objects: [],
-//         background: '#ffffff',
-//         sessionId: sessionId,
-//         allowViewersToDraw: allowViewersToDraw,
-//         createdAt: new Date().toISOString()
-//       }]);
-//     }
-
-//     return { ydoc, yCanvasArray };
-//   }, [wsToken, sessionId, roomCode, allowViewersToDraw]);
-
-//   // ✅ Connect to WebSocket
-//   const connectWebSocket = useCallback(() => {
-//     console.log('🔗 Connecting to WebSocket...');
-//     addConnectionLog('Connecting to WebSocket...');
-    
-//     setConnectionAttempt(prev => prev + 1);
+//     setConnectionError(null);
 //     setConnectionStatus('connecting');
     
-//     const wsUrl = getWebSocketUrl();
-//     if (!wsUrl) return null;
-    
-//     const websocket = new WebSocket(wsUrl);
-    
-//     websocket.onopen = () => {
-//       console.log('✅ WebSocket connected');
-//       addConnectionLog('WebSocket connected');
-//       setConnectionStatus('connected');
-      
-//       // Initialize Yjs after connection
-//       const yjs = initYjs();
-//       if (yjs) {
-//         // Send welcome message to get permissions
-//         websocket.send(JSON.stringify({
-//           type: 'check-permissions'
-//         }));
-//       }
-//     };
-    
-//     websocket.onmessage = (event) => {
-//       handleWebSocketMessage(event);
-//     };
-    
-//     websocket.onerror = (error) => {
-//       console.error('❌ WebSocket error:', error);
-//       addConnectionLog(`WebSocket error: ${error.message}`);
-//       setConnectionStatus('error');
-//     };
-    
-//     websocket.onclose = () => {
-//       console.log('🔌 WebSocket closed');
-//       addConnectionLog('WebSocket closed');
-//       setConnectionStatus('disconnected');
-      
-//       // Auto-reconnect after 3 seconds
-//       setTimeout(() => {
-//         console.log('🔄 Attempting to reconnect...');
-//         addConnectionLog('Attempting reconnect');
-//         connectWebSocket();
-//       }, 3000);
-//     };
-    
-//     return websocket;
-//   }, [sessionId, roomCode, wsToken, isStreamer, allowViewersToDraw, initYjs]);
+//     if (!sessionId || !wsToken) {
+//       setConnectionError('Missing session ID or token');
+//       setIsLoading(false);
+//       return null;
+//     }
 
-//   // ✅ Handle WebSocket Messages
-//   const handleWebSocketMessage = useCallback((event) => {
 //     try {
-//       // Handle binary data (Yjs updates)
-//       if (event.data instanceof ArrayBuffer || event.data instanceof Blob) {
-//         const reader = new FileReader();
-//         reader.onload = () => {
-//           const buffer = new Uint8Array(reader.result);
-//           applyYjsUpdate(buffer);
-//         };
-//         reader.readAsArrayBuffer(event.data);
-//         return;
+//       console.log('📄 Creating Y.Doc...');
+//       const ydoc = new Y.Doc();
+//       ydocRef.current = ydoc;
+      
+//       const yCanvasArray = ydoc.getArray('whiteboard');
+//       const yUsers = ydoc.getMap('users');
+//       const ySettings = ydoc.getMap('room_settings');
+
+//       const wsUrl = getWebSocketUrl();
+//       if (!wsUrl) {
+//         setConnectionError('Failed to create WebSocket URL');
+//         setIsLoading(false);
+//         return null;
 //       }
+
+//       console.log('🔌 Creating WebSocketProvider...');
       
-//       // Handle JSON messages
-//       const message = JSON.parse(event.data);
-      
-//       switch (message.type) {
-//         case 'welcome':
-//           console.log('👋 Welcome:', message);
-//           addConnectionLog(`Welcome to: ${message.sessionTitle}`);
-//           setIsLoading(false);
-          
-//           // Update permissions from server
-//           if (message.permissions) {
-//             setPermissions(message.permissions);
-//             console.log('🔐 Updated permissions:', message.permissions);
-//           }
-//           break;
-          
-//         case 'permissions-info':
-//           console.log('🔐 Permissions info:', message);
-//           setPermissions(message.permissions);
-//           break;
-          
-//         case 'user-joined':
-//           console.log(`👤 ${message.userName} joined`);
-//           addConnectionLog(`${message.userName} joined`);
-//           updateActiveUsers('add', message);
-//           break;
-          
-//         case 'user-left':
-//           console.log(`👤 ${message.userName} left`);
-//           addConnectionLog(`${message.userName} left`);
-//           updateActiveUsers('remove', message);
-//           break;
-          
-//         case 'active-users':
-//           console.log('👥 Active users:', message.users);
-//           setActiveUsers(message.users || []);
-//           break;
-          
-//         case 'error':
-//           console.error('❌ Server error:', message);
-//           addConnectionLog(`Error: ${message.message}`);
-//           break;
-          
-//         case 'canvas-cleared':
-//           console.log(`🧹 Canvas cleared by ${message.clearedBy}`);
-//           addConnectionLog(`Canvas cleared by ${message.clearedBy}`);
-//           break;
-          
-//         case 'user-tool-change':
-//           console.log(`🛠️ ${message.userName} selected tool: ${message.tool}`);
-//           setUserTools(prev => ({
-//             ...prev,
-//             [message.userId]: message.tool
-//           }));
-//           break;
-          
-//         case 'cursor-move':
-//           // Store cursor position for other users
-//           setCursorPositions(prev => ({
-//             ...prev,
-//             [message.userId]: {
-//               ...message.position,
-//               userName: message.userName
+//       const provider = new WebsocketProvider(
+//         wsUrl,
+//         `whiteboard-${sessionId}`,
+//         ydoc,
+//         {
+//           WebSocketPolyfill: WebSocket,
+//           connect: true,
+//           disableBc: true,
+//           maxBackoffTime: 5000,
+//         }
+//       );
+
+//       yProviderRef.current = provider;
+
+//       provider.on('connection-error', (error) => {
+//         console.error('❌ Yjs connection error:', error);
+//         setConnectionError(error.message || 'Connection error');
+//       });
+
+//       provider.on('status', (event) => {
+//         const status = event?.status || 'unknown';
+//         console.log('📡 Yjs Provider status:', status);
+        
+//         switch (status) {
+//           case 'connected':
+//             setConnectionStatus('connected');
+//             setAuthenticated(true);
+//             setConnectionError(null);
+            
+//             if (user?.id || user?._id) {
+//               const userId = user.id || user._id;
+//               yUsers.set(userId, {
+//                 name: user.name || 'Anonymous',
+//                 id: userId,
+//                 isStreamer: isStreamer,
+//                 permissions: permissionsRef.current,
+//                 joinedAt: new Date().toISOString(),
+//                 lastActive: new Date().toISOString(),
+//                 cursorPosition: { x: 0, y: 0 }
+//               });
 //             }
+            
+//             if (isStreamer && ySettings.get('allowViewersToDraw') === undefined) {
+//               ySettings.set('allowViewersToDraw', allowViewersToDraw);
+//               ySettings.set('streamerId', user?.id || user?._id);
+//               ySettings.set('streamerName', user?.name || 'Streamer');
+//               ySettings.set('createdAt', new Date().toISOString());
+//               console.log('✅ Room settings initialized by streamer');
+//             }
+            
+//             setIsLoading(false);
+//             break;
+            
+//           case 'synced':
+//             console.log('✅ Yjs synced successfully');
+//             const settings = ySettings.toJSON();
+//             if (settings) {
+//               setRoomSettings(prev => ({
+//                 ...prev,
+//                 allowViewersToDraw: settings.allowViewersToDraw || allowViewersToDraw,
+//                 streamerId: settings.streamerId,
+//                 streamerName: settings.streamerName
+//               }));
+//             }
+//             break;
+//         }
+//       });
+
+//       ySettings.observe((event) => {
+//         const settings = ySettings.toJSON();
+//         if (settings.allowViewersToDraw !== undefined) {
+//           setRoomSettings(prev => ({
+//             ...prev,
+//             allowViewersToDraw: settings.allowViewersToDraw
 //           }));
-//           break;
-          
-//         default:
-//           console.log('📨 Unknown message type:', message.type);
+//         }
+//       });
+
+//       yUsers.observe((event) => {
+//         const users = Array.from(yUsers.values());
+//         const currentUserId = user?.id || user?._id;
+//         const otherUsers = users.filter(u => u.id !== currentUserId);
+//         setActiveUsers(otherUsers);
+        
+//         const cursorPos = {};
+//         users.forEach(u => {
+//           if (u.cursorPosition) cursorPos[u.id] = u.cursorPosition;
+//         });
+//         setCursorPositions(cursorPos);
+//       });
+
+//       // ✅ FIXED: Canvas observer for streamer
+//       yCanvasArray.observe((event) => {
+//         if (yCanvasArray.length === 0) return;
+//         const latestState = yCanvasArray.get(yCanvasArray.length - 1);
+        
+//         if (latestState && fabricCanvasRef.current) {
+//           const currentUserId = user?.id || user?._id;
+//           // Only load if update is from someone else
+//           if (latestState.updatedBy !== currentUserId) {
+//             console.log('📥 Loading shared canvas state from:', latestState.updatedBy);
+//             loadCanvasFromState(latestState);
+//           }
+//         }
+//       });
+
+//       // Initialize with empty canvas if not exists
+//       if (yCanvasArray.length === 0) {
+//         console.log('📝 Initializing empty canvas array');
+//         const initialState = {
+//           version: '5.3.0',
+//           objects: [],
+//           background: '#ffffff',
+//           sessionId: sessionId,
+//           allowViewersToDraw: allowViewersToDraw,
+//           createdAt: new Date().toISOString(),
+//           updatedBy: user?.id || user?._id || 'system'
+//         };
+//         yCanvasArray.insert(0, [initialState]);
 //       }
-//     } catch (error) {
-//       console.error('❌ Error parsing message:', error);
-//     }
-//   }, []);
 
-//   // ✅ Apply Yjs update to canvas
-//   const applyYjsUpdate = useCallback((update) => {
-//     if (!fabricCanvasRef.current) return;
-    
-//     try {
-//       // This would normally use Y.applyUpdate, but for simplicity
-//       // we'll handle it through our WebSocket messages
-//       console.log('🔄 Received Yjs update:', update.length, 'bytes');
-      
-//       // In a real implementation, you would:
-//       // 1. Apply the Yjs update to the shared document
-//       // 2. Get the updated canvas state
-//       // 3. Load it into fabric
+//       console.log('✅ Yjs initialized successfully');
+//       return { ydoc, provider, yCanvasArray };
       
 //     } catch (error) {
-//       console.error('❌ Error applying Yjs update:', error);
+//       console.error('❌ Yjs initialization error:', error);
+//       setConnectionError(error.message || 'Initialization error');
+//       setIsLoading(false);
+//       return null;
 //     }
-//   }, []);
+//   }, [sessionId, wsToken, user, isStreamer, allowViewersToDraw, loadCanvasFromState]);
 
-//   // ✅ Update active users list
-//   const updateActiveUsers = useCallback((action, userData) => {
-//     setActiveUsers(prev => {
-//       if (action === 'add') {
-//         return [...prev.filter(u => u.userId !== userData.userId), {
-//           userId: userData.userId,
-//           userName: userData.userName,
-//           userRole: userData.userRole,
-//           isStreamer: userData.isStreamer,
-//           permissions: userData.permissions || {}
-//         }];
-//       } else {
-//         return prev.filter(u => u.userId !== userData.userId);
-//       }
-//     });
-//   }, []);
-
-//   // ✅ Sync Canvas to Server
-//   const syncCanvasToServer = useCallback(() => {
-//     if (!fabricCanvasRef.current || !ws || ws.readyState !== WebSocket.OPEN) {
-//       console.log('❌ Cannot sync: No connection');
-//       return;
-//     }
-    
-//     try {
-//       console.log('📤 Syncing canvas to server...');
-      
-//       const canvas = fabricCanvasRef.current;
-//       const canvasState = canvas.toJSON();
-      
-//       // Add metadata
-//       canvasState.sessionId = sessionId;
-//       canvasState.allowViewersToDraw = allowViewersToDraw;
-//       canvasState.lastUpdated = new Date().toISOString();
-//       canvasState.updatedBy = user?.id || 'anonymous';
-      
-//       // Send canvas update
-//       ws.send(JSON.stringify({
-//         type: 'canvas-update',
-//         data: canvasState
-//       }));
-      
-//       console.log('✅ Canvas synced to server');
-//       addConnectionLog('Canvas synced');
-      
-//     } catch (error) {
-//       console.error('❌ Error syncing canvas:', error);
-//       addConnectionLog(`Sync error: ${error.message}`);
-//     }
-//   }, [ws, sessionId, allowViewersToDraw, user]);
-
-//   // ✅ Send cursor position
-//   const sendCursorPosition = useCallback((position) => {
-//     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    
-//     ws.send(JSON.stringify({
-//       type: 'cursor-move',
-//       position: position
-//     }));
-//   }, [ws]);
-
-//   // ✅ Send tool change
-//   const sendToolChange = useCallback((toolName) => {
-//     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    
-//     ws.send(JSON.stringify({
-//       type: 'tool-change',
-//       tool: toolName
-//     }));
-//   }, [ws]);
-
-//   // ✅ Initialize Canvas
+//   // ✅ FIXED: Initialize Canvas with proper event handlers
 //   const initCanvas = useCallback(() => {
-//     console.log('🎨 initCanvas called!');
-//     addConnectionLog('Initializing canvas...');
+//     console.log('🎨 initCanvas callback called');
     
 //     if (!containerRef.current) {
-//       console.log('❌ Container not ready, retrying...');
-//       addConnectionLog('Container not ready, retrying...');
 //       setTimeout(() => initCanvas(), 500);
 //       return;
 //     }
     
-//     console.log('✅ Container ready');
-//     addConnectionLog('Container ready');
-    
-//     // Clean up existing canvas
 //     if (fabricCanvasRef.current) {
-//       console.log('🧹 Cleaning up existing canvas');
 //       fabricCanvasRef.current.dispose();
 //       fabricCanvasRef.current = null;
 //     }
     
-//     // Create new canvas
 //     const canvas = new fabric.Canvas(canvasRef.current, {
 //       width: containerRef.current.clientWidth,
 //       height: containerRef.current.clientHeight,
 //       backgroundColor: '#ffffff',
 //       selection: true,
 //       preserveObjectStacking: true,
+//       renderOnAddRemove: true
 //     });
     
 //     fabricCanvasRef.current = canvas;
-//     console.log('✅ Fabric canvas created');
-//     addConnectionLog('Fabric canvas created');
     
-//     // Setup drawing based on permissions
+//     // Setup drawing tools
 //     canvas.isDrawingMode = false;
-//     if (permissions.canDraw) {
+//     if (permissionsRef.current.canDraw) {
 //       canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
-//       canvas.freeDrawingBrush.width = brushWidth;
-//       canvas.freeDrawingBrush.color = brushColor;
+//       canvas.freeDrawingBrush.width = brushWidthRef.current;
+//       canvas.freeDrawingBrush.color = brushColorRef.current;
 //     }
     
-//     // Event Listeners
+//     // 🚨🚨🚨 CRITICAL FIX: Mouse move for cursor sharing
 //     canvas.on('mouse:move', (e) => {
 //       if (!e.absolutePointer) return;
       
@@ -3671,70 +6667,73 @@
 //         x: Math.round(e.absolutePointer.x),
 //         y: Math.round(e.absolutePointer.y)
 //       };
-      
 //       setCursorPosition(pos);
-//       sendCursorPosition(pos);
+      
+//       if (ydocRef.current && (user?.id || user?._id)) {
+//         const userId = user.id || user._id;
+//         const yUsers = ydocRef.current.getMap('users');
+//         const currentUser = yUsers.get(userId);
+//         if (currentUser) {
+//           yUsers.set(userId, {
+//             ...currentUser,
+//             cursorPosition: pos,
+//             lastActive: new Date().toISOString()
+//           });
+//         }
+//       }
 //     });
     
+//     // 🚨🚨🚨 CRITICAL FIX: Object added - generate ID and save state
 //     canvas.on('object:added', (e) => {
 //       if (e.target) {
-//         console.log('➕ Object added:', e.target.type);
-        
-//         // Generate ID if not exists
 //         if (!e.target.id) {
 //           e.target.id = `obj_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 //         }
-        
-//         // Save state
 //         saveState();
-        
-//         // Sync to server if we have permission
-//         if (permissions.canDraw) {
-//           setTimeout(() => {
-//             syncCanvasToServer();
-//           }, 100);
-//         }
 //       }
 //     });
     
+//     // 🚨🚨🚨 CRITICAL FIX: Object modified - sync after debounce
 //     canvas.on('object:modified', (e) => {
 //       if (e.target) {
-//         console.log('✏️ Object modified');
-        
-//         setTimeout(() => {
-//           saveState();
-//           if (permissions.canEdit) {
-//             syncCanvasToServer();
-//           }
-//         }, 100);
-//       }
-//     });
-    
-//     canvas.on('object:removed', (e) => {
-//       if (e.target) {
-//         console.log('➖ Object removed');
-        
-//         setTimeout(() => {
-//           saveState();
-//           if (permissions.canDelete) {
-//             syncCanvasToServer();
-//           }
-//         }, 100);
-//       }
-//     });
-    
-//     // Handle drawing events
-//     canvas.on('path:created', (e) => {
-//       console.log('🖊️ Path created');
-//       setTimeout(() => {
 //         saveState();
-//         if (permissions.canDraw) {
-//           syncCanvasToServer();
+//         if (permissionsRef.current.canEdit) {
+//           if (window.canvasSyncTimeout) clearTimeout(window.canvasSyncTimeout);
+//           window.canvasSyncTimeout = setTimeout(() => {
+//             const objects = canvas.getObjects();
+//             if (objects.length > 0) {
+//               updateYjsCanvas();
+//             }
+//           }, 500);
 //         }
-//       }, 100);
+//       }
 //     });
     
-//     // Window resize handler
+//     // 🚨🚨🚨 CRITICAL FIX: Path created - DON'T sync here!
+//     canvas.on('path:created', (e) => {
+//       if (e.path && permissionsRef.current.canDraw) {
+//         if (!e.path.id) {
+//           e.path.id = `path_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+//         }
+//         saveState();
+//         // DO NOT call handleCanvasChange here!
+//       }
+//     });
+    
+//     // 🚨🚨🚨 CRITICAL FIX: Mouse up - SYNC HERE!
+//     canvas.on('mouse:up', () => {
+//       console.log('🐭 Mouse up - checking if we should sync');
+//       const objects = canvas.getObjects();
+//       if (objects.length > 0) {
+//         if (window.canvasSyncTimeout) clearTimeout(window.canvasSyncTimeout);
+//         window.canvasSyncTimeout = setTimeout(() => {
+//           console.log(`📤 Syncing ${objects.length} objects after mouse up`);
+//           updateYjsCanvas();
+//         }, 300);
+//       }
+//     });
+    
+//     // Handle resize
 //     const handleResize = () => {
 //       if (containerRef.current && canvas) {
 //         canvas.setDimensions({
@@ -3750,64 +6749,139 @@
 //     // Initial save
 //     saveState();
     
-//     console.log('✅ Canvas initialization complete');
-//     addConnectionLog('Canvas initialization complete');
-    
 //     return () => {
 //       window.removeEventListener('resize', handleResize);
 //     };
-//   }, [permissions, brushWidth, brushColor, syncCanvasToServer, sendCursorPosition]);
+//   }, [updateYjsCanvas]);
 
-//   // ✅ Save State for Undo/Redo
-//   const saveState = () => {
+//   // ✅ Main Effect
+//   useEffect(() => {
+//     if (isActive) {
+//       console.log('🚀 Whiteboard ACTIVE');
+//       setConnectionError(null);
+//       setConnectionStatus('connecting');
+//       setIsLoading(true);
+      
+//       initCanvas();
+      
+//       const initTimeout = setTimeout(() => {
+//         initYjs();
+//       }, 1000);
+      
+//       return () => clearTimeout(initTimeout);
+//     }
+//   }, [isActive, initCanvas, initYjs]);
+
+//   // ✅ Cleanup Effect
+//   useEffect(() => {
+//     return () => {
+//       console.log('🧹 WhiteboardComponent UNMOUNTING');
+      
+//       if (window.canvasLoadTimeout) clearTimeout(window.canvasLoadTimeout);
+//       if (window.canvasSyncTimeout) clearTimeout(window.canvasSyncTimeout);
+      
+//       if (yProviderRef.current) {
+//         try {
+//           yProviderRef.current.disconnect();
+//           yProviderRef.current.destroy();
+//         } catch (error) {
+//           console.error('❌ Error destroying Yjs provider:', error);
+//         }
+//       }
+      
+//       if (ydocRef.current) {
+//         try {
+//           ydocRef.current.destroy();
+//         } catch (error) {
+//           console.error('❌ Error destroying Y.Doc:', error);
+//         }
+//       }
+      
+//       if (fabricCanvasRef.current) {
+//         try {
+//           fabricCanvasRef.current.dispose();
+//           fabricCanvasRef.current = null;
+//         } catch (error) {
+//           console.error('❌ Error disposing fabric canvas:', error);
+//         }
+//       }
+//     };
+//   }, []);
+
+//   // Update permissions when room settings change
+//   useEffect(() => {
+//     const newPermissions = {
+//       canDraw: isStreamer || roomSettings.allowViewersToDraw,
+//       canEdit: isStreamer || roomSettings.allowViewersToDraw,
+//       canDelete: isStreamer,
+//       canClear: isStreamer,
+//       canChat: true,
+//       canExport: true,
+//       canImport: isStreamer
+//     };
+//     setPermissions(newPermissions);
+//     permissionsRef.current = newPermissions;
+//   }, [roomSettings, isStreamer]);
+
+//   // ✅ Render user cursors
+//   useEffect(() => {
 //     if (!fabricCanvasRef.current) return;
     
-//     const state = fabricCanvasRef.current.toJSON();
-//     const newHistory = [...history.slice(0, historyIndex + 1), state];
+//     const renderCursors = () => {
+//       const canvas = fabricCanvasRef.current;
+//       if (!canvas) return;
+      
+//       const ctx = canvas.getContext();
+//       canvas.renderAll();
+      
+//       activeUsers.forEach((userData) => {
+//         if (userData.cursorPosition) {
+//           const { x, y } = userData.cursorPosition;
+//           const { name, currentTool } = userData;
+          
+//           ctx.save();
+//           ctx.strokeStyle = '#FF0000';
+//           ctx.lineWidth = 2;
+//           ctx.beginPath();
+//           ctx.moveTo(x - 10, y);
+//           ctx.lineTo(x + 10, y);
+//           ctx.moveTo(x, y - 10);
+//           ctx.lineTo(x, y + 10);
+//           ctx.stroke();
+          
+//           ctx.fillStyle = '#FF0000';
+//           ctx.font = '12px Arial';
+//           ctx.fillText(`${name}${currentTool ? ` (${currentTool})` : ''}`, x + 15, y + 5);
+//           ctx.restore();
+//         }
+//       });
+//     };
     
-//     setHistory(newHistory);
-//     setHistoryIndex(newHistory.length - 1);
-//   };
+//     const animationId = requestAnimationFrame(renderCursors);
+//     return () => cancelAnimationFrame(animationId);
+//   }, [activeUsers]);
 
-//   // ✅ Undo
-//   const handleUndo = () => {
-//     if (historyIndex > 0 && permissions.canEdit) {
-//       const newIndex = historyIndex - 1;
-//       setHistoryIndex(newIndex);
-      
-//       fabricCanvasRef.current.loadFromJSON(history[newIndex], () => {
-//         fabricCanvasRef.current.renderAll();
-//         syncCanvasToServer();
-//       });
-//     }
-//   };
-
-//   // ✅ Redo
-//   const handleRedo = () => {
-//     if (historyIndex < history.length - 1 && permissions.canEdit) {
-//       const newIndex = historyIndex + 1;
-//       setHistoryIndex(newIndex);
-      
-//       fabricCanvasRef.current.loadFromJSON(history[newIndex], () => {
-//         fabricCanvasRef.current.renderAll();
-//         syncCanvasToServer();
-//       });
-//     }
-//   };
-
-//   // ✅ Tool Handlers with Permission Check
+//   // ============ Drawing Functions ============
 //   const handleToolSelect = (selectedTool) => {
-//     console.log(`🛠️ Tool selected: ${selectedTool}`);
-    
-//     // Check permissions
-//     if ((selectedTool === 'draw' || selectedTool === 'eraser') && !permissions.canDraw) {
-//       console.log('🚫 No permission to draw');
-//       addConnectionLog('No permission to draw');
+//     if ((selectedTool === 'draw' || selectedTool === 'eraser') && !permissionsRef.current.canDraw) {
+//       alert('You do not have permission to draw.');
 //       return;
 //     }
     
 //     setTool(selectedTool);
-//     sendToolChange(selectedTool);
+    
+//     if (ydocRef.current && (user?.id || user?._id)) {
+//       const userId = user.id || user._id;
+//       const yUsers = ydocRef.current.getMap('users');
+//       const currentUser = yUsers.get(userId);
+//       if (currentUser) {
+//         yUsers.set(userId, {
+//           ...currentUser,
+//           currentTool: selectedTool,
+//           lastActive: new Date().toISOString()
+//         });
+//       }
+//     }
     
 //     const canvas = fabricCanvasRef.current;
 //     if (!canvas) return;
@@ -3818,142 +6892,162 @@
 //         canvas.selection = true;
 //         break;
 //       case 'draw':
-//         if (permissions.canDraw) {
+//         if (permissionsRef.current.canDraw) {
 //           canvas.isDrawingMode = true;
-//           canvas.freeDrawingBrush.width = brushWidth;
-//           canvas.freeDrawingBrush.color = brushColor;
+//           canvas.freeDrawingBrush.width = brushWidthRef.current;
+//           canvas.freeDrawingBrush.color = brushColorRef.current;
 //         }
 //         break;
 //       case 'rectangle':
-//         if (permissions.canDraw) addRectangle();
+//         if (permissionsRef.current.canDraw) addRectangle();
 //         break;
 //       case 'circle':
-//         if (permissions.canDraw) addCircle();
+//         if (permissionsRef.current.canDraw) addCircle();
 //         break;
 //       case 'triangle':
-//         if (permissions.canDraw) addTriangle();
+//         if (permissionsRef.current.canDraw) addTriangle();
 //         break;
 //       case 'text':
-//         if (permissions.canDraw) addText();
+//         if (permissionsRef.current.canDraw) addText();
 //         break;
 //       case 'sticky':
-//         if (permissions.canDraw) addStickyNote();
+//         if (permissionsRef.current.canDraw) addStickyNote();
 //         break;
 //       case 'image':
-//         if (permissions.canDraw) uploadImage();
+//         if (permissionsRef.current.canDraw) uploadImage();
 //         break;
 //       case 'eraser':
-//         if (permissions.canDelete) activateEraser();
+//         if (permissionsRef.current.canDelete) activateEraser();
 //         break;
 //       case 'line':
-//         if (permissions.canDraw) startDrawingLine();
+//         if (permissionsRef.current.canDraw) startDrawingLine();
 //         break;
 //       case 'arrow':
-//         if (permissions.canDraw) startDrawingArrow();
+//         if (permissionsRef.current.canDraw) startDrawingArrow();
 //         break;
 //       case 'star':
-//         if (permissions.canDraw) addStar();
+//         if (permissionsRef.current.canDraw) addStar();
 //         break;
 //       case 'hexagon':
-//         if (permissions.canDraw) addHexagon();
+//         if (permissionsRef.current.canDraw) addHexagon();
 //         break;
 //     }
 //   };
 
-//   // Drawing Functions
 //   const addRectangle = () => {
+//     if (!permissionsRef.current.canDraw) return;
 //     const rect = new fabric.Rect({
 //       left: 100, top: 100, width: 100, height: 100,
 //       fill: fillColor, stroke: brushColor, strokeWidth: brushWidth,
-//       opacity: opacity, selectable: true
+//       opacity: opacity, selectable: true,
+//       id: `rect_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 //     });
 //     fabricCanvasRef.current.add(rect);
 //     fabricCanvasRef.current.setActiveObject(rect);
 //     setTool('select');
+//     setTimeout(() => updateYjsCanvas(), 100);
 //   };
 
 //   const addCircle = () => {
+//     if (!permissionsRef.current.canDraw) return;
 //     const circle = new fabric.Circle({
 //       left: 100, top: 100, radius: 50,
 //       fill: fillColor, stroke: brushColor, strokeWidth: brushWidth,
-//       opacity: opacity, selectable: true
+//       opacity: opacity, selectable: true,
+//       id: `circle_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 //     });
 //     fabricCanvasRef.current.add(circle);
 //     fabricCanvasRef.current.setActiveObject(circle);
 //     setTool('select');
+//     setTimeout(() => updateYjsCanvas(), 100);
 //   };
 
 //   const addTriangle = () => {
+//     if (!permissionsRef.current.canDraw) return;
 //     const triangle = new fabric.Triangle({
 //       left: 100, top: 100, width: 100, height: 100,
 //       fill: fillColor, stroke: brushColor, strokeWidth: brushWidth,
-//       opacity: opacity, selectable: true
+//       opacity: opacity, selectable: true,
+//       id: `triangle_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 //     });
 //     fabricCanvasRef.current.add(triangle);
 //     fabricCanvasRef.current.setActiveObject(triangle);
 //     setTool('select');
+//     setTimeout(() => updateYjsCanvas(), 100);
 //   };
 
 //   const addStar = () => {
+//     if (!permissionsRef.current.canDraw) return;
 //     const star = new fabric.Path('M 100 10 L 123 80 L 200 80 L 138 120 L 160 190 L 100 145 L 40 190 L 62 120 L 0 80 L 77 80 Z', {
 //       left: 100, top: 100,
 //       fill: fillColor, stroke: brushColor, strokeWidth: brushWidth,
-//       opacity: opacity, selectable: true
+//       opacity: opacity, selectable: true,
+//       id: `star_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 //     });
 //     fabricCanvasRef.current.add(star);
 //     fabricCanvasRef.current.setActiveObject(star);
 //     setTool('select');
+//     setTimeout(() => updateYjsCanvas(), 100);
 //   };
 
 //   const addHexagon = () => {
+//     if (!permissionsRef.current.canDraw) return;
 //     const hexagon = new fabric.Polygon([
 //       { x: 50, y: 0 }, { x: 100, y: 25 }, { x: 100, y: 75 },
 //       { x: 50, y: 100 }, { x: 0, y: 75 }, { x: 0, y: 25 }
 //     ], {
 //       left: 100, top: 100,
 //       fill: fillColor, stroke: brushColor, strokeWidth: brushWidth,
-//       opacity: opacity, selectable: true
+//       opacity: opacity, selectable: true,
+//       id: `hexagon_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 //     });
 //     fabricCanvasRef.current.add(hexagon);
 //     fabricCanvasRef.current.setActiveObject(hexagon);
 //     setTool('select');
+//     setTimeout(() => updateYjsCanvas(), 100);
 //   };
 
 //   const addText = () => {
+//     if (!permissionsRef.current.canDraw) return;
 //     const text = new fabric.IText('Double click to edit', {
 //       left: 100, top: 100,
 //       fontSize: fontSize, fontFamily: fontFamily,
-//       fill: brushColor, selectable: true
+//       fill: brushColor, selectable: true,
+//       id: `text_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 //     });
 //     fabricCanvasRef.current.add(text);
 //     fabricCanvasRef.current.setActiveObject(text);
 //     setTool('select');
+//     setTimeout(() => updateYjsCanvas(), 100);
 //   };
 
 //   const addStickyNote = () => {
+//     if (!permissionsRef.current.canDraw) return;
 //     const stickyNote = new fabric.Rect({
 //       left: 100, top: 100, width: 200, height: 150,
 //       fill: stickyNoteColor, stroke: '#d4d4d4', strokeWidth: 1,
 //       opacity: 0.9, shadow: 'rgba(0,0,0,0.2) 2px 2px 5px',
-//       selectable: true
+//       selectable: true,
+//       id: `sticky_bg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 //     });
-    
 //     const text = new fabric.IText('Double click to edit note', {
 //       left: 110, top: 110,
 //       fontSize: 16, fontFamily: 'Arial',
-//       fill: '#000000', selectable: true
+//       fill: '#000000', selectable: true,
+//       id: `sticky_text_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 //     });
-    
 //     const group = new fabric.Group([stickyNote, text], {
-//       selectable: true
+//       selectable: true,
+//       id: `sticky_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 //     });
-    
 //     fabricCanvasRef.current.add(group);
 //     fabricCanvasRef.current.setActiveObject(group);
 //     setTool('select');
+//     setTimeout(() => updateYjsCanvas(), 100);
 //   };
 
 //   const startDrawingLine = () => {
+//     if (!permissionsRef.current.canDraw) return;
 //     const canvas = fabricCanvasRef.current;
 //     let isDrawing = false;
 //     let line = null;
@@ -3962,7 +7056,8 @@
 //       isDrawing = true;
 //       const pointer = canvas.getPointer(options.e);
 //       line = new fabric.Line([pointer.x, pointer.y, pointer.x, pointer.y], {
-//         stroke: brushColor, strokeWidth: brushWidth, selectable: true
+//         stroke: brushColor, strokeWidth: brushWidth, selectable: true,
+//         id: `line_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 //       });
 //       canvas.add(line);
 //     };
@@ -3980,6 +7075,7 @@
 //       canvas.off('mouse:move', mouseMove);
 //       canvas.off('mouse:up', mouseUp);
 //       setTool('select');
+//       setTimeout(() => updateYjsCanvas(), 100);
 //     };
     
 //     canvas.on('mouse:down', mouseDown);
@@ -3988,6 +7084,7 @@
 //   };
 
 //   const startDrawingArrow = () => {
+//     if (!permissionsRef.current.canDraw) return;
 //     const canvas = fabricCanvasRef.current;
 //     let isDrawing = false;
 //     let line = null;
@@ -3997,12 +7094,14 @@
 //       isDrawing = true;
 //       const pointer = canvas.getPointer(options.e);
 //       line = new fabric.Line([pointer.x, pointer.y, pointer.x, pointer.y], {
-//         stroke: brushColor, strokeWidth: brushWidth, selectable: true
+//         stroke: brushColor, strokeWidth: brushWidth, selectable: true,
+//         id: `arrow_line_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 //       });
 //       arrowHead = new fabric.Triangle({
 //         width: 15, height: 15, fill: brushColor,
 //         left: pointer.x, top: pointer.y, angle: 0,
-//         selectable: false
+//         selectable: false,
+//         id: `arrow_head_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 //       });
 //       canvas.add(line);
 //       canvas.add(arrowHead);
@@ -4012,15 +7111,10 @@
 //       if (!isDrawing || !line || !arrowHead) return;
 //       const pointer = canvas.getPointer(options.e);
 //       line.set({ x2: pointer.x, y2: pointer.y });
-      
 //       const dx = pointer.x - line.x1;
 //       const dy = pointer.y - line.y1;
 //       const angle = Math.atan2(dy, dx) * 180 / Math.PI;
-      
-//       arrowHead.set({
-//         left: pointer.x, top: pointer.y, angle: angle
-//       });
-      
+//       arrowHead.set({ left: pointer.x, top: pointer.y, angle });
 //       canvas.renderAll();
 //     };
     
@@ -4028,7 +7122,8 @@
 //       isDrawing = false;
 //       if (line && arrowHead) {
 //         const group = new fabric.Group([line, arrowHead], {
-//           selectable: true
+//           selectable: true,
+//           id: `arrow_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 //         });
 //         canvas.remove(line);
 //         canvas.remove(arrowHead);
@@ -4038,6 +7133,7 @@
 //       canvas.off('mouse:move', mouseMove);
 //       canvas.off('mouse:up', mouseUp);
 //       setTool('select');
+//       setTimeout(() => updateYjsCanvas(), 100);
 //     };
     
 //     canvas.on('mouse:down', mouseDown);
@@ -4046,34 +7142,35 @@
 //   };
 
 //   const uploadImage = () => {
+//     if (!permissionsRef.current.canDraw) return;
 //     const input = document.createElement('input');
 //     input.type = 'file';
 //     input.accept = 'image/*';
-    
 //     input.onchange = (e) => {
 //       const file = e.target.files[0];
 //       if (!file) return;
-      
 //       const reader = new FileReader();
 //       reader.onload = (event) => {
 //         fabric.Image.fromURL(event.target.result, (img) => {
 //           img.set({
 //             left: 100, top: 100,
 //             scaleX: 0.5, scaleY: 0.5,
-//             selectable: true
+//             selectable: true,
+//             id: `image_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 //           });
 //           fabricCanvasRef.current.add(img);
 //           fabricCanvasRef.current.setActiveObject(img);
 //           setTool('select');
+//           setTimeout(() => updateYjsCanvas(), 100);
 //         });
 //       };
 //       reader.readAsDataURL(file);
 //     };
-    
 //     input.click();
 //   };
 
 //   const activateEraser = () => {
+//     if (!permissionsRef.current.canDelete) return;
 //     const canvas = fabricCanvasRef.current;
 //     canvas.isDrawingMode = false;
 //     canvas.selection = false;
@@ -4081,18 +7178,20 @@
 //     const mouseDown = (options) => {
 //       const pointer = canvas.getPointer(options.e);
 //       const objects = canvas.getObjects();
-      
+//       let removedCount = 0;
 //       objects.forEach(obj => {
 //         if (obj.containsPoint(pointer)) {
 //           canvas.remove(obj);
+//           removedCount++;
 //         }
 //       });
-      
 //       canvas.renderAll();
+//       if (removedCount > 0) {
+//         setTimeout(() => updateYjsCanvas(), 100);
+//       }
 //     };
     
 //     canvas.on('mouse:down', mouseDown);
-    
 //     setTimeout(() => {
 //       canvas.off('mouse:down', mouseDown);
 //       setTool('select');
@@ -4102,44 +7201,40 @@
 //   // Export Functions
 //   const exportAsImage = () => {
 //     if (!fabricCanvasRef.current) return;
-    
 //     const dataURL = fabricCanvasRef.current.toDataURL({
 //       format: 'png', quality: 1, multiplier: 2
 //     });
-    
+//     const fileName = `whiteboard-${sessionInfo?.title || 'session'}-${new Date().toISOString().slice(0, 10)}.png`;
 //     const link = document.createElement('a');
 //     link.href = dataURL;
-//     link.download = `whiteboard-${sessionInfo?.title || 'session'}-${new Date().toISOString().slice(0, 10)}.png`;
+//     link.download = fileName;
 //     link.click();
 //   };
 
 //   const exportAsJSON = () => {
 //     if (!fabricCanvasRef.current) return;
-    
 //     const json = fabricCanvasRef.current.toJSON();
 //     const dataStr = JSON.stringify(json);
 //     const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-    
+//     const fileName = `whiteboard-${sessionInfo?.title || 'session'}-${new Date().toISOString().slice(0, 10)}.json`;
 //     const link = document.createElement('a');
 //     link.href = dataUri;
-//     link.download = `whiteboard-${sessionInfo?.title || 'session'}-${new Date().toISOString().slice(0, 10)}.json`;
+//     link.download = fileName;
 //     link.click();
 //   };
 
 //   const importFromJSON = () => {
-//     if (!permissions.canEdit) {
-//       console.log('🚫 No permission to import');
+//     if (!permissionsRef.current.canEdit) {
+//       alert('You do not have permission to import files.');
 //       return;
 //     }
     
 //     const input = document.createElement('input');
 //     input.type = 'file';
 //     input.accept = '.json';
-    
 //     input.onchange = (e) => {
 //       const file = e.target.files[0];
 //       if (!file) return;
-      
 //       const reader = new FileReader();
 //       reader.onload = (event) => {
 //         try {
@@ -4147,35 +7242,28 @@
 //           fabricCanvasRef.current.loadFromJSON(json, () => {
 //             fabricCanvasRef.current.renderAll();
 //             saveState();
-//             syncCanvasToServer();
+//             setTimeout(() => updateYjsCanvas(), 100);
 //           });
 //         } catch (error) {
-//           console.error('Error loading JSON:', error);
+//           alert('Error loading JSON file. Please check the file format.');
 //         }
 //       };
 //       reader.readAsText(file);
 //     };
-    
 //     input.click();
 //   };
 
-//   // Clear Canvas with Permission Check
 //   const handleClear = () => {
-//     if (!permissions.canClear) {
-//       console.log('🚫 No permission to clear canvas');
+//     if (!permissionsRef.current.canClear) {
+//       alert('Only the streamer can clear the canvas.');
 //       return;
 //     }
     
-//     if (window.confirm('Are you sure you want to clear the whiteboard? Other users will also see this change.')) {
-//       if (ws && ws.readyState === WebSocket.OPEN) {
-//         ws.send(JSON.stringify({
-//           type: 'clear-canvas'
-//         }));
-//       }
-      
+//     if (window.confirm('Are you sure you want to clear the whiteboard?')) {
 //       fabricCanvasRef.current.clear();
 //       fabricCanvasRef.current.backgroundColor = '#ffffff';
 //       saveState();
+//       setTimeout(() => updateYjsCanvas(), 100);
 //     }
 //   };
 
@@ -4183,7 +7271,6 @@
 //   const handleZoomIn = () => {
 //     const newZoom = Math.min(zoom * 1.2, 5);
 //     setZoom(newZoom);
-    
 //     if (fabricCanvasRef.current) {
 //       fabricCanvasRef.current.setZoom(newZoom);
 //       fabricCanvasRef.current.renderAll();
@@ -4193,7 +7280,6 @@
 //   const handleZoomOut = () => {
 //     const newZoom = Math.max(zoom / 1.2, 0.2);
 //     setZoom(newZoom);
-    
 //     if (fabricCanvasRef.current) {
 //       fabricCanvasRef.current.setZoom(newZoom);
 //       fabricCanvasRef.current.renderAll();
@@ -4202,7 +7288,6 @@
 
 //   const handleZoomReset = () => {
 //     setZoom(1);
-    
 //     if (fabricCanvasRef.current) {
 //       fabricCanvasRef.current.setZoom(1);
 //       fabricCanvasRef.current.setViewportTransform([1, 0, 0, 1, 0, 0]);
@@ -4212,114 +7297,49 @@
 
 //   // Force Reconnect
 //   const forceReconnect = () => {
-//     console.log('🔁 Forcing reconnection...');
 //     addConnectionLog('Force reconnection initiated');
     
-//     if (ws) {
-//       ws.close();
+//     if (yProviderRef.current) {
+//       try {
+//         yProviderRef.current.disconnect();
+//         yProviderRef.current.destroy();
+//         yProviderRef.current = null;
+//       } catch (error) {
+//         console.error('Error destroying Yjs provider:', error);
+//       }
 //     }
     
-//     const newWs = connectWebSocket();
-//     setWs(newWs);
+//     if (window.canvasLoadTimeout) clearTimeout(window.canvasLoadTimeout);
+//     if (window.canvasSyncTimeout) clearTimeout(window.canvasSyncTimeout);
+    
+//     setIsLoading(true);
+//     setConnectionStatus('disconnected');
+//     setConnectionError(null);
+    
+//     setTimeout(() => {
+//       console.log('🔄 Reinitializing Yjs connection...');
+//       initYjs();
+//     }, 1000);
 //   };
 
-//   // Check Permissions
 //   const checkPermissions = () => {
-//     if (ws && ws.readyState === WebSocket.OPEN) {
-//       ws.send(JSON.stringify({
-//         type: 'check-permissions'
-//       }));
-//     }
+//     const newPermissions = {
+//       canDraw: isStreamer || roomSettings.allowViewersToDraw,
+//       canEdit: isStreamer || roomSettings.allowViewersToDraw,
+//       canDelete: isStreamer,
+//       canClear: isStreamer,
+//       canChat: true,
+//       canExport: true,
+//       canImport: isStreamer
+//     };
+//     setPermissions(newPermissions);
+//     permissionsRef.current = newPermissions;
 //   };
 
-//   // ✅ Main Effect - Component Mount/Unmount
-//   useEffect(() => {
-//     console.log('🎯 WhiteboardComponent useEffect - isActive:', isActive);
-    
-//     if (isActive) {
-//       console.log('🚀 Whiteboard ACTIVE - Starting initialization...');
-//       addConnectionLog('Whiteboard activated');
-      
-//       // Initialize WebSocket connection
-//       const websocket = connectWebSocket();
-//       setWs(websocket);
-      
-//       // Small delay to ensure DOM is ready
-//       const timeoutId = setTimeout(() => {
-//         console.log('🎨 Calling initCanvas...');
-//         initCanvas();
-//       }, 500);
-      
-//       return () => {
-//         console.log('🧹 Cleaning up whiteboard timeout');
-//         clearTimeout(timeoutId);
-//       };
-//     } else {
-//       console.log('⏸️ Whiteboard INACTIVE');
-//       addConnectionLog('Whiteboard deactivated');
-//     }
-//   }, [isActive, initCanvas, connectWebSocket]);
+//   if (!isActive) return null;
 
-//   // ✅ Cleanup Effect
-//   useEffect(() => {
-//     return () => {
-//       console.log('🧹 WhiteboardComponent UNMOUNTING - Cleanup');
-//       addConnectionLog('Component unmounting');
-      
-//       // Clean up WebSocket
-//       if (ws) {
-//         console.log('Closing WebSocket...');
-//         ws.close();
-//       }
-      
-//       // Clean up fabric canvas
-//       if (fabricCanvasRef.current) {
-//         console.log('Disposing fabric canvas...');
-//         fabricCanvasRef.current.dispose();
-//         fabricCanvasRef.current = null;
-//       }
-//     };
-//   }, [ws]);
-
-//   // Render remote cursors
-//   useEffect(() => {
-//     if (!fabricCanvasRef.current || Object.keys(cursorPositions).length === 0) return;
-    
-//     const canvas = fabricCanvasRef.current;
-//     const ctx = canvas.getContext();
-    
-//     // Clear previous cursor drawings
-//     canvas.renderAll();
-    
-//     // Draw remote cursors
-//     Object.entries(cursorPositions).forEach(([userId, data]) => {
-//       const { x, y, userName } = data;
-      
-//       // Draw cursor
-//       ctx.save();
-//       ctx.strokeStyle = '#FF0000';
-//       ctx.lineWidth = 2;
-//       ctx.beginPath();
-//       ctx.moveTo(x - 10, y);
-//       ctx.lineTo(x + 10, y);
-//       ctx.moveTo(x, y - 10);
-//       ctx.lineTo(x, y + 10);
-//       ctx.stroke();
-      
-//       // Draw username
-//       ctx.fillStyle = '#FF0000';
-//       ctx.font = '12px Arial';
-//       ctx.fillText(userName, x + 15, y + 5);
-//       ctx.restore();
-//     });
-//   }, [cursorPositions]);
-
-//   if (!isActive) {
-//     console.log('⏸️ Whiteboard not active, returning null');
-//     return null;
-//   }
-
-//   if (isLoading) {
+//   // Loading state
+//   if (isLoading || connectionStatus === 'connecting') {
 //     return (
 //       <div className="fixed inset-0 bg-gray-900 z-50 flex items-center justify-center">
 //         <div className="text-white text-center">
@@ -4328,18 +7348,55 @@
 //           <div className="text-sm text-gray-400 mt-2">
 //             Session: {sessionId} | Room: {roomCode}
 //           </div>
-//           <div className="text-xs text-gray-500 mt-1">
-//             {connectionStatus === 'connecting' ? 'Establishing connection...' : 
-//              connectionStatus === 'connected' ? 'Loading canvas...' : 
-//              'Waiting for connection...'}
+          
+//           {connectionError && (
+//             <div className="mt-4 p-3 bg-red-900/50 border border-red-700 rounded-lg">
+//               <div className="text-red-300 font-medium">Connection Error:</div>
+//               <div className="text-sm text-red-400">{connectionError}</div>
+//             </div>
+//           )}
+          
+//           <button
+//             onClick={forceReconnect}
+//             className="mt-4 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-white flex items-center justify-center mx-auto"
+//           >
+//             <FiRefreshCw className="mr-2" />
+//             Retry Connection
+//           </button>
+//         </div>
+//       </div>
+//     );
+//   }
+
+//   if (connectionError && !isLoading) {
+//     return (
+//       <div className="fixed inset-0 bg-gray-900 z-50 flex items-center justify-center">
+//         <div className="text-white text-center max-w-md">
+//           <div className="w-16 h-16 bg-red-600 rounded-full flex items-center justify-center mx-auto mb-4">
+//             <FiX className="text-2xl" />
+//           </div>
+//           <h3 className="text-xl font-bold mb-2">Connection Failed</h3>
+//           <div className="text-gray-300 mb-4">{connectionError}</div>
+          
+//           <div className="flex space-x-3">
+//             <button
+//               onClick={forceReconnect}
+//               className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-white"
+//             >
+//               Retry Connection
+//             </button>
+//             <button
+//               onClick={onClose}
+//               className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-white"
+//             >
+//               Close Whiteboard
+//             </button>
 //           </div>
 //         </div>
 //       </div>
 //     );
 //   }
 
-//   console.log('🎨 Whiteboard RENDERING UI');
-  
 //   return (
 //     <div className="fixed inset-0 bg-gray-900 z-50 flex flex-col">
 //       {/* Header */}
@@ -4357,8 +7414,7 @@
 //             }`} />
 //             <span className="text-sm text-gray-300">
 //               {connectionStatus === 'connected' ? 'Connected' : 
-//                connectionStatus === 'connecting' ? 'Connecting...' : 
-//                'Disconnected'}
+//                connectionStatus === 'connecting' ? 'Connecting...' : 'Disconnected'}
 //             </span>
             
 //             <span className="text-xs bg-gray-700 px-2 py-1 rounded">
@@ -4374,13 +7430,24 @@
 //         </div>
         
 //         <div className="flex items-center space-x-2">
-//           {/* Active Users */}
 //           <div className="flex items-center space-x-1 text-sm text-gray-300">
 //             <FiUsers />
 //             <span>{activeUsers.length + 1} online</span>
 //           </div>
           
-//           {/* Debug Buttons */}
+//           {isStreamer && (
+//             <button
+//               onClick={toggleViewersDraw}
+//               className={`px-3 py-2 rounded-lg text-white text-sm flex items-center ${
+//                 roomSettings.allowViewersToDraw 
+//                   ? 'bg-green-600 hover:bg-green-700' 
+//                   : 'bg-red-600 hover:bg-red-700'
+//               }`}
+//             >
+//               {roomSettings.allowViewersToDraw ? '👥 Drawing ON' : '👥 Drawing OFF'}
+//             </button>
+//           )}
+          
 //           {showDebug && (
 //             <button
 //               onClick={forceReconnect}
@@ -4395,14 +7462,6 @@
 //             className="px-3 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg text-white text-sm"
 //           >
 //             {showDebug ? 'Hide Debug' : 'Debug'}
-//           </button>
-          
-//           <button
-//             onClick={checkPermissions}
-//             className="px-3 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-white text-sm"
-//             title="Check Permissions"
-//           >
-//             <FiRefreshCw />
 //           </button>
           
 //           <button
@@ -4423,7 +7482,7 @@
 //         </div>
 //       </div>
 
-//       {/* Main Area */}
+//       {/* Main Area - UI remains same */}
 //       <div className="flex-1 flex overflow-hidden">
 //         {/* Tools Sidebar */}
 //         <div className="w-16 bg-gray-800 border-r border-gray-700 flex flex-col items-center py-4 space-y-4">
@@ -4461,9 +7520,7 @@
 //               <h3 className="text-sm font-semibold text-gray-300 mb-2 flex items-center">
 //                 <BsBrush className="mr-2" />
 //                 Brush Properties
-//                 {!permissions.canDraw && (
-//                   <FiLock className="ml-auto" size={12} />
-//                 )}
+//                 {!permissions.canDraw && <FiLock className="ml-auto" size={12} />}
 //               </h3>
               
 //               <div className="space-y-3">
@@ -4536,9 +7593,7 @@
 //                 </div>
 
 //                 <div>
-//                   <label className="text-xs text-gray-400">
-//                     Opacity: {Math.round(opacity * 100)}%
-//                   </label>
+//                   <label className="text-xs text-gray-400">Opacity: {Math.round(opacity * 100)}%</label>
 //                   <input
 //                     type="range"
 //                     min="0.1"
@@ -4554,37 +7609,29 @@
 //             </div>
 
 //             {/* Session Info */}
-//             {sessionInfo && (
-//               <div className="pt-4 border-t border-gray-700">
-//                 <h3 className="text-sm font-semibold text-gray-300 mb-2">Session Info</h3>
-//                 <div className="text-xs text-gray-400 space-y-1">
-//                   <div>Title: {sessionInfo.title}</div>
-//                   <div>Room: {sessionInfo.roomCode}</div>
-//                   {sessionInfo.streamerName && (
-//                     <div>Host: {sessionInfo.streamerName}</div>
-//                   )}
-//                   <div>Participants: {activeUsers.length + 1}</div>
-//                   <div>Allow Viewers to Draw: {allowViewersToDraw ? 'Yes' : 'No'}</div>
-//                   <div className="pt-2">
-//                     <div className="text-gray-300">Your Permissions:</div>
-//                     <div className="flex flex-wrap gap-1 mt-1">
-//                       {permissions.canDraw && (
-//                         <span className="bg-green-900 px-2 py-1 rounded text-xs">Draw</span>
-//                       )}
-//                       {permissions.canEdit && (
-//                         <span className="bg-blue-900 px-2 py-1 rounded text-xs">Edit</span>
-//                       )}
-//                       {permissions.canDelete && (
-//                         <span className="bg-red-900 px-2 py-1 rounded text-xs">Delete</span>
-//                       )}
-//                       {permissions.canClear && (
-//                         <span className="bg-purple-900 px-2 py-1 rounded text-xs">Clear</span>
-//                       )}
-//                     </div>
-//                   </div>
+//             <div className="pt-4 border-t border-gray-700">
+//               <h3 className="text-sm font-semibold text-gray-300 mb-2">Session Info</h3>
+//               <div className="text-xs text-gray-400 space-y-1">
+//                 <div className="flex justify-between">
+//                   <span>Title:</span>
+//                   <span className="text-gray-300">{sessionInfo?.title || 'Whiteboard Session'}</span>
+//                 </div>
+//                 <div className="flex justify-between">
+//                   <span>Room:</span>
+//                   <span className="text-gray-300">{sessionInfo?.roomCode || roomCode || 'N/A'}</span>
+//                 </div>
+//                 <div className="flex justify-between">
+//                   <span>Participants:</span>
+//                   <span className="text-gray-300">{activeUsers.length + 1}</span>
+//                 </div>
+//                 <div className="flex justify-between">
+//                   <span>Viewers can draw:</span>
+//                   <span className={`font-medium ${roomSettings.allowViewersToDraw ? 'text-green-400' : 'text-red-400'}`}>
+//                     {roomSettings.allowViewersToDraw ? 'Yes' : 'No'}
+//                   </span>
 //                 </div>
 //               </div>
-//             )}
+//             </div>
 //           </div>
 //         </div>
 
@@ -4594,8 +7641,8 @@
           
 //           {/* View Only Overlay */}
 //           {!permissions.canDraw && connectionStatus === 'connected' && (
-//             <div className="absolute top-4 right-4 bg-yellow-800/80 text-white text-xs px-3 py-2 rounded-lg">
-//               👀 View Only Mode
+//             <div className="absolute top-4 right-4 bg-yellow-800/80 text-white text-xs px-3 py-2 rounded-lg flex items-center">
+//               <FiLock className="mr-1" size={12} /> View Only Mode
 //             </div>
 //           )}
           
@@ -4628,38 +7675,15 @@
 //               <div className="font-bold mb-2">Debug Info:</div>
 //               <div className="space-y-1">
 //                 <div>Status: <span className={connectionStatus === 'connected' ? 'text-green-400' : 'text-red-400'}>{connectionStatus}</span></div>
-//                 <div>Connection Attempts: {connectionAttempt}</div>
 //                 <div>Session ID: {sessionId}</div>
-//                 <div>Room Code: {roomCode}</div>
-//                 <div>User: {user?.name || 'Anonymous'}</div>
+//                 <div>User: {user?.name || 'Anonymous'} ({user?.id || user?._id})</div>
 //                 <div>Role: {isStreamer ? 'Streamer' : 'Viewer'}</div>
-//                 <div>Canvas: {fabricCanvasRef.current ? 'Loaded' : 'Not loaded'}</div>
-//                 <div>WS: {ws && ws.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'}</div>
+//                 <div>Canvas Objects: {fabricCanvasRef.current?.getObjects().length || 0}</div>
                 
-//                 <div className="mt-2 font-bold">Permissions:</div>
+//                 <div className="mt-2 font-bold">Room Settings:</div>
 //                 <div className="grid grid-cols-2 gap-1">
-//                   <div>Draw: {permissions.canDraw ? '✅' : '❌'}</div>
-//                   <div>Edit: {permissions.canEdit ? '✅' : '❌'}</div>
-//                   <div>Delete: {permissions.canDelete ? '✅' : '❌'}</div>
-//                   <div>Clear: {permissions.canClear ? '✅' : '❌'}</div>
-//                 </div>
-                
-//                 <div className="mt-2 font-bold">Active Users ({activeUsers.length}):</div>
-//                 <div className="text-xs max-h-20 overflow-y-auto">
-//                   {activeUsers.map((user, index) => (
-//                     <div key={index} className="py-1 border-b border-gray-700">
-//                       {user.userName} ({user.userRole}) {user.isStreamer && '🎤'}
-//                     </div>
-//                   ))}
-//                 </div>
-                
-//                 <div className="mt-2 font-bold">Connection Logs:</div>
-//                 <div className="text-xs max-h-32 overflow-y-auto">
-//                   {connectionLogs.slice().reverse().map((log, index) => (
-//                     <div key={index} className="border-b border-gray-700 py-1">
-//                       <span className="text-gray-400">[{log.timestamp}]</span> {log.message}
-//                     </div>
-//                   ))}
+//                   <div>Allow Viewers to Draw: {roomSettings.allowViewersToDraw ? '✅' : '❌'}</div>
+//                   <div>Streamer: {roomSettings.streamerName || 'Unknown'}</div>
 //                 </div>
 //               </div>
 //             </div>
@@ -4756,19 +7780,43 @@
 //                 {activeUsers.map((activeUser, index) => (
 //                   <div key={index} className="flex items-center space-x-2 p-2 bg-gray-700 rounded">
 //                     <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-//                     <span className="text-sm text-gray-300">{activeUser.userName}</span>
+//                     <span className="text-sm text-gray-300">{activeUser.name}</span>
 //                     <span className="text-xs bg-gray-800 px-2 py-1 rounded ml-auto">
-//                       {activeUser.isStreamer ? 'Streamer' : activeUser.userRole}
+//                       {activeUser.isStreamer ? 'Streamer' : 'Viewer'}
 //                     </span>
-//                     {userTools[activeUser.userId] && (
-//                       <span className="text-xs bg-purple-900 px-2 py-1 rounded">
-//                         {userTools[activeUser.userId]}
-//                       </span>
-//                     )}
 //                   </div>
 //                 ))}
 //               </div>
 //             </div>
+            
+//             {/* Room Controls for Streamer */}
+//             {isStreamer && (
+//               <div className="pt-4 border-t border-gray-700">
+//                 <h3 className="text-sm font-semibold text-gray-300 mb-2">Room Controls</h3>
+//                 <div className="space-y-2">
+//                   <button
+//                     onClick={toggleViewersDraw}
+//                     className={`w-full p-2 rounded-lg flex items-center justify-center space-x-2 ${
+//                       roomSettings.allowViewersToDraw 
+//                         ? 'bg-red-600 hover:bg-red-700' 
+//                         : 'bg-green-600 hover:bg-green-700'
+//                     } text-white`}
+//                   >
+//                     {roomSettings.allowViewersToDraw ? (
+//                       <>
+//                         <FiLock />
+//                         <span>Disable Viewer Drawing</span>
+//                       </>
+//                     ) : (
+//                       <>
+//                         <FiUnlock />
+//                         <span>Enable Viewer Drawing</span>
+//                       </>
+//                     )}
+//                   </button>
+//                 </div>
+//               </div>
+//             )}
 //           </div>
 //         </div>
 //       </div>
@@ -4776,2148 +7824,8 @@
 //   );
 // };
 
+// console.log('===================================================');
+// console.log('🎨 WHITEBOARD COMPONENT DEFINED - FIXED');
+// console.log('===================================================');
+
 // export default WhiteboardComponent;
-
-
-
-
-
-
-
-
-
-
-
-
-import React, { useRef, useEffect, useState, useCallback } from 'react';
-import * as fabric from 'fabric';
-import * as Y from 'yjs';
-import { useAuth } from '../../../contexts/AuthContext';
-import { 
-  FiSquare, FiCircle, FiType, FiPenTool, FiEdit3, FiMousePointer, FiTrash2, 
-  FiDownload, FiUpload, FiSave, FiZoomIn, FiZoomOut, FiMaximize2,
-  FiMinimize2, FiImage, FiStar, FiHexagon, FiTriangle, FiMinus, FiArrowRight,
-  FiX, FiUsers, FiMessageSquare, FiRefreshCw, FiLock, FiUnlock
-} from 'react-icons/fi';
-import { FaRedo, FaUndo } from "react-icons/fa";
-import { BsBrush, BsEraser } from 'react-icons/bs';
-import { LuStickyNote } from 'react-icons/lu';
-
-console.log('===================================================');
-console.log('🎨 WHITEBOARD COMPONENT STARTING');
-console.log('===================================================');
-
-const WhiteboardComponent = ({ 
-  sessionId, 
-  roomCode, 
-  wsToken, 
-  sessionInfo,
-  isActive, 
-  onClose, 
-  isStreamer = false,
-  allowViewersToDraw = true
-}) => {
-  console.log('🚀 WhiteboardComponent FUNCTION CALLED');
-  console.log('📋 PROPS RECEIVED:');
-  console.log('  1. sessionId:', sessionId);
-  console.log('  2. roomCode:', roomCode);
-  console.log('  3. wsToken:', wsToken);
-  console.log('  4. sessionInfo:', sessionInfo);
-  console.log('  5. isActive:', isActive);
-  console.log('  6. isStreamer:', isStreamer);
-  console.log('  7. allowViewersToDraw:', allowViewersToDraw);
-  console.log('===================================================');
-
-  const { user } = useAuth();
-  console.log('🔐 Auth Context - User:', user);
-  
-  const canvasRef = useRef(null);
-  const fabricCanvasRef = useRef(null);
-  const containerRef = useRef(null);
-  
-  console.log('🔄 State declarations starting...');
-  
-  const [tool, setTool] = useState('select');
-  console.log('🔧 State: tool =', tool);
-  
-  const [brushWidth, setBrushWidth] = useState(5);
-  console.log('🎨 State: brushWidth =', brushWidth);
-  
-  const [brushColor, setBrushColor] = useState('#000000');
-  console.log('🎨 State: brushColor =', brushColor);
-  
-  const [fillColor, setFillColor] = useState('#ffffff');
-  console.log('🎨 State: fillColor =', fillColor);
-  
-  const [opacity, setOpacity] = useState(1);
-  console.log('🎨 State: opacity =', opacity);
-  
-  const [fontSize, setFontSize] = useState(20);
-  console.log('🔤 State: fontSize =', fontSize);
-  
-  const [fontFamily, setFontFamily] = useState('Arial');
-  console.log('🔤 State: fontFamily =', fontFamily);
-  
-  const [zoom, setZoom] = useState(1);
-  console.log('🔍 State: zoom =', zoom);
-  
-  const [history, setHistory] = useState([]);
-  console.log('📜 State: history length =', history.length);
-  
-  const [historyIndex, setHistoryIndex] = useState(-1);
-  console.log('📜 State: historyIndex =', historyIndex);
-  
-  const [showGrid, setShowGrid] = useState(false);
-  console.log('🔲 State: showGrid =', showGrid);
-  
-  const [cursorPosition, setCursorPosition] = useState({ x: 0, y: 0 });
-  console.log('🖱️ State: cursorPosition =', cursorPosition);
-  
-  const [connectionStatus, setConnectionStatus] = useState('disconnected');
-  console.log('📡 State: connectionStatus =', connectionStatus);
-  
-  const [stickyNoteColor, setStickyNoteColor] = useState('#ffff88');
-  console.log('📝 State: stickyNoteColor =', stickyNoteColor);
-  
-  const [showDebug, setShowDebug] = useState(false);
-  console.log('🐛 State: showDebug =', showDebug);
-  
-  const [connectionAttempt, setConnectionAttempt] = useState(0);
-  console.log('🔁 State: connectionAttempt =', connectionAttempt);
-  
-  const [connectionLogs, setConnectionLogs] = useState([]);
-  console.log('📝 State: connectionLogs length =', connectionLogs.length);
-  
-  const [activeUsers, setActiveUsers] = useState([]);
-  console.log('👥 State: activeUsers length =', activeUsers.length);
-  
-  const [isLoading, setIsLoading] = useState(true);
-  console.log('⏳ State: isLoading =', isLoading);
-  
-  const [permissions, setPermissions] = useState({
-    canDraw: isStreamer,
-    canEdit: isStreamer,
-    canDelete: isStreamer,
-    canClear: isStreamer,
-    canChat: true,
-    canExport: true,
-    canImport: isStreamer
-  });
-  console.log('🔐 State: permissions =', permissions);
-  
-  const [ws, setWs] = useState(null);
-  console.log('🔌 State: ws =', ws ? 'WebSocket exists' : 'null');
-  
-  const [cursorPositions, setCursorPositions] = useState({});
-  console.log('📍 State: cursorPositions keys =', Object.keys(cursorPositions));
-  
-  const [userTools, setUserTools] = useState({});
-  console.log('🛠️ State: userTools =', userTools);
-  
-  console.log('✅ All states declared');
-  console.log('===================================================');
-  
-  const tools = [
-    { id: 'select', name: 'Select', icon: <FiMousePointer /> },
-    { id: 'draw', name: 'Draw', icon: <FiPenTool /> },
-    { id: 'line', name: 'Line', icon: <FiMinus /> },
-    { id: 'arrow', name: 'Arrow', icon: <FiArrowRight /> },
-    { id: 'rectangle', name: 'Rectangle', icon: <FiSquare /> },
-    { id: 'circle', name: 'Circle', icon: <FiCircle /> },
-    { id: 'triangle', name: 'Triangle', icon: <FiTriangle /> },
-    { id: 'star', name: 'Star', icon: <FiStar /> },
-    { id: 'hexagon', name: 'Hexagon', icon: <FiHexagon /> },
-    { id: 'text', name: 'Text', icon: <FiType /> },
-    { id: 'sticky', name: 'Sticky Note', icon: <LuStickyNote /> },
-    { id: 'image', name: 'Image', icon: <FiImage /> },
-    { id: 'eraser', name: 'Eraser', icon: <BsEraser /> },
-  ];
-
-  const colors = [
-    '#000000', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF',
-    '#FFA500', '#800080', '#008000', '#800000', '#008080', '#000080', '#808080'
-  ];
-
-  const brushSizes = [1, 2, 3, 5, 8, 10, 15, 20, 30];
-
-  // ✅ Add connection log
-  const addConnectionLog = (message) => {
-    console.log('📝 addConnectionLog called:', message);
-    const timestamp = new Date().toLocaleTimeString();
-    console.log(`📝 ${timestamp}: ${message}`);
-    setConnectionLogs(prev => [...prev.slice(-10), {
-      timestamp: timestamp,
-      message
-    }]);
-  };
-
-  // ✅ Get WebSocket URL
-  const getWebSocketUrl = () => {
-    console.log('🔗 getWebSocketUrl function called');
-    console.log('🔍 Checking WebSocket parameters:');
-    console.log('  - wsToken exists:', !!wsToken);
-    console.log('  - wsToken value:', wsToken);
-    console.log('  - sessionId:', sessionId);
-    console.log('  - roomCode:', roomCode);
-    console.log('  - isStreamer:', isStreamer);
-    console.log('  - allowViewersToDraw:', allowViewersToDraw);
-    
-    const baseUrl = process.env.REACT_APP_WS_URL || 'ws://localhost:9090';
-    console.log('🌐 Base URL:', baseUrl);
-    console.log('🌐 REACT_APP_WS_URL env:', process.env.REACT_APP_WS_URL);
-    
-    if (!wsToken) {
-      console.error('❌ CRITICAL ERROR: wsToken is null or undefined');
-      return null;
-    }
-    
-    if (!sessionId) {
-      console.error('❌ CRITICAL ERROR: sessionId is null or undefined');
-      return null;
-    }
-    
-    if (!roomCode) {
-      console.error('❌ CRITICAL ERROR: roomCode is null or undefined');
-      return null;
-    }
-    
-    const url = `${baseUrl}/yjs?token=${encodeURIComponent(wsToken)}&sessionId=${encodeURIComponent(sessionId)}&roomCode=${encodeURIComponent(roomCode)}&isStreamer=${isStreamer}&allowViewersToDraw=${allowViewersToDraw}`;
-    
-    console.log('🔗 Constructed WebSocket URL:', url);
-    console.log('🔗 URL Parameters:');
-    console.log('  - token:', wsToken.substring(0, 20) + '...');
-    console.log('  - sessionId:', sessionId);
-    console.log('  - roomCode:', roomCode);
-    
-    return url;
-  };
-
-  // ✅ Initialize Yjs
-  const initYjs = useCallback(() => {
-    console.log('🔄 initYjs callback called');
-    console.log('📋 Yjs parameters:');
-    console.log('  - wsToken:', wsToken);
-    console.log('  - sessionId:', sessionId);
-    console.log('  - roomCode:', roomCode);
-    console.log('  - allowViewersToDraw:', allowViewersToDraw);
-
-    if (!wsToken) {
-      console.error('❌ Yjs init failed: wsToken missing');
-      addConnectionLog('Yjs: Missing wsToken');
-      return null;
-    }
-
-    if (!sessionId) {
-      console.error('❌ Yjs init failed: sessionId missing');
-      addConnectionLog('Yjs: Missing sessionId');
-      return null;
-    }
-
-    if (!roomCode) {
-      console.error('❌ Yjs init failed: roomCode missing');
-      addConnectionLog('Yjs: Missing roomCode');
-      return null;
-    }
-
-    try {
-      console.log('📄 Creating Y.Doc...');
-      const ydoc = new Y.Doc();
-      const yCanvasArray = ydoc.getArray('whiteboard');
-      console.log('✅ Y.Doc created');
-
-      // Initialize with empty canvas if not exists
-      if (yCanvasArray.length === 0) {
-        console.log('📝 Initializing empty canvas array');
-        yCanvasArray.insert(0, [{
-          version: '5.3.0',
-          objects: [],
-          background: '#ffffff',
-          sessionId: sessionId,
-          allowViewersToDraw: allowViewersToDraw,
-          createdAt: new Date().toISOString()
-        }]);
-        console.log('✅ Canvas array initialized');
-      }
-
-      console.log('✅ Yjs initialized successfully');
-      addConnectionLog('Yjs initialized');
-      
-      return { ydoc, yCanvasArray };
-    } catch (error) {
-      console.error('❌ Yjs initialization error:', error);
-      addConnectionLog(`Yjs error: ${error.message}`);
-      return null;
-    }
-  }, [wsToken, sessionId, roomCode, allowViewersToDraw]);
-
-  // ✅ Connect to WebSocket
-  const connectWebSocket = useCallback(() => {
-    console.log('🔗 connectWebSocket callback called');
-    console.log(`🔁 Connection attempt #${connectionAttempt + 1}`);
-    
-    addConnectionLog(`Connection attempt #${connectionAttempt + 1}`);
-    setConnectionAttempt(prev => prev + 1);
-    setConnectionStatus('connecting');
-    
-    const wsUrl = getWebSocketUrl();
-    console.log('🌐 WebSocket URL:', wsUrl);
-    
-    if (!wsUrl) {
-      console.error('❌ Cannot connect: WebSocket URL is null');
-      addConnectionLog('Failed: WebSocket URL is null');
-      setConnectionStatus('error');
-      return null;
-    }
-    
-    console.log('🔌 Creating WebSocket connection...');
-    const websocket = new WebSocket(wsUrl);
-    console.log('✅ WebSocket object created');
-    
-    websocket.onopen = () => {
-      console.log('✅ WebSocket onopen triggered - CONNECTED');
-      console.log('📡 WebSocket readyState:', websocket.readyState);
-      addConnectionLog('WebSocket connected successfully');
-      setConnectionStatus('connected');
-      
-      // Initialize Yjs after connection
-      console.log('🔄 Initializing Yjs after connection...');
-      const yjs = initYjs();
-      console.log('✅ Yjs init result:', yjs ? 'Success' : 'Failed');
-      
-      // Send welcome message to get permissions
-      console.log('📤 Sending check-permissions message...');
-      websocket.send(JSON.stringify({
-        type: 'check-permissions'
-      }));
-      console.log('✅ check-permissions sent');
-    };
-    
-    websocket.onmessage = (event) => {
-      console.log('📨 WebSocket onmessage triggered');
-      console.log('📩 Message type:', typeof event.data);
-      console.log('📩 Message data:', event.data);
-      handleWebSocketMessage(event);
-    };
-    
-    websocket.onerror = (error) => {
-      console.error('❌ WebSocket onerror triggered:', error);
-      console.error('❌ Error event:', error);
-      addConnectionLog(`WebSocket error: ${error.message}`);
-      setConnectionStatus('error');
-    };
-    
-    websocket.onclose = () => {
-      console.log('🔌 WebSocket onclose triggered - DISCONNECTED');
-      console.log('📡 WebSocket readyState:', websocket.readyState);
-      addConnectionLog('WebSocket connection closed');
-      setConnectionStatus('disconnected');
-      
-      // Auto-reconnect after 3 seconds
-      console.log('⏰ Scheduling auto-reconnect in 3 seconds...');
-      setTimeout(() => {
-        console.log('🔄 Attempting auto-reconnect...');
-        addConnectionLog('Auto-reconnect attempt');
-        connectWebSocket();
-      }, 3000);
-    };
-    
-    console.log('✅ WebSocket connection process started');
-    return websocket;
-  }, [connectionAttempt, initYjs]);
-
-  // ✅ Handle WebSocket Messages
-  const handleWebSocketMessage = useCallback((event) => {
-    console.log('📨 handleWebSocketMessage called');
-    console.log('📩 Raw message:', event.data);
-    
-    try {
-      // Handle binary data (Yjs updates)
-      if (event.data instanceof ArrayBuffer || event.data instanceof Blob) {
-        console.log('🔢 Received binary data');
-        const reader = new FileReader();
-        reader.onload = () => {
-          const buffer = new Uint8Array(reader.result);
-          console.log('📦 Binary data size:', buffer.length, 'bytes');
-          applyYjsUpdate(buffer);
-        };
-        reader.readAsArrayBuffer(event.data);
-        return;
-      }
-      
-      // Handle JSON messages
-      console.log('📝 Parsing JSON message...');
-      const message = JSON.parse(event.data);
-      console.log('✅ JSON parsed successfully:', message.type);
-      
-      switch (message.type) {
-        case 'welcome':
-          console.log('👋 Welcome message received:', message);
-          console.log('🏷️ Session title:', message.sessionTitle);
-          console.log('🔐 Permissions:', message.permissions);
-          addConnectionLog(`Welcome to: ${message.sessionTitle}`);
-          setIsLoading(false);
-          
-          // Update permissions from server
-          if (message.permissions) {
-            console.log('🔄 Updating permissions from server');
-            setPermissions(message.permissions);
-            console.log('✅ New permissions:', message.permissions);
-          }
-          break;
-          
-        case 'permissions-info':
-          console.log('🔐 Permissions info received:', message);
-          console.log('🔐 Permissions data:', message.permissions);
-          setPermissions(message.permissions);
-          break;
-          
-        case 'user-joined':
-          console.log(`👤 User joined: ${message.userName} (${message.userId})`);
-          console.log('👤 User data:', message);
-          addConnectionLog(`${message.userName} joined`);
-          updateActiveUsers('add', message);
-          break;
-          
-        case 'user-left':
-          console.log(`👤 User left: ${message.userName} (${message.userId})`);
-          console.log('👤 User data:', message);
-          addConnectionLog(`${message.userName} left`);
-          updateActiveUsers('remove', message);
-          break;
-          
-        case 'active-users':
-          console.log('👥 Active users list received');
-          console.log('👥 Users count:', message.users?.length || 0);
-          console.log('👥 Users:', message.users);
-          setActiveUsers(message.users || []);
-          break;
-          
-        case 'error':
-          console.error('❌ Server error message:', message);
-          console.error('❌ Error details:', message.message);
-          addConnectionLog(`Error: ${message.message}`);
-          break;
-          
-        case 'canvas-cleared':
-          console.log(`🧹 Canvas cleared by ${message.clearedBy}`);
-          addConnectionLog(`Canvas cleared by ${message.clearedBy}`);
-          break;
-          
-        case 'user-tool-change':
-          console.log(`🛠️ User tool change: ${message.userName} selected ${message.tool}`);
-          setUserTools(prev => ({
-            ...prev,
-            [message.userId]: message.tool
-          }));
-          break;
-          
-        case 'cursor-move':
-          console.log(`📍 Cursor move from ${message.userName}`);
-          console.log('📍 Position:', message.position);
-          // Store cursor position for other users
-          setCursorPositions(prev => ({
-            ...prev,
-            [message.userId]: {
-              ...message.position,
-              userName: message.userName
-            }
-          }));
-          break;
-          
-        default:
-          console.log('❓ Unknown message type:', message.type);
-          console.log('📦 Full message:', message);
-      }
-    } catch (error) {
-      console.error('❌ Error parsing WebSocket message:', error);
-      console.error('❌ Error message:', error.message);
-      console.error('❌ Raw data that failed:', event.data);
-    }
-  }, []);
-
-  // ✅ Apply Yjs update to canvas
-  const applyYjsUpdate = useCallback((update) => {
-    console.log('🔄 applyYjsUpdate called');
-    console.log('📦 Update size:', update.length, 'bytes');
-    
-    if (!fabricCanvasRef.current) {
-      console.error('❌ Cannot apply update: fabricCanvasRef.current is null');
-      return;
-    }
-    
-    try {
-      console.log('🔄 Applying Yjs update to canvas...');
-      // This would normally use Y.applyUpdate, but for simplicity
-      // we'll handle it through our WebSocket messages
-      console.log('✅ Yjs update processed (simulated)');
-    } catch (error) {
-      console.error('❌ Error applying Yjs update:', error);
-    }
-  }, []);
-
-  // ✅ Update active users list
-  const updateActiveUsers = useCallback((action, userData) => {
-    console.log(`👥 updateActiveUsers called: ${action}`);
-    console.log('👤 User data:', userData);
-    
-    setActiveUsers(prev => {
-      console.log('👥 Previous active users:', prev.length);
-      
-      if (action === 'add') {
-        const newUsers = [...prev.filter(u => u.userId !== userData.userId), {
-          userId: userData.userId,
-          userName: userData.userName,
-          userRole: userData.userRole,
-          isStreamer: userData.isStreamer,
-          permissions: userData.permissions || {}
-        }];
-        console.log('👥 New active users after add:', newUsers.length);
-        return newUsers;
-      } else {
-        const newUsers = prev.filter(u => u.userId !== userData.userId);
-        console.log('👥 New active users after remove:', newUsers.length);
-        return newUsers;
-      }
-    });
-  }, []);
-
-  // ✅ Sync Canvas to Server
-  const syncCanvasToServer = useCallback(() => {
-    console.log('📤 syncCanvasToServer called');
-    
-    if (!fabricCanvasRef.current) {
-      console.error('❌ Cannot sync: fabricCanvasRef.current is null');
-      return;
-    }
-    
-    if (!ws) {
-      console.error('❌ Cannot sync: WebSocket is null');
-      return;
-    }
-    
-    if (ws.readyState !== WebSocket.OPEN) {
-      console.error(`❌ Cannot sync: WebSocket state is ${ws.readyState}`);
-      console.log('📡 WebSocket states:');
-      console.log('  0: CONNECTING');
-      console.log('  1: OPEN');
-      console.log('  2: CLOSING');
-      console.log('  3: CLOSED');
-      return;
-    }
-    
-    try {
-      console.log('📤 Syncing canvas to server...');
-      
-      const canvas = fabricCanvasRef.current;
-      const canvasState = canvas.toJSON();
-      
-      // Add metadata
-      canvasState.sessionId = sessionId;
-      canvasState.allowViewersToDraw = allowViewersToDraw;
-      canvasState.lastUpdated = new Date().toISOString();
-      canvasState.updatedBy = user?.id || 'anonymous';
-      
-      console.log('📦 Canvas state prepared:', {
-        objects: canvasState.objects?.length || 0,
-        sessionId: canvasState.sessionId,
-        lastUpdated: canvasState.lastUpdated
-      });
-      
-      // Send canvas update
-      ws.send(JSON.stringify({
-        type: 'canvas-update',
-        data: canvasState
-      }));
-      
-      console.log('✅ Canvas synced to server');
-      addConnectionLog('Canvas synced');
-      
-    } catch (error) {
-      console.error('❌ Error syncing canvas:', error);
-      addConnectionLog(`Sync error: ${error.message}`);
-    }
-  }, [ws, sessionId, allowViewersToDraw, user]);
-
-  // ✅ Send cursor position
-  const sendCursorPosition = useCallback((position) => {
-    console.log('📍 sendCursorPosition called:', position);
-    
-    if (!ws) {
-      console.error('❌ Cannot send cursor: WebSocket is null');
-      return;
-    }
-    
-    if (ws.readyState !== WebSocket.OPEN) {
-      console.error(`❌ Cannot send cursor: WebSocket state is ${ws.readyState}`);
-      return;
-    }
-    
-    console.log('📤 Sending cursor position:', position);
-    ws.send(JSON.stringify({
-      type: 'cursor-move',
-      position: position
-    }));
-  }, [ws]);
-
-  // ✅ Send tool change
-  const sendToolChange = useCallback((toolName) => {
-    console.log('🛠️ sendToolChange called:', toolName);
-    
-    if (!ws) {
-      console.error('❌ Cannot send tool change: WebSocket is null');
-      return;
-    }
-    
-    if (ws.readyState !== WebSocket.OPEN) {
-      console.error(`❌ Cannot send tool change: WebSocket state is ${ws.readyState}`);
-      return;
-    }
-    
-    console.log('📤 Sending tool change:', toolName);
-    ws.send(JSON.stringify({
-      type: 'tool-change',
-      tool: toolName
-    }));
-  }, [ws]);
-
-  // ✅ Initialize Canvas
-  const initCanvas = useCallback(() => {
-    console.log('🎨 initCanvas callback called');
-    addConnectionLog('Initializing canvas...');
-    
-    if (!containerRef.current) {
-      console.log('❌ Container not ready, retrying...');
-      console.log('📦 containerRef.current:', containerRef.current);
-      addConnectionLog('Container not ready, retrying...');
-      setTimeout(() => {
-        console.log('🔄 Retrying initCanvas...');
-        initCanvas();
-      }, 500);
-      return;
-    }
-    
-    console.log('✅ Container ready');
-    console.log('📦 Container dimensions:', {
-      width: containerRef.current.clientWidth,
-      height: containerRef.current.clientHeight
-    });
-    addConnectionLog('Container ready');
-    
-    // Clean up existing canvas
-    if (fabricCanvasRef.current) {
-      console.log('🧹 Cleaning up existing canvas');
-      fabricCanvasRef.current.dispose();
-      fabricCanvasRef.current = null;
-      console.log('✅ Old canvas disposed');
-    }
-    
-    // Create new canvas
-    console.log('🆕 Creating new fabric canvas...');
-    const canvas = new fabric.Canvas(canvasRef.current, {
-      width: containerRef.current.clientWidth,
-      height: containerRef.current.clientHeight,
-      backgroundColor: '#ffffff',
-      selection: true,
-      preserveObjectStacking: true,
-    });
-    
-    fabricCanvasRef.current = canvas;
-    console.log('✅ Fabric canvas created');
-    console.log('🎨 Canvas properties:', {
-      width: canvas.width,
-      height: canvas.height,
-      backgroundColor: canvas.backgroundColor
-    });
-    addConnectionLog('Fabric canvas created');
-    
-    // Setup drawing based on permissions
-    canvas.isDrawingMode = false;
-    console.log('🎨 Drawing mode initially:', canvas.isDrawingMode);
-    
-    if (permissions.canDraw) {
-      console.log('🖊️ Setting up drawing tools (permissions.canDraw = true)');
-      canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
-      canvas.freeDrawingBrush.width = brushWidth;
-      canvas.freeDrawingBrush.color = brushColor;
-      console.log('🖊️ Brush configured:', {
-        width: canvas.freeDrawingBrush.width,
-        color: canvas.freeDrawingBrush.color
-      });
-    } else {
-      console.log('🚫 Drawing disabled (permissions.canDraw = false)');
-    }
-    
-    // Event Listeners
-    console.log('🎯 Setting up canvas event listeners...');
-    
-    canvas.on('mouse:move', (e) => {
-      if (!e.absolutePointer) {
-        console.log('❌ mouse:move - No absolutePointer');
-        return;
-      }
-      
-      const pos = {
-        x: Math.round(e.absolutePointer.x),
-        y: Math.round(e.absolutePointer.y)
-      };
-      
-      console.log('🖱️ Mouse move:', pos);
-      setCursorPosition(pos);
-      sendCursorPosition(pos);
-    });
-    
-    canvas.on('object:added', (e) => {
-      if (e.target) {
-        console.log('➕ Object added:', e.target.type);
-        console.log('📦 Object details:', {
-          id: e.target.id,
-          type: e.target.type,
-          left: e.target.left,
-          top: e.target.top
-        });
-        
-        // Generate ID if not exists
-        if (!e.target.id) {
-          e.target.id = `obj_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-          console.log('🆔 Generated object ID:', e.target.id);
-        }
-        
-        // Save state
-        saveState();
-        
-        // Sync to server if we have permission
-        if (permissions.canDraw) {
-          console.log('📤 Scheduling canvas sync...');
-          setTimeout(() => {
-            syncCanvasToServer();
-          }, 100);
-        }
-      }
-    });
-    
-    canvas.on('object:modified', (e) => {
-      if (e.target) {
-        console.log('✏️ Object modified:', e.target.type);
-        console.log('📦 Object ID:', e.target.id);
-        
-        setTimeout(() => {
-          saveState();
-          if (permissions.canEdit) {
-            console.log('📤 Syncing modified object...');
-            syncCanvasToServer();
-          }
-        }, 100);
-      }
-    });
-    
-    canvas.on('object:removed', (e) => {
-      if (e.target) {
-        console.log('➖ Object removed:', e.target.type);
-        console.log('📦 Object ID:', e.target.id);
-        
-        setTimeout(() => {
-          saveState();
-          if (permissions.canDelete) {
-            console.log('📤 Syncing after removal...');
-            syncCanvasToServer();
-          }
-        }, 100);
-      }
-    });
-    
-    // Handle drawing events
-    canvas.on('path:created', (e) => {
-      console.log('🖊️ Path created');
-      
-      setTimeout(() => {
-        saveState();
-        if (permissions.canDraw) {
-          console.log('📤 Syncing drawn path...');
-          syncCanvasToServer();
-        }
-      }, 100);
-    });
-    
-    // Window resize handler
-    const handleResize = () => {
-      console.log('🔄 Window resize detected');
-      
-      if (containerRef.current && canvas) {
-        console.log('📏 New container dimensions:', {
-          width: containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight
-        });
-        
-        canvas.setDimensions({
-          width: containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight
-        });
-        canvas.renderAll();
-        console.log('✅ Canvas resized');
-      }
-    };
-    
-    window.addEventListener('resize', handleResize);
-    console.log('🎯 Window resize listener added');
-    
-    // Initial save
-    saveState();
-    
-    console.log('✅ Canvas initialization complete');
-    addConnectionLog('Canvas initialization complete');
-    
-    return () => {
-      console.log('🧹 Cleaning up canvas event listeners');
-      window.removeEventListener('resize', handleResize);
-    };
-  }, [permissions, brushWidth, brushColor, syncCanvasToServer, sendCursorPosition]);
-
-  // ✅ Save State for Undo/Redo
-  const saveState = () => {
-    console.log('💾 saveState called');
-    
-    if (!fabricCanvasRef.current) {
-      console.error('❌ Cannot save state: fabricCanvasRef.current is null');
-      return;
-    }
-    
-    const state = fabricCanvasRef.current.toJSON();
-    const newHistory = [...history.slice(0, historyIndex + 1), state];
-    
-    console.log('📜 History update:', {
-      oldLength: history.length,
-      newLength: newHistory.length,
-      oldIndex: historyIndex,
-      newIndex: newHistory.length - 1
-    });
-    
-    setHistory(newHistory);
-    setHistoryIndex(newHistory.length - 1);
-    console.log('✅ State saved');
-  };
-
-  // ✅ Undo
-  const handleUndo = () => {
-    console.log('↩️ handleUndo called');
-    console.log('📜 Current history:', {
-      length: history.length,
-      index: historyIndex
-    });
-    
-    if (historyIndex > 0 && permissions.canEdit) {
-      const newIndex = historyIndex - 1;
-      console.log('📜 New history index:', newIndex);
-      
-      setHistoryIndex(newIndex);
-      
-      console.log('🔄 Loading previous state...');
-      fabricCanvasRef.current.loadFromJSON(history[newIndex], () => {
-        fabricCanvasRef.current.renderAll();
-        console.log('✅ Undo applied');
-        syncCanvasToServer();
-      });
-    } else {
-      console.log('🚫 Cannot undo:', {
-        canEdit: permissions.canEdit,
-        historyIndex,
-        historyLength: history.length
-      });
-    }
-  };
-
-  // ✅ Redo
-  const handleRedo = () => {
-    console.log('↪️ handleRedo called');
-    console.log('📜 Current history:', {
-      length: history.length,
-      index: historyIndex
-    });
-    
-    if (historyIndex < history.length - 1 && permissions.canEdit) {
-      const newIndex = historyIndex + 1;
-      console.log('📜 New history index:', newIndex);
-      
-      setHistoryIndex(newIndex);
-      
-      console.log('🔄 Loading next state...');
-      fabricCanvasRef.current.loadFromJSON(history[newIndex], () => {
-        fabricCanvasRef.current.renderAll();
-        console.log('✅ Redo applied');
-        syncCanvasToServer();
-      });
-    } else {
-      console.log('🚫 Cannot redo:', {
-        canEdit: permissions.canEdit,
-        historyIndex,
-        historyLength: history.length
-      });
-    }
-  };
-
-  // ✅ Tool Handlers with Permission Check
-  const handleToolSelect = (selectedTool) => {
-    console.log('🛠️ handleToolSelect called:', selectedTool);
-    console.log('🔐 Current permissions:', permissions);
-    
-    // Check permissions
-    if ((selectedTool === 'draw' || selectedTool === 'eraser') && !permissions.canDraw) {
-      console.log('🚫 No permission to draw/erase');
-      console.log('🚫 Permission check failed: permissions.canDraw =', permissions.canDraw);
-      addConnectionLog('No permission to draw');
-      return;
-    }
-    
-    console.log('✅ Tool permission check passed');
-    setTool(selectedTool);
-    console.log('🔄 Tool state updated to:', selectedTool);
-    
-    sendToolChange(selectedTool);
-    
-    const canvas = fabricCanvasRef.current;
-    if (!canvas) {
-      console.error('❌ Canvas not available for tool change');
-      return;
-    }
-    
-    console.log('🔄 Switching to tool:', selectedTool);
-    
-    switch (selectedTool) {
-      case 'select':
-        console.log('🎯 Switching to select tool');
-        canvas.isDrawingMode = false;
-        canvas.selection = true;
-        break;
-      case 'draw':
-        if (permissions.canDraw) {
-          console.log('🖊️ Switching to draw tool');
-          canvas.isDrawingMode = true;
-          canvas.freeDrawingBrush.width = brushWidth;
-          canvas.freeDrawingBrush.color = brushColor;
-          console.log('🖊️ Brush settings:', {
-            width: canvas.freeDrawingBrush.width,
-            color: canvas.freeDrawingBrush.color
-          });
-        }
-        break;
-      case 'rectangle':
-        if (permissions.canDraw) {
-          console.log('⬜ Adding rectangle');
-          addRectangle();
-        }
-        break;
-      case 'circle':
-        if (permissions.canDraw) {
-          console.log('⭕ Adding circle');
-          addCircle();
-        }
-        break;
-      case 'triangle':
-        if (permissions.canDraw) {
-          console.log('🔺 Adding triangle');
-          addTriangle();
-        }
-        break;
-      case 'text':
-        if (permissions.canDraw) {
-          console.log('🔤 Adding text');
-          addText();
-        }
-        break;
-      case 'sticky':
-        if (permissions.canDraw) {
-          console.log('📝 Adding sticky note');
-          addStickyNote();
-        }
-        break;
-      case 'image':
-        if (permissions.canDraw) {
-          console.log('🖼️ Uploading image');
-          uploadImage();
-        }
-        break;
-      case 'eraser':
-        if (permissions.canDelete) {
-          console.log('🧹 Activating eraser');
-          activateEraser();
-        }
-        break;
-      case 'line':
-        if (permissions.canDraw) {
-          console.log('📏 Drawing line');
-          startDrawingLine();
-        }
-        break;
-      case 'arrow':
-        if (permissions.canDraw) {
-          console.log('➡️ Drawing arrow');
-          startDrawingArrow();
-        }
-        break;
-      case 'star':
-        if (permissions.canDraw) {
-          console.log('⭐ Adding star');
-          addStar();
-        }
-        break;
-      case 'hexagon':
-        if (permissions.canDraw) {
-          console.log('⬢ Adding hexagon');
-          addHexagon();
-        }
-        break;
-    }
-  };
-
-  // Drawing Functions
-  const addRectangle = () => {
-    console.log('⬜ addRectangle called');
-    console.log('🎨 Drawing properties:', {
-      fillColor,
-      brushColor,
-      brushWidth,
-      opacity
-    });
-    
-    const rect = new fabric.Rect({
-      left: 100, top: 100, width: 100, height: 100,
-      fill: fillColor, stroke: brushColor, strokeWidth: brushWidth,
-      opacity: opacity, selectable: true
-    });
-    
-    console.log('📦 Rectangle created:', rect);
-    fabricCanvasRef.current.add(rect);
-    fabricCanvasRef.current.setActiveObject(rect);
-    setTool('select');
-    console.log('✅ Rectangle added, switching to select tool');
-  };
-
-  const addCircle = () => {
-    console.log('⭕ addCircle called');
-    
-    const circle = new fabric.Circle({
-      left: 100, top: 100, radius: 50,
-      fill: fillColor, stroke: brushColor, strokeWidth: brushWidth,
-      opacity: opacity, selectable: true
-    });
-    
-    console.log('📦 Circle created:', circle);
-    fabricCanvasRef.current.add(circle);
-    fabricCanvasRef.current.setActiveObject(circle);
-    setTool('select');
-    console.log('✅ Circle added, switching to select tool');
-  };
-
-  const addTriangle = () => {
-    console.log('🔺 addTriangle called');
-    
-    const triangle = new fabric.Triangle({
-      left: 100, top: 100, width: 100, height: 100,
-      fill: fillColor, stroke: brushColor, strokeWidth: brushWidth,
-      opacity: opacity, selectable: true
-    });
-    
-    console.log('📦 Triangle created:', triangle);
-    fabricCanvasRef.current.add(triangle);
-    fabricCanvasRef.current.setActiveObject(triangle);
-    setTool('select');
-    console.log('✅ Triangle added, switching to select tool');
-  };
-
-  const addStar = () => {
-    console.log('⭐ addStar called');
-    
-    const star = new fabric.Path('M 100 10 L 123 80 L 200 80 L 138 120 L 160 190 L 100 145 L 40 190 L 62 120 L 0 80 L 77 80 Z', {
-      left: 100, top: 100,
-      fill: fillColor, stroke: brushColor, strokeWidth: brushWidth,
-      opacity: opacity, selectable: true
-    });
-    
-    console.log('📦 Star created:', star);
-    fabricCanvasRef.current.add(star);
-    fabricCanvasRef.current.setActiveObject(star);
-    setTool('select');
-    console.log('✅ Star added, switching to select tool');
-  };
-
-  const addHexagon = () => {
-    console.log('⬢ addHexagon called');
-    
-    const hexagon = new fabric.Polygon([
-      { x: 50, y: 0 }, { x: 100, y: 25 }, { x: 100, y: 75 },
-      { x: 50, y: 100 }, { x: 0, y: 75 }, { x: 0, y: 25 }
-    ], {
-      left: 100, top: 100,
-      fill: fillColor, stroke: brushColor, strokeWidth: brushWidth,
-      opacity: opacity, selectable: true
-    });
-    
-    console.log('📦 Hexagon created:', hexagon);
-    fabricCanvasRef.current.add(hexagon);
-    fabricCanvasRef.current.setActiveObject(hexagon);
-    setTool('select');
-    console.log('✅ Hexagon added, switching to select tool');
-  };
-
-  const addText = () => {
-    console.log('🔤 addText called');
-    console.log('🔤 Text properties:', {
-      fontSize,
-      fontFamily,
-      brushColor
-    });
-    
-    const text = new fabric.IText('Double click to edit', {
-      left: 100, top: 100,
-      fontSize: fontSize, fontFamily: fontFamily,
-      fill: brushColor, selectable: true
-    });
-    
-    console.log('📦 Text created:', text);
-    fabricCanvasRef.current.add(text);
-    fabricCanvasRef.current.setActiveObject(text);
-    setTool('select');
-    console.log('✅ Text added, switching to select tool');
-  };
-
-  const addStickyNote = () => {
-    console.log('📝 addStickyNote called');
-    console.log('🎨 Sticky note color:', stickyNoteColor);
-    
-    const stickyNote = new fabric.Rect({
-      left: 100, top: 100, width: 200, height: 150,
-      fill: stickyNoteColor, stroke: '#d4d4d4', strokeWidth: 1,
-      opacity: 0.9, shadow: 'rgba(0,0,0,0.2) 2px 2px 5px',
-      selectable: true
-    });
-    
-    const text = new fabric.IText('Double click to edit note', {
-      left: 110, top: 110,
-      fontSize: 16, fontFamily: 'Arial',
-      fill: '#000000', selectable: true
-    });
-    
-    const group = new fabric.Group([stickyNote, text], {
-      selectable: true
-    });
-    
-    console.log('📦 Sticky note group created:', group);
-    fabricCanvasRef.current.add(group);
-    fabricCanvasRef.current.setActiveObject(group);
-    setTool('select');
-    console.log('✅ Sticky note added, switching to select tool');
-  };
-
-  const startDrawingLine = () => {
-    console.log('📏 startDrawingLine called');
-    
-    const canvas = fabricCanvasRef.current;
-    let isDrawing = false;
-    let line = null;
-    
-    console.log('🎨 Line properties:', {
-      brushColor,
-      brushWidth
-    });
-    
-    const mouseDown = (options) => {
-      console.log('🖱️ Line: Mouse down');
-      isDrawing = true;
-      const pointer = canvas.getPointer(options.e);
-      console.log('📍 Start point:', pointer);
-      
-      line = new fabric.Line([pointer.x, pointer.y, pointer.x, pointer.y], {
-        stroke: brushColor, strokeWidth: brushWidth, selectable: true
-      });
-      canvas.add(line);
-      console.log('📦 Line created and added');
-    };
-    
-    const mouseMove = (options) => {
-      if (!isDrawing || !line) return;
-      
-      const pointer = canvas.getPointer(options.e);
-      line.set({ x2: pointer.x, y2: pointer.y });
-      canvas.renderAll();
-      console.log('🔄 Line updated to:', { x2: pointer.x, y2: pointer.y });
-    };
-    
-    const mouseUp = () => {
-      console.log('🖱️ Line: Mouse up');
-      isDrawing = false;
-      canvas.off('mouse:down', mouseDown);
-      canvas.off('mouse:move', mouseMove);
-      canvas.off('mouse:up', mouseUp);
-      setTool('select');
-      console.log('✅ Line drawing complete, switching to select tool');
-    };
-    
-    canvas.on('mouse:down', mouseDown);
-    canvas.on('mouse:move', mouseMove);
-    canvas.on('mouse:up', mouseUp);
-    
-    console.log('🎯 Line drawing listeners attached');
-  };
-
-  const startDrawingArrow = () => {
-    console.log('➡️ startDrawingArrow called');
-    
-    const canvas = fabricCanvasRef.current;
-    let isDrawing = false;
-    let line = null;
-    let arrowHead = null;
-    
-    console.log('🎨 Arrow properties:', {
-      brushColor,
-      brushWidth
-    });
-    
-    const mouseDown = (options) => {
-      console.log('🖱️ Arrow: Mouse down');
-      isDrawing = true;
-      const pointer = canvas.getPointer(options.e);
-      console.log('📍 Start point:', pointer);
-      
-      line = new fabric.Line([pointer.x, pointer.y, pointer.x, pointer.y], {
-        stroke: brushColor, strokeWidth: brushWidth, selectable: true
-      });
-      arrowHead = new fabric.Triangle({
-        width: 15, height: 15, fill: brushColor,
-        left: pointer.x, top: pointer.y, angle: 0,
-        selectable: false
-      });
-      canvas.add(line);
-      canvas.add(arrowHead);
-      console.log('📦 Arrow line and head created');
-    };
-    
-    const mouseMove = (options) => {
-      if (!isDrawing || !line || !arrowHead) return;
-      
-      const pointer = canvas.getPointer(options.e);
-      line.set({ x2: pointer.x, y2: pointer.y });
-      
-      const dx = pointer.x - line.x1;
-      const dy = pointer.y - line.y1;
-      const angle = Math.atan2(dy, dx) * 180 / Math.PI;
-      
-      arrowHead.set({
-        left: pointer.x, top: pointer.y, angle: angle
-      });
-      
-      canvas.renderAll();
-      console.log('🔄 Arrow updated:', { x2: pointer.x, y2: pointer.y, angle });
-    };
-    
-    const mouseUp = () => {
-      console.log('🖱️ Arrow: Mouse up');
-      isDrawing = false;
-      if (line && arrowHead) {
-        const group = new fabric.Group([line, arrowHead], {
-          selectable: true
-        });
-        canvas.remove(line);
-        canvas.remove(arrowHead);
-        canvas.add(group);
-        console.log('📦 Arrow grouped');
-      }
-      canvas.off('mouse:down', mouseDown);
-      canvas.off('mouse:move', mouseMove);
-      canvas.off('mouse:up', mouseUp);
-      setTool('select');
-      console.log('✅ Arrow drawing complete, switching to select tool');
-    };
-    
-    canvas.on('mouse:down', mouseDown);
-    canvas.on('mouse:move', mouseMove);
-    canvas.on('mouse:up', mouseUp);
-    
-    console.log('🎯 Arrow drawing listeners attached');
-  };
-
-  const uploadImage = () => {
-    console.log('🖼️ uploadImage called');
-    
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/*';
-    console.log('📁 File input created');
-    
-    input.onchange = (e) => {
-      console.log('📁 File selected');
-      const file = e.target.files[0];
-      if (!file) {
-        console.log('❌ No file selected');
-        return;
-      }
-      
-      console.log('📦 File info:', {
-        name: file.name,
-        type: file.type,
-        size: file.size
-      });
-      
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        console.log('📸 File read successfully');
-        fabric.Image.fromURL(event.target.result, (img) => {
-          img.set({
-            left: 100, top: 100,
-            scaleX: 0.5, scaleY: 0.5,
-            selectable: true
-          });
-          console.log('🖼️ Image loaded to fabric:', img);
-          fabricCanvasRef.current.add(img);
-          fabricCanvasRef.current.setActiveObject(img);
-          setTool('select');
-          console.log('✅ Image added, switching to select tool');
-        });
-      };
-      reader.readAsDataURL(file);
-    };
-    
-    input.click();
-    console.log('📁 File dialog opened');
-  };
-
-  const activateEraser = () => {
-    console.log('🧹 activateEraser called');
-    
-    const canvas = fabricCanvasRef.current;
-    canvas.isDrawingMode = false;
-    canvas.selection = false;
-    console.log('🎨 Drawing mode disabled, selection disabled');
-    
-    const mouseDown = (options) => {
-      console.log('🖱️ Eraser: Mouse down');
-      const pointer = canvas.getPointer(options.e);
-      console.log('📍 Eraser position:', pointer);
-      
-      const objects = canvas.getObjects();
-      console.log('📦 Total objects:', objects.length);
-      
-      let removedCount = 0;
-      objects.forEach(obj => {
-        if (obj.containsPoint(pointer)) {
-          canvas.remove(obj);
-          removedCount++;
-          console.log('🗑️ Object removed:', obj.type);
-        }
-      });
-      
-      canvas.renderAll();
-      console.log(`✅ Removed ${removedCount} objects`);
-    };
-    
-    canvas.on('mouse:down', mouseDown);
-    console.log('🎯 Eraser listener attached');
-    
-    setTimeout(() => {
-      console.log('⏰ Eraser timeout reached (5 seconds)');
-      canvas.off('mouse:down', mouseDown);
-      setTool('select');
-      console.log('✅ Eraser deactivated, switching to select tool');
-    }, 5000);
-  };
-
-  // Export Functions
-  const exportAsImage = () => {
-    console.log('📸 exportAsImage called');
-    
-    if (!fabricCanvasRef.current) {
-      console.error('❌ Cannot export: fabricCanvasRef.current is null');
-      return;
-    }
-    
-    console.log('📸 Generating PNG data URL...');
-    const dataURL = fabricCanvasRef.current.toDataURL({
-      format: 'png', quality: 1, multiplier: 2
-    });
-    
-    const fileName = `whiteboard-${sessionInfo?.title || 'session'}-${new Date().toISOString().slice(0, 10)}.png`;
-    console.log('📁 File name:', fileName);
-    
-    const link = document.createElement('a');
-    link.href = dataURL;
-    link.download = fileName;
-    link.click();
-    
-    console.log('✅ PNG export initiated');
-  };
-
-  const exportAsJSON = () => {
-    console.log('📄 exportAsJSON called');
-    
-    if (!fabricCanvasRef.current) {
-      console.error('❌ Cannot export: fabricCanvasRef.current is null');
-      return;
-    }
-    
-    console.log('📄 Generating JSON...');
-    const json = fabricCanvasRef.current.toJSON();
-    const dataStr = JSON.stringify(json);
-    const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-    
-    const fileName = `whiteboard-${sessionInfo?.title || 'session'}-${new Date().toISOString().slice(0, 10)}.json`;
-    console.log('📁 File name:', fileName);
-    
-    const link = document.createElement('a');
-    link.href = dataUri;
-    link.download = fileName;
-    link.click();
-    
-    console.log('✅ JSON export initiated');
-  };
-
-  const importFromJSON = () => {
-    console.log('📥 importFromJSON called');
-    console.log('🔐 Permission check:', {
-      canEdit: permissions.canEdit,
-      canImport: permissions.canImport
-    });
-    
-    if (!permissions.canEdit) {
-      console.log('🚫 No permission to import');
-      return;
-    }
-    
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.json';
-    console.log('📁 JSON file input created');
-    
-    input.onchange = (e) => {
-      console.log('📁 JSON file selected');
-      const file = e.target.files[0];
-      if (!file) {
-        console.log('❌ No file selected');
-        return;
-      }
-      
-      console.log('📦 JSON file info:', {
-        name: file.name,
-        size: file.size
-      });
-      
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        console.log('📄 JSON file read');
-        try {
-          const json = JSON.parse(event.target.result);
-          console.log('✅ JSON parsed, loading to canvas...');
-          
-          fabricCanvasRef.current.loadFromJSON(json, () => {
-            console.log('✅ JSON loaded to canvas');
-            fabricCanvasRef.current.renderAll();
-            saveState();
-            syncCanvasToServer();
-          });
-        } catch (error) {
-          console.error('❌ Error loading JSON:', error);
-        }
-      };
-      reader.readAsText(file);
-    };
-    
-    input.click();
-    console.log('📁 JSON file dialog opened');
-  };
-
-  // Clear Canvas with Permission Check
-  const handleClear = () => {
-    console.log('🗑️ handleClear called');
-    console.log('🔐 Permission check:', {
-      canClear: permissions.canClear
-    });
-    
-    if (!permissions.canClear) {
-      console.log('🚫 No permission to clear canvas');
-      return;
-    }
-    
-    if (window.confirm('Are you sure you want to clear the whiteboard? Other users will also see this change.')) {
-      console.log('✅ User confirmed clear');
-      
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        console.log('📤 Sending clear-canvas message to server');
-        ws.send(JSON.stringify({
-          type: 'clear-canvas'
-        }));
-      }
-      
-      console.log('🧹 Clearing fabric canvas...');
-      fabricCanvasRef.current.clear();
-      fabricCanvasRef.current.backgroundColor = '#ffffff';
-      saveState();
-      console.log('✅ Canvas cleared');
-    } else {
-      console.log('❌ User cancelled clear');
-    }
-  };
-
-  // Zoom Functions
-  const handleZoomIn = () => {
-    console.log('🔍 handleZoomIn called');
-    const newZoom = Math.min(zoom * 1.2, 5);
-    console.log('🔍 Zoom change:', { old: zoom, new: newZoom });
-    setZoom(newZoom);
-    
-    if (fabricCanvasRef.current) {
-      fabricCanvasRef.current.setZoom(newZoom);
-      fabricCanvasRef.current.renderAll();
-      console.log('✅ Zoom applied');
-    }
-  };
-
-  const handleZoomOut = () => {
-    console.log('🔍 handleZoomOut called');
-    const newZoom = Math.max(zoom / 1.2, 0.2);
-    console.log('🔍 Zoom change:', { old: zoom, new: newZoom });
-    setZoom(newZoom);
-    
-    if (fabricCanvasRef.current) {
-      fabricCanvasRef.current.setZoom(newZoom);
-      fabricCanvasRef.current.renderAll();
-      console.log('✅ Zoom applied');
-    }
-  };
-
-  const handleZoomReset = () => {
-    console.log('🔍 handleZoomReset called');
-    setZoom(1);
-    console.log('🔍 Zoom reset to 1');
-    
-    if (fabricCanvasRef.current) {
-      fabricCanvasRef.current.setZoom(1);
-      fabricCanvasRef.current.setViewportTransform([1, 0, 0, 1, 0, 0]);
-      fabricCanvasRef.current.renderAll();
-      console.log('✅ Zoom reset');
-    }
-  };
-
-  // Force Reconnect
-  const forceReconnect = () => {
-    console.log('🔁 forceReconnect called');
-    console.log('🔌 Current WebSocket state:', ws ? ws.readyState : 'null');
-    addConnectionLog('Force reconnection initiated');
-    
-    if (ws) {
-      console.log('🔌 Closing existing WebSocket...');
-      ws.close();
-    }
-    
-    const newWs = connectWebSocket();
-    setWs(newWs);
-    console.log('✅ New WebSocket connection initiated');
-  };
-
-  // Check Permissions
-  const checkPermissions = () => {
-    console.log('🔐 checkPermissions called');
-    
-    if (ws) {
-      console.log('📡 WebSocket state:', ws.readyState);
-    } else {
-      console.log('❌ WebSocket is null');
-    }
-    
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      console.log('📤 Sending check-permissions message...');
-      ws.send(JSON.stringify({
-        type: 'check-permissions'
-      }));
-      console.log('✅ Permissions check sent');
-    }
-  };
-
-  // ✅ Main Effect - Component Mount/Unmount
-  useEffect(() => {
-    console.log('🎯 useEffect [isActive] triggered');
-    console.log('📋 Effect dependencies:', { isActive });
-    
-    if (isActive) {
-      console.log('🚀 Whiteboard ACTIVE - Starting initialization...');
-      addConnectionLog('Whiteboard activated');
-      
-      // Initialize WebSocket connection
-      console.log('🔌 Initializing WebSocket connection...');
-      const websocket = connectWebSocket();
-      setWs(websocket);
-      console.log('✅ WebSocket set in state');
-      
-      // Small delay to ensure DOM is ready
-      const timeoutId = setTimeout(() => {
-        console.log('⏰ Timeout reached, calling initCanvas...');
-        initCanvas();
-      }, 500);
-      
-      console.log('⏰ Timeout set for canvas initialization');
-      
-      return () => {
-        console.log('🧹 useEffect cleanup [isActive]');
-        console.log('⏰ Clearing initialization timeout...');
-        clearTimeout(timeoutId);
-      };
-    } else {
-      console.log('⏸️ Whiteboard INACTIVE - Skipping initialization');
-      addConnectionLog('Whiteboard deactivated');
-    }
-  }, [isActive, initCanvas, connectWebSocket]);
-
-  // ✅ Cleanup Effect
-  useEffect(() => {
-    console.log('🎯 Component mount effect - Setting up cleanup');
-    
-    return () => {
-      console.log('===================================================');
-      console.log('🧹 WhiteboardComponent UNMOUNTING - Cleanup');
-      console.log('===================================================');
-      addConnectionLog('Component unmounting');
-      
-      // Clean up WebSocket
-      if (ws) {
-        console.log('🔌 Closing WebSocket...');
-        console.log('📡 WebSocket readyState:', ws.readyState);
-        ws.close();
-        console.log('✅ WebSocket close called');
-      } else {
-        console.log('🔌 No WebSocket to close');
-      }
-      
-      // Clean up fabric canvas
-      if (fabricCanvasRef.current) {
-        console.log('🎨 Disposing fabric canvas...');
-        fabricCanvasRef.current.dispose();
-        fabricCanvasRef.current = null;
-        console.log('✅ Fabric canvas disposed');
-      } else {
-        console.log('🎨 No fabric canvas to dispose');
-      }
-      
-      console.log('✅ Cleanup complete');
-      console.log('===================================================');
-    };
-  }, [ws]);
-
-  // Render remote cursors
-  useEffect(() => {
-    console.log('🎯 useEffect [cursorPositions] triggered');
-    console.log('📍 cursorPositions:', cursorPositions);
-    
-    if (!fabricCanvasRef.current || Object.keys(cursorPositions).length === 0) {
-      console.log('❌ Cannot render cursors:', {
-        hasCanvas: !!fabricCanvasRef.current,
-        cursorCount: Object.keys(cursorPositions).length
-      });
-      return;
-    }
-    
-    console.log(`🎨 Rendering ${Object.keys(cursorPositions).length} remote cursors`);
-    
-    const canvas = fabricCanvasRef.current;
-    const ctx = canvas.getContext();
-    
-    // Clear previous cursor drawings
-    canvas.renderAll();
-    
-    // Draw remote cursors
-    Object.entries(cursorPositions).forEach(([userId, data]) => {
-      const { x, y, userName } = data;
-      console.log(`📍 Drawing cursor for ${userName} at (${x}, ${y})`);
-      
-      // Draw cursor
-      ctx.save();
-      ctx.strokeStyle = '#FF0000';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(x - 10, y);
-      ctx.lineTo(x + 10, y);
-      ctx.moveTo(x, y - 10);
-      ctx.lineTo(x, y + 10);
-      ctx.stroke();
-      
-      // Draw username
-      ctx.fillStyle = '#FF0000';
-      ctx.font = '12px Arial';
-      ctx.fillText(userName, x + 15, y + 5);
-      ctx.restore();
-    });
-    
-    console.log('✅ Remote cursors rendered');
-  }, [cursorPositions]);
-
-  console.log('🎨 Whiteboard render function executing');
-  
-  if (!isActive) {
-    console.log('⏸️ Whiteboard not active, returning null');
-    return null;
-  }
-
-  if (isLoading) {
-    console.log('⏳ Rendering loading state');
-    return (
-      <div className="fixed inset-0 bg-gray-900 z-50 flex items-center justify-center">
-        <div className="text-white text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4"></div>
-          <div>Connecting to whiteboard...</div>
-          <div className="text-sm text-gray-400 mt-2">
-            Session: {sessionId} | Room: {roomCode}
-          </div>
-          <div className="text-xs text-gray-500 mt-1">
-            {connectionStatus === 'connecting' ? 'Establishing connection...' : 
-             connectionStatus === 'connected' ? 'Loading canvas...' : 
-             'Waiting for connection...'}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  console.log('🎨 Rendering Whiteboard UI');
-  console.log('📊 Current state:', {
-    connectionStatus,
-    activeUsers: activeUsers.length,
-    permissions,
-    tool
-  });
-  
-  return (
-    <div className="fixed inset-0 bg-gray-900 z-50 flex flex-col">
-      {/* Header */}
-      <div className="bg-gray-800 border-b border-gray-700 p-4 flex justify-between items-center">
-        <div className="flex items-center space-x-4">
-          <h2 className="text-xl font-bold text-white flex items-center">
-            <FiEdit3 className="mr-2" />
-            {sessionInfo?.title || 'Collaborative Whiteboard'}
-          </h2>
-          
-          <div className="flex items-center space-x-2">
-            <div className={`w-3 h-3 rounded-full ${
-              connectionStatus === 'connected' ? 'bg-green-500 animate-pulse' : 
-              connectionStatus === 'connecting' ? 'bg-yellow-500' : 'bg-red-500'
-            }`} />
-            <span className="text-sm text-gray-300">
-              {connectionStatus === 'connected' ? 'Connected' : 
-               connectionStatus === 'connecting' ? 'Connecting...' : 
-               'Disconnected'}
-            </span>
-            
-            <span className="text-xs bg-gray-700 px-2 py-1 rounded">
-              {isStreamer ? '🎤 Streamer' : '👀 Viewer'}
-            </span>
-            
-            {!permissions.canDraw && (
-              <span className="text-xs bg-yellow-800 px-2 py-1 rounded flex items-center">
-                <FiLock className="mr-1" size={10} /> View Only
-              </span>
-            )}
-          </div>
-        </div>
-        
-        <div className="flex items-center space-x-2">
-          {/* Active Users */}
-          <div className="flex items-center space-x-1 text-sm text-gray-300">
-            <FiUsers />
-            <span>{activeUsers.length + 1} online</span>
-          </div>
-          
-          {/* Debug Buttons */}
-          {showDebug && (
-            <button
-              onClick={forceReconnect}
-              className="px-3 py-2 bg-yellow-600 hover:bg-yellow-700 rounded-lg text-white text-sm"
-            >
-              🔁 Reconnect
-            </button>
-          )}
-          
-          <button
-            onClick={() => setShowDebug(!showDebug)}
-            className="px-3 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg text-white text-sm"
-          >
-            {showDebug ? 'Hide Debug' : 'Debug'}
-          </button>
-          
-          <button
-            onClick={checkPermissions}
-            className="px-3 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-white text-sm"
-            title="Check Permissions"
-          >
-            <FiRefreshCw />
-          </button>
-          
-          <button
-            onClick={handleZoomReset}
-            className="p-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-white"
-            title="Reset Zoom"
-          >
-            <FiMaximize2 />
-          </button>
-          
-          <button
-            onClick={onClose}
-            className="p-2 bg-red-600 hover:bg-red-700 rounded-lg text-white"
-            title="Close Whiteboard"
-          >
-            <FiX />
-          </button>
-        </div>
-      </div>
-
-      {/* Main Area */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Tools Sidebar */}
-        <div className="w-16 bg-gray-800 border-r border-gray-700 flex flex-col items-center py-4 space-y-4">
-          {tools.map((toolItem) => (
-            <button
-              key={toolItem.id}
-              onClick={() => handleToolSelect(toolItem.id)}
-              className={`p-3 rounded-xl transition-all duration-200 ${
-                tool === toolItem.id 
-                  ? 'bg-blue-600 text-white shadow-lg' 
-                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600 hover:text-white'
-              } ${
-                ((toolItem.id === 'draw' || toolItem.id === 'eraser') && !permissions.canDraw) ||
-                (toolItem.id === 'eraser' && !permissions.canDelete) ||
-                (['rectangle', 'circle', 'triangle', 'text', 'sticky', 'image', 'line', 'arrow', 'star', 'hexagon'].includes(toolItem.id) && !permissions.canDraw)
-                  ? 'opacity-50 cursor-not-allowed'
-                  : ''
-              }`}
-              title={toolItem.name}
-              disabled={
-                ((toolItem.id === 'draw' || toolItem.id === 'eraser') && !permissions.canDraw) ||
-                (toolItem.id === 'eraser' && !permissions.canDelete) ||
-                (['rectangle', 'circle', 'triangle', 'text', 'sticky', 'image', 'line', 'arrow', 'star', 'hexagon'].includes(toolItem.id) && !permissions.canDraw)
-              }
-            >
-              {toolItem.icon}
-            </button>
-          ))}
-        </div>
-
-        {/* Properties Sidebar */}
-        <div className="w-64 bg-gray-800 border-r border-gray-700 p-4 overflow-y-auto">
-          <div className="space-y-6">
-            <div>
-              <h3 className="text-sm font-semibold text-gray-300 mb-2 flex items-center">
-                <BsBrush className="mr-2" />
-                Brush Properties
-                {!permissions.canDraw && (
-                  <FiLock className="ml-auto" size={12} />
-                )}
-              </h3>
-              
-              <div className="space-y-3">
-                <div>
-                  <label className="text-xs text-gray-400">Width</label>
-                  <div className="flex flex-wrap gap-1 mt-1">
-                    {brushSizes.map((size) => (
-                      <button
-                        key={size}
-                        onClick={() => setBrushWidth(size)}
-                        className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                          brushWidth === size 
-                            ? 'bg-blue-600 text-white' 
-                            : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                        } ${!permissions.canDraw ? 'opacity-50 cursor-not-allowed' : ''}`}
-                        disabled={!permissions.canDraw}
-                      >
-                        {size}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <label className="text-xs text-gray-400">Stroke Color</label>
-                  <div className="grid grid-cols-7 gap-1 mt-1">
-                    {colors.map((color) => (
-                      <button
-                        key={color}
-                        onClick={() => setBrushColor(color)}
-                        className={`w-6 h-6 rounded-full border-2 ${
-                          brushColor === color ? 'border-white' : 'border-gray-700'
-                        } ${!permissions.canDraw ? 'opacity-50' : ''}`}
-                        style={{ backgroundColor: color }}
-                        disabled={!permissions.canDraw}
-                      />
-                    ))}
-                  </div>
-                  <input
-                    type="color"
-                    value={brushColor}
-                    onChange={(e) => setBrushColor(e.target.value)}
-                    className={`w-full mt-2 bg-gray-700 border border-gray-600 rounded ${!permissions.canDraw ? 'opacity-50 cursor-not-allowed' : ''}`}
-                    disabled={!permissions.canDraw}
-                  />
-                </div>
-
-                <div>
-                  <label className="text-xs text-gray-400">Fill Color</label>
-                  <div className="grid grid-cols-7 gap-1 mt-1">
-                    {colors.map((color) => (
-                      <button
-                        key={color}
-                        onClick={() => setFillColor(color)}
-                        className={`w-6 h-6 rounded-full border-2 ${
-                          fillColor === color ? 'border-white' : 'border-gray-700'
-                        } ${!permissions.canDraw ? 'opacity-50' : ''}`}
-                        style={{ backgroundColor: color }}
-                        disabled={!permissions.canDraw}
-                      />
-                    ))}
-                  </div>
-                  <input
-                    type="color"
-                    value={fillColor}
-                    onChange={(e) => setFillColor(e.target.value)}
-                    className={`w-full mt-2 bg-gray-700 border border-gray-600 rounded ${!permissions.canDraw ? 'opacity-50 cursor-not-allowed' : ''}`}
-                    disabled={!permissions.canDraw}
-                  />
-                </div>
-
-                <div>
-                  <label className="text-xs text-gray-400">
-                    Opacity: {Math.round(opacity * 100)}%
-                  </label>
-                  <input
-                    type="range"
-                    min="0.1"
-                    max="1"
-                    step="0.1"
-                    value={opacity}
-                    onChange={(e) => setOpacity(parseFloat(e.target.value))}
-                    className={`w-full mt-1 ${!permissions.canDraw ? 'opacity-50 cursor-not-allowed' : ''}`}
-                    disabled={!permissions.canDraw}
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* Session Info */}
-            {sessionInfo && (
-              <div className="pt-4 border-t border-gray-700">
-                <h3 className="text-sm font-semibold text-gray-300 mb-2">Session Info</h3>
-                <div className="text-xs text-gray-400 space-y-1">
-                  <div>Title: {sessionInfo.title}</div>
-                  <div>Room: {sessionInfo.roomCode}</div>
-                  {sessionInfo.streamerName && (
-                    <div>Host: {sessionInfo.streamerName}</div>
-                  )}
-                  <div>Participants: {activeUsers.length + 1}</div>
-                  <div>Allow Viewers to Draw: {allowViewersToDraw ? 'Yes' : 'No'}</div>
-                  <div className="pt-2">
-                    <div className="text-gray-300">Your Permissions:</div>
-                    <div className="flex flex-wrap gap-1 mt-1">
-                      {permissions.canDraw && (
-                        <span className="bg-green-900 px-2 py-1 rounded text-xs">Draw</span>
-                      )}
-                      {permissions.canEdit && (
-                        <span className="bg-blue-900 px-2 py-1 rounded text-xs">Edit</span>
-                      )}
-                      {permissions.canDelete && (
-                        <span className="bg-red-900 px-2 py-1 rounded text-xs">Delete</span>
-                      )}
-                      {permissions.canClear && (
-                        <span className="bg-purple-900 px-2 py-1 rounded text-xs">Clear</span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Canvas Area */}
-        <div className="flex-1 relative overflow-hidden" ref={containerRef}>
-          <canvas ref={canvasRef} className="absolute inset-0" />
-          
-          {/* View Only Overlay */}
-          {!permissions.canDraw && connectionStatus === 'connected' && (
-            <div className="absolute top-4 right-4 bg-yellow-800/80 text-white text-xs px-3 py-2 rounded-lg">
-              👀 View Only Mode
-            </div>
-          )}
-          
-          {/* Status Bar */}
-          <div className="absolute bottom-4 left-4 bg-black/70 text-white text-sm px-3 py-2 rounded-lg">
-            X: {cursorPosition.x}, Y: {cursorPosition.y} | Zoom: {Math.round(zoom * 100)}% | Tool: {tool}
-          </div>
-
-          {/* Zoom Controls */}
-          <div className="absolute bottom-4 right-4 flex space-x-2">
-            <button
-              onClick={handleZoomOut}
-              className="bg-black/70 text-white p-2 rounded-lg hover:bg-black/80"
-              title="Zoom Out"
-            >
-              <FiZoomOut />
-            </button>
-            <button
-              onClick={handleZoomIn}
-              className="bg-black/70 text-white p-2 rounded-lg hover:bg-black/80"
-              title="Zoom In"
-            >
-              <FiZoomIn />
-            </button>
-          </div>
-
-          {/* Debug Info Panel */}
-          {showDebug && (
-            <div className="absolute top-4 left-4 bg-black/80 text-white text-xs p-3 rounded-lg max-w-md max-h-64 overflow-y-auto">
-              <div className="font-bold mb-2">Debug Info:</div>
-              <div className="space-y-1">
-                <div>Status: <span className={connectionStatus === 'connected' ? 'text-green-400' : 'text-red-400'}>{connectionStatus}</span></div>
-                <div>Connection Attempts: {connectionAttempt}</div>
-                <div>Session ID: {sessionId}</div>
-                <div>Room Code: {roomCode}</div>
-                <div>User: {user?.name || 'Anonymous'}</div>
-                <div>Role: {isStreamer ? 'Streamer' : 'Viewer'}</div>
-                <div>Canvas: {fabricCanvasRef.current ? 'Loaded' : 'Not loaded'}</div>
-                <div>WS: {ws && ws.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'}</div>
-                
-                <div className="mt-2 font-bold">Permissions:</div>
-                <div className="grid grid-cols-2 gap-1">
-                  <div>Draw: {permissions.canDraw ? '✅' : '❌'}</div>
-                  <div>Edit: {permissions.canEdit ? '✅' : '❌'}</div>
-                  <div>Delete: {permissions.canDelete ? '✅' : '❌'}</div>
-                  <div>Clear: {permissions.canClear ? '✅' : '❌'}</div>
-                </div>
-                
-                <div className="mt-2 font-bold">Active Users ({activeUsers.length}):</div>
-                <div className="text-xs max-h-20 overflow-y-auto">
-                  {activeUsers.map((user, index) => (
-                    <div key={index} className="py-1 border-b border-gray-700">
-                      {user.userName} ({user.userRole}) {user.isStreamer && '🎤'}
-                    </div>
-                  ))}
-                </div>
-                
-                <div className="mt-2 font-bold">Connection Logs:</div>
-                <div className="text-xs max-h-32 overflow-y-auto">
-                  {connectionLogs.slice().reverse().map((log, index) => (
-                    <div key={index} className="border-b border-gray-700 py-1">
-                      <span className="text-gray-400">[{log.timestamp}]</span> {log.message}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Actions Sidebar */}
-        <div className="w-64 bg-gray-800 border-l border-gray-700 p-4">
-          <div className="space-y-4">
-            <div>
-              <h3 className="text-sm font-semibold text-gray-300 mb-2">History</h3>
-              <div className="flex space-x-2">
-                <button
-                  onClick={handleUndo}
-                  disabled={historyIndex <= 0 || !permissions.canEdit}
-                  className={`flex-1 p-2 rounded-lg flex items-center justify-center space-x-1 ${
-                    historyIndex <= 0 || !permissions.canEdit
-                      ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-                      : 'bg-gray-700 hover:bg-gray-600 text-white'
-                  }`}
-                >
-                  <FaUndo />
-                  <span>Undo</span>
-                </button>
-                <button
-                  onClick={handleRedo}
-                  disabled={historyIndex >= history.length - 1 || !permissions.canEdit}
-                  className={`flex-1 p-2 rounded-lg flex items-center justify-center space-x-1 ${
-                    historyIndex >= history.length - 1 || !permissions.canEdit
-                      ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-                      : 'bg-gray-700 hover:bg-gray-600 text-white'
-                  }`}
-                >
-                  <FaRedo />
-                  <span>Redo</span>
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <h3 className="text-sm font-semibold text-gray-300 mb-2">Actions</h3>
-              <div className="space-y-2">
-                <button
-                  onClick={handleClear}
-                  disabled={!permissions.canClear}
-                  className={`w-full p-2 rounded-lg flex items-center justify-center space-x-2 ${
-                    permissions.canClear
-                      ? 'bg-red-600 hover:bg-red-700 text-white'
-                      : 'bg-gray-700 text-gray-500 cursor-not-allowed'
-                  }`}
-                >
-                  <FiTrash2 />
-                  <span>Clear Canvas</span>
-                </button>
-                <button
-                  onClick={exportAsImage}
-                  className="w-full p-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-white flex items-center justify-center space-x-2"
-                >
-                  <FiDownload />
-                  <span>Export as PNG</span>
-                </button>
-                <button
-                  onClick={exportAsJSON}
-                  className="w-full p-2 bg-purple-600 hover:bg-purple-700 rounded-lg text-white flex items-center justify-center space-x-2"
-                >
-                  <FiSave />
-                  <span>Export as JSON</span>
-                </button>
-                <button
-                  onClick={importFromJSON}
-                  disabled={!permissions.canEdit}
-                  className={`w-full p-2 rounded-lg flex items-center justify-center space-x-2 ${
-                    permissions.canEdit
-                      ? 'bg-green-600 hover:bg-green-700 text-white'
-                      : 'bg-gray-700 text-gray-500 cursor-not-allowed'
-                  }`}
-                >
-                  <FiUpload />
-                  <span>Import JSON</span>
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <h3 className="text-sm font-semibold text-gray-300 mb-2">Active Users</h3>
-              <div className="space-y-2 max-h-40 overflow-y-auto">
-                <div className="flex items-center space-x-2 p-2 bg-gray-700 rounded">
-                  <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                  <span className="text-sm text-white">You ({user?.name || 'Anonymous'})</span>
-                  <span className="text-xs bg-blue-900 px-2 py-1 rounded ml-auto">
-                    {isStreamer ? 'Streamer' : 'Viewer'}
-                  </span>
-                </div>
-                {activeUsers.map((activeUser, index) => (
-                  <div key={index} className="flex items-center space-x-2 p-2 bg-gray-700 rounded">
-                    <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                    <span className="text-sm text-gray-300">{activeUser.userName}</span>
-                    <span className="text-xs bg-gray-800 px-2 py-1 rounded ml-auto">
-                      {activeUser.isStreamer ? 'Streamer' : activeUser.userRole}
-                    </span>
-                    {userTools[activeUser.userId] && (
-                      <span className="text-xs bg-purple-900 px-2 py-1 rounded">
-                        {userTools[activeUser.userId]}
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-console.log('===================================================');
-console.log('🎨 WHITEBOARD COMPONENT DEFINED');
-console.log('===================================================');
-
-export default WhiteboardComponent;

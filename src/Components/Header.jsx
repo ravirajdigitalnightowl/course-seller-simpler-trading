@@ -53,11 +53,11 @@ const Header = ({ onMenuToggle }) => {
   };
 
   const profileMenuItems = [
-    { 
-      icon: <FaUser className="text-lg" />, 
-      text: "Profile", 
-      onClick: handleProfileClick 
-    },
+    // { 
+    //   icon: <FaUser className="text-lg" />, 
+    //   text: "Profile", 
+    //   onClick: handleProfileClick 
+    // },
     { 
       icon: isDark ? <FaSun className="text-lg" /> : <FaMoon className="text-lg" />, 
       text: isDark ? "Light Mode" : "Dark Mode", 

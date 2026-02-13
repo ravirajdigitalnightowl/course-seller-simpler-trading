@@ -38,8 +38,9 @@
     "tailwindcss": "^4.1.17",
     "ws": "^8.18.3",
     "y-codemirror.next": "^0.3.5",
-    "y-websocket": "^2.0.4",
-    "yjs": "^13.6.28"
+    "y-indexeddb": "^9.0.12",
+    "y-websocket": "^2.1.0",
+    "yjs": "^13.6.29"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
