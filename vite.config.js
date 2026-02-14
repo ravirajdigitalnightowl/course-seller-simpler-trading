@@ -12,11 +12,15 @@ export default defineConfig({
     }),
     tailwindcss(),
   ],
+  // ✅ Base ko '/' kiya taaki deep links (livesession/id/code) par refresh karne par error na aaye
+  base: '/', 
+  
   preview: {
     host: '0.0.0.0',
     port: process.env.PORT || 4173,
-    allowedHosts: true // Saare hosts allow karega
+    allowedHosts: true
   },
+  
   server: {
     host: true,
     port: 5173,
@@ -26,82 +30,62 @@ export default defineConfig({
     watch: {
       usePolling: true,
     },
-    // Web Workers ke liye additional configuration
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'require-corp',
     },
   },
-  // ✅ Web Workers ke liye optimization
+
   worker: {
-    format: 'es', // ES modules for workers
-    plugins: () => [
-      // Agar workers ke liye alag plugins chahiye to
-    ],
+    format: 'es',
+    plugins: () => [],
   },
+
   optimizeDeps: {
-    include: ['react', 'react-dom', 'mediasoup-client'],
-    exclude: [
-      '/src/workers/*', // Workers ko exclude karo optimization se
-    ],
+    include: ['react', 'react-dom', 'mediasoup-client', 'socket.io-client'],
+    exclude: [],
   },
+
   resolve: {
     alias: {
-      '@': '/src',
-      // Workers ke liye easy imports
-      '@workers': '/src/workers',
+      '@': path.resolve(__dirname, './src'),
+      '@workers': path.resolve(__dirname, './src/workers'),
     },
     extensions: ['.js', '.jsx', '.ts', '.tsx', '.json'],
   },
-  // ✅ Build configuration for workers
+
   build: {
-    target: 'esnext', // Modern browsers support
+    target: 'esnext',
     minify: 'esbuild',
-    sourcemap: true, // Debugging ke liye
+    sourcemap: true,
     rollupOptions: {
       output: {
         manualChunks: {
-          // Recording worker ko separate chunk mein daalo
-          'recording-worker': ['/src/workers/recordingWorker.js'],
-          // Audio mixer worker ko separate chunk mein daalo
-          'audio-mixer-worker': ['/src/workers/audioMixerWorker.js'],
-          // Vendor libraries
+          'recording-worker': ['./src/workers/recordingWorker.js'],
+          'audio-mixer-worker': ['./src/workers/audioMixerWorker.js'],
           vendor: ['react', 'react-dom', 'react-router-dom'],
           mediasoup: ['mediasoup-client'],
         },
+        // Standard naming for better compatibility
         chunkFileNames: 'assets/[name]-[hash].js',
         entryFileNames: 'assets/[name]-[hash].js',
         assetFileNames: 'assets/[name]-[hash].[ext]',
       },
-      // External dependencies
-      external: [],
     },
-    // Chunk size warnings hatao
     chunkSizeWarningLimit: 1000,
   },
-  // ✅ Web Workers ke liye environment variables
+
   define: {
     'process.env': {},
-    '__WORKER__': false, // Main thread ke liye
+    'global': 'window', // Mediasoup/Socket compatibility ke liye
   },
-  // ✅ ES Module compatibility
+
   esbuild: {
     target: 'es2020',
     supported: {
-      'top-level-await': true, // Workers ke liye important
+      'top-level-await': true,
     },
   },
-  // ✅ Public path for workers
-  base: './',
-  // ✅ Experimental features
-  experimental: {
-    renderBuiltUrl(filename, { hostType }) {
-      if (hostType === 'js') {
-        // Workers ke liye correct URLs
-        return { relative: true }
-      }
-      return { relative: true }
-    },
-  },
+  
+  // ❌ experimental renderBuiltUrl ko hata diya gaya hai kyunki wo paths ko corrupt kar raha tha
 })
-
