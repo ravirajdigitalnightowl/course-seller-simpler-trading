@@ -4,104 +4,233 @@ import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 
 // https://vitejs.dev/config/
-export default defineConfig({
-  plugins: [
-    react({
-      tsDecorators: true,
-      plugins: [],
-    }),
-    tailwindcss(),
-  ],
-  preview: {
-    host: '0.0.0.0',
-    port: process.env.PORT || 4173,
-    allowedHosts: true // Saare hosts allow karega
-  },
-  server: {
-    host: true,
-    port: 5173,
-    hmr: {
-      overlay: true,
-    },
-    watch: {
-      usePolling: true,
-    },
-    // Web Workers ke liye additional configuration
-    headers: {
-      'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'require-corp',
-    },
-  },
-  // ✅ Web Workers ke liye optimization
-  worker: {
-    format: 'es', // ES modules for workers
-    plugins: () => [
-      // Agar workers ke liye alag plugins chahiye to
+export default defineConfig(({ command, mode }) => {
+  const isDev = command === 'serve';
+  const isProd = mode === 'production';
+  
+  return {
+    plugins: [
+      react({
+        tsDecorators: true,
+        plugins: [],
+      }),
+      tailwindcss(),
     ],
-  },
-  optimizeDeps: {
-    include: ['react', 'react-dom', 'mediasoup-client'],
-    exclude: [
-      '/src/workers/*', // Workers ko exclude karo optimization se
-    ],
-  },
-  resolve: {
-    alias: {
-      '@': '/src',
-      // Workers ke liye easy imports
-      '@workers': '/src/workers',
-    },
-    extensions: ['.js', '.jsx', '.ts', '.tsx', '.json'],
-  },
-  // ✅ Build configuration for workers
-  build: {
-    target: 'esnext', // Modern browsers support
-    minify: 'esbuild',
-    sourcemap: true, // Debugging ke liye
-    rollupOptions: {
-      output: {
-        manualChunks: {
-          // Recording worker ko separate chunk mein daalo
-          'recording-worker': ['/src/workers/recordingWorker.js'],
-          // Audio mixer worker ko separate chunk mein daalo
-          'audio-mixer-worker': ['/src/workers/audioMixerWorker.js'],
-          // Vendor libraries
-          vendor: ['react', 'react-dom', 'react-router-dom'],
-          mediasoup: ['mediasoup-client'],
-        },
-        chunkFileNames: 'assets/[name]-[hash].js',
-        entryFileNames: 'assets/[name]-[hash].js',
-        assetFileNames: 'assets/[name]-[hash].[ext]',
+    
+    // 🔴 IMPORTANT: Production ke liye base URL
+    base: isProd ? '/' : './',
+    
+    // ========== PREVIEW CONFIG ==========
+    preview: {
+      host: '0.0.0.0',
+      port: process.env.PORT || 4173,
+      allowedHosts: true,
+      // Production preview ke liye headers
+      headers: {
+        'Cross-Origin-Opener-Policy': 'same-origin',
+        'Cross-Origin-Embedder-Policy': 'require-corp',
+        'X-Content-Type-Options': 'nosniff',
       },
-      // External dependencies
-      external: [],
     },
-    // Chunk size warnings hatao
-    chunkSizeWarningLimit: 1000,
-  },
-  // ✅ Web Workers ke liye environment variables
-  define: {
-    'process.env': {},
-    '__WORKER__': false, // Main thread ke liye
-  },
-  // ✅ ES Module compatibility
-  esbuild: {
-    target: 'es2020',
-    supported: {
-      'top-level-await': true, // Workers ke liye important
+    
+    // ========== SERVER CONFIG (Development) ==========
+    server: {
+      host: true,
+      port: 5173,
+      strictPort: true,
+      hmr: {
+        overlay: true,
+      },
+      watch: {
+        usePolling: true,
+      },
+      // Web Workers ke liye headers
+      headers: {
+        'Cross-Origin-Opener-Policy': 'same-origin',
+        'Cross-Origin-Embedder-Policy': 'require-corp',
+      },
+      // 🔴 Development proxy (local API calls)
+      proxy: {
+        '/apis': {
+          target: 'https://simplertradinglive.shop',
+          changeOrigin: true,
+          secure: false,
+          rewrite: (path) => path.replace(/^\/apis/, '/apis'),
+        },
+        '/socket.io': {
+          target: 'https://simplertradinglive.shop',
+          changeOrigin: true,
+          secure: false,
+          ws: true,
+        },
+        '/mediasoup': {
+          target: 'https://simplertradinglive.shop',
+          changeOrigin: true,
+          secure: false,
+          ws: true,
+        },
+        '/yjs': {
+          target: 'https://simplertradinglive.shop',
+          changeOrigin: true,
+          secure: false,
+          ws: true,
+        },
+      },
     },
-  },
-  // ✅ Public path for workers
-  base: './',
-  // ✅ Experimental features
-  experimental: {
-    renderBuiltUrl(filename, { hostType }) {
-      if (hostType === 'js') {
-        // Workers ke liye correct URLs
-        return { relative: true }
-      }
-      return { relative: true }
+    
+    // ========== WEB WORKERS CONFIG ==========
+    worker: {
+      format: 'es',
+      plugins: () => [],
+      rollupOptions: {
+        output: {
+          entryFileNames: 'assets/workers/[name]-[hash].js',
+          chunkFileNames: 'assets/workers/[name]-[hash].js',
+        },
+      },
     },
-  },
-})
-
+    
+    // ========== DEPENDENCY OPTIMIZATION ==========
+    optimizeDeps: {
+      include: [
+        'react', 
+        'react-dom', 
+        'react-router-dom',
+        'mediasoup-client',
+        'socket.io-client',
+        'yjs',
+        'y-websocket',
+        'y-indexeddb'
+      ],
+      exclude: [
+        '/src/workers/*',
+      ],
+      esbuildOptions: {
+        target: 'es2020',
+        supported: {
+          'top-level-await': true,
+        },
+      },
+    },
+    
+    // ========== RESOLVE ALIASES ==========
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+        '@components': path.resolve(__dirname, './src/components'),
+        '@contexts': path.resolve(__dirname, './src/contexts'),
+        '@workers': path.resolve(__dirname, './src/workers'),
+        '@utils': path.resolve(__dirname, './src/utils'),
+      },
+      extensions: ['.js', '.jsx', '.ts', '.tsx', '.json'],
+    },
+    
+    // ========== BUILD CONFIGURATION ==========
+    build: {
+      target: 'es2020',
+      outDir: 'dist',
+      assetsDir: 'assets',
+      minify: 'esbuild',
+      sourcemap: isDev, // Sourcemap sirf development mein
+      cssCodeSplit: true,
+      
+      rollupOptions: {
+        output: {
+          // ✅ Manual chunks for better caching
+          manualChunks: (id) => {
+            // Vendor chunks
+            if (id.includes('node_modules')) {
+              if (id.includes('react') || id.includes('react-dom') || id.includes('react-router')) {
+                return 'vendor-react';
+              }
+              if (id.includes('mediasoup-client')) {
+                return 'mediasoup';
+              }
+              if (id.includes('yjs') || id.includes('y-websocket') || id.includes('y-indexeddb')) {
+                return 'yjs';
+              }
+              if (id.includes('socket.io-client')) {
+                return 'socketio';
+              }
+              return 'vendor';
+            }
+            
+            // Worker chunks
+            if (id.includes('/src/workers/')) {
+              if (id.includes('recordingWorker')) {
+                return 'recording-worker';
+              }
+              if (id.includes('audioMixerWorker')) {
+                return 'audio-mixer-worker';
+              }
+            }
+          },
+          
+          // File naming patterns with hashes
+          entryFileNames: 'assets/[name]-[hash].js',
+          chunkFileNames: 'assets/[name]-[hash].js',
+          assetFileNames: (assetInfo) => {
+            const info = assetInfo.name.split('.');
+            const ext = info[info.length - 1];
+            
+            if (/\.(png|jpe?g|gif|svg|webp|ico)$/.test(assetInfo.name)) {
+              return `assets/images/[name]-[hash].[ext]`;
+            }
+            if (/\.(css)$/.test(assetInfo.name)) {
+              return `assets/css/[name]-[hash].[ext]`;
+            }
+            if (/\.(woff2?|ttf|eot)$/.test(assetInfo.name)) {
+              return `assets/fonts/[name]-[hash].[ext]`;
+            }
+            return `assets/[name]-[hash].[ext]`;
+          },
+        },
+        
+        // External dependencies agar koi ho
+        external: [],
+      },
+      
+      // Chunk size warnings
+      chunkSizeWarningLimit: 1000,
+      
+      // Report compressed sizes
+      reportCompressedSize: true,
+    },
+    
+    // ========== ENVIRONMENT VARIABLES ==========
+    define: {
+      'process.env.NODE_ENV': JSON.stringify(mode),
+      '__DEV__': isDev,
+      '__PROD__': isProd,
+    },
+    
+    // ========== ESBUILD OPTIONS ==========
+    esbuild: {
+      target: 'es2020',
+      supported: {
+        'top-level-await': true,
+      },
+      // JSX handling
+      jsxFactory: 'React.createElement',
+      jsxFragment: 'React.Fragment',
+    },
+    
+    // ========== EXPERIMENTAL FEATURES ==========
+    experimental: {
+      renderBuiltUrl(filename, { hostType }) {
+        if (hostType === 'js') {
+          return { relative: true };
+        }
+        return { relative: true };
+      },
+    },
+    
+    // ========== CSS OPTIONS ==========
+    css: {
+      devSourcemap: true,
+      postcss: {
+        plugins: [],
+      },
+    },
+  };
+});
