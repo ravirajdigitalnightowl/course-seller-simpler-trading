@@ -115,7 +115,6 @@ const [thumbnailsExpanded, setThumbnailsExpanded] = useState(false);
 const [fullScreenThumbnails, setFullScreenThumbnails] = useState(false);
 const [autoStartRecording, setAutoStartRecording] = useState(false);
 
-
 const [recordingStream, setRecordingStream] = useState(null);
 const [isSpeaking, setIsSpeaking] = useState(false);
 const [handRaisedUsers, setHandRaisedUsers] = useState([]);
@@ -539,16 +538,16 @@ const lowerAllHands = () => {
 };
 
 
-  const startScreenCapture = async (purpose = 'share') => {
+const startScreenCapture = async (purpose = "share") => {
   try {
-    // Agar pehle se screen capture चल रहा है, to usi ko return करें
-    if (screenCaptureStream) {
-      addDebugLog(`✅ Reusing existing screen capture for ${purpose}`);
-      return screenCaptureStream;
+    // ✅ Always prefer ref (state async hota hai)
+    if (screenCaptureStreamRef.current) {
+      addDebugLog(`✅ Reusing existing screen capture (ref) for ${purpose}`);
+      return screenCaptureStreamRef.current;
     }
 
     addDebugLog(`🖥️ Starting new screen capture for ${purpose}`);
-    
+
     const stream = await navigator.mediaDevices.getDisplayMedia({
       video: {
         cursor: "always",
@@ -556,39 +555,51 @@ const lowerAllHands = () => {
         width: { ideal: 1280 },
         height: { ideal: 720 },
       },
-      audio: true, // System audio capture
+      audio: true,
     });
 
-    // Track ended handlers
-    stream.getVideoTracks()[0].onended = () => {
-      addDebugLog('🛑 Screen capture ended by system');
-      
-      // Agar recording चल रही है to stop करें
-      if (isRecording) {
-        stopRecording();
-      }
-      
-      // Agar screen share चल रहा है to stop करें
-      if (activeScreenShare?.source === "streamer") {
-        stopScreenShare();
-      }
-      
-      // Cleanup screen capture
-      cleanupScreenCapture();
-    };
+    // ✅ Set ref FIRST (race-proof)
+    screenCaptureStreamRef.current = stream;
 
+    // ✅ Then state
     setScreenCaptureStream(stream);
     setScreenCaptureActive(true);
-    addDebugLog(`✅ Screen capture started successfully for ${purpose}`);
-    
-    return stream;
 
+    // ✅ Track end handler (use refs, not stale state)
+    const videoTrack = stream.getVideoTracks?.()[0];
+    if (videoTrack) {
+      videoTrack.onended = () => {
+        addDebugLog("🛑 Screen capture ended by system UI");
+
+        // If recording is running -> stop recording
+        if (isRecordingRef.current) {
+          stopRecording();
+        }
+
+        // If streamer share is running -> stop screen share
+        if (activeScreenShareRef.current?.source === "streamer") {
+          stopScreenShare();
+        }
+
+        // Cleanup capture
+        cleanupScreenCapture(true);
+      };
+    }
+
+    addDebugLog(`✅ Screen capture started successfully for ${purpose}`);
+    return stream;
   } catch (error) {
-    console.error('❌ Screen capture failed:', error);
+    console.error("❌ Screen capture failed:", error);
     toast.error(`Failed to capture screen for ${purpose}`);
     return null;
   }
 };
+
+const getOrCreateCapture = async (purpose) => {
+  return screenCaptureStreamRef.current || (await startScreenCapture(purpose));
+};
+
+
 
 
 useEffect(() => { activeScreenShareRef.current = activeScreenShare; }, [activeScreenShare]);
@@ -638,18 +649,28 @@ useEffect(() => {
 useEffect(() => {
   showAudioPermissionModalRef.current = showAudioPermissionModal;
 }, [showAudioPermissionModal]);
-const cleanupScreenCapture = () => {
-  if (screenCaptureStream) {
-    screenCaptureStream.getTracks().forEach(track => {
-      if (track.readyState === 'live') {
-        track.stop();
-      }
-    });
+
+const cleanupScreenCapture = (force = false) => {
+  const stream = screenCaptureStreamRef.current;
+
+  if (stream) {
+    try {
+      stream.getTracks().forEach((track) => {
+        if (track.readyState === "live") track.stop();
+      });
+    } catch (e) {
+      console.warn("cleanupScreenCapture stop tracks error:", e);
+    }
   }
+
+  // ✅ Always clear ref + state
+  screenCaptureStreamRef.current = null;
   setScreenCaptureStream(null);
   setScreenCaptureActive(false);
-  addDebugLog('🧹 Screen capture cleaned up');
+
+  addDebugLog(force ? "🧹 Screen capture cleaned up (force)" : "🧹 Screen capture cleaned up");
 };
+
 const handleOpenWhiteboard = () => {
   // Agar already open hai to close karo
   if (showWhiteboard) {
@@ -712,37 +733,29 @@ const startRecording = async () => {
   try {
     setIsRecordingLoading(true);
 
-    // 1) If audience screen-share already active, record from it (Scenario-1)
-    if (activeScreenShare?.stream) {
-      addDebugLog(`📺 Recording from existing screen share: ${activeScreenShare.userName}`);
-      await startRecordingFromScreenShare(activeScreenShare.stream);
+    // 1) If any active share stream exists -> record from it
+    if (activeScreenShareRef.current?.stream) {
+      addDebugLog(`📺 Recording from active screen share: ${activeScreenShareRef.current.userName || ""}`);
+      await startRecordingFromScreenShare(activeScreenShareRef.current.stream);
       return;
     }
 
-    // 2) Scenario-2: Recording first → ensure we have ONE screenCaptureStream
-    let capture = screenCaptureStreamRef.current;
+    // 2) Otherwise -> ensure we have ONE capture stream (NO produce)
+    const capture = await getOrCreateCapture("record");
+    if (!capture) throw new Error("Screen capture failed");
 
-    if (!capture) {
-      addDebugLog('🎬 No screen capture yet. Capturing screen for recording (no produce/event)...');
-
-      // ✅ IMPORTANT: use your existing helper so it sets screenCaptureStream + flags
-      capture = await startScreenCapture('record'); // <-- this must NOT produce / emit event
-      if (!capture) throw new Error('Screen capture failed');
-    } else {
-      addDebugLog('🎬 Reusing existing screen capture for recording...');
-    }
-
-    // 3) Start recording from the capture stream
+    addDebugLog("🎬 Recording from capture stream (record-first flow)");
     await startRecordingFromScreenShare(capture);
 
   } catch (error) {
-    console.error('Failed to start recording:', error);
-    toast.error('Failed to start recording');
+    console.error("Failed to start recording:", error);
+    toast.error("Failed to start recording");
     setIsRecording(false);
   } finally {
     setIsRecordingLoading(false);
   }
 };
+
 
 const startRecordingFromScreenShare = async (screenShareStream) => {
   try {
@@ -1194,9 +1207,7 @@ const stopScreenShare = useCallback(() => {
   producers.current.forEach((producer, id) => {
     const src = producer?.appData?.source;
     if (src === "screen" || src === "screen-audio") {
-      try {
-        producer.close();
-      } catch (err) {
+      try { producer.close(); } catch (err) {
         addDebugLog(`⚠️ Error closing producer: ${err?.message || err}`);
       }
       producers.current.delete(id);
@@ -1212,11 +1223,10 @@ const stopScreenShare = useCallback(() => {
   // 3) Reset active share UI state
   setActiveScreenShare(null);
 
-  // 4) IMPORTANT: capture cleanup ONLY if recording is NOT running
-  // (recording-first flow keeps capture alive for recorder)
+  // 4) ✅ Capture cleanup ONLY if recording is NOT running
   if (!recordingOn && screenCaptureActiveRef.current) {
     addDebugLog("🧹 Cleaning up screen capture (no active recording)");
-    cleanupScreenCapture(); // should stop tracks + setScreenCaptureStream(null) etc.
+    cleanupScreenCapture();
     toast.success("Screen share stopped");
   } else {
     toast.info(recordingOn ? "Screen share stopped (recording continues)" : "Screen share stopped");
@@ -1224,7 +1234,35 @@ const stopScreenShare = useCallback(() => {
 
   // 5) Reset zoom if it was showing screen
   setZoomed((prev) => (prev?.type === "screen" ? null : prev));
+
 }, [socket, sessionId, roomCode, user, cleanupScreenCapture]);
+
+
+const handleStreamerScreenShareClick = async () => {
+  try {
+    // If already sharing -> stop share (recording continues)
+    if (activeScreenShareRef.current?.source === "streamer") {
+      stopScreenShare();
+      return;
+    }
+
+    // ✅ Always reuse SAME capture (recording ho ya na ho)
+    const capture = await getOrCreateCapture("share");
+    if (!capture) return;
+
+    // ✅ Produce + socket event + setActiveScreenShare happens inside this
+    await startScreenShareForParticipants(capture);
+
+    // ✅ INSTANT main-screen switch (no waiting on effects)
+    setZoomed({ type: "screen", stream: capture, userId: user?.id });
+
+    addDebugLog("🖥️ Streamer screen share started (using capture stream)");
+  } catch (e) {
+    console.error("handleStreamerScreenShareClick error:", e);
+    toast.error("Failed to start screen share");
+  }
+};
+
 
 const uploadRecordingToServer = async (blob) => {
   try {
@@ -1496,19 +1534,21 @@ useEffect(() => {
 }, [isMobile]); // isMobile add karo dependency
 
 useEffect(() => {
-  if (activeScreenShare?.stream) {
-    // Check if not already zoomed on this screen
-    if (!zoomed || zoomed.userId !== activeScreenShare.userId) {
-      addDebugLog(`🔄 Auto-zooming to ${activeScreenShare.source} screen share`);
-      
-      setZoomed({
-        type: "screen",
-        stream: activeScreenShare.stream,
-        userId: activeScreenShare.userId
-      });
-    }
+  if (!activeScreenShare?.stream) return;
+
+  const alreadyOnSameScreen =
+    zoomed?.type === "screen" && zoomed?.userId === activeScreenShare.userId;
+
+  if (!alreadyOnSameScreen) {
+    addDebugLog(`🔄 Auto-zooming to ${activeScreenShare.source} screen share`);
+    setZoomed({
+      type: "screen",
+      stream: activeScreenShare.stream,
+      userId: activeScreenShare.userId
+    });
   }
-}, [activeScreenShare]);
+}, [activeScreenShare?.stream, activeScreenShare?.userId, activeScreenShare?.source]);
+
 
 useEffect(() => {
   const resumeAll = () => {
@@ -2486,6 +2526,8 @@ useEffect(() => {
     videoRef.current.srcObject = null;
   }
 }, [zoomed, mediaStream]);
+
+
 
 
 // ✅ Add this useEffect to handle Zoomed Video without flickering
@@ -4663,6 +4705,26 @@ useEffect(() => {
     document.removeEventListener('touchend', handleFirstUserInteraction);
   };
 }, [isMobile, mediaStream, showPlayButton]);
+useEffect(() => {
+  if (!zoomed || !zoomed.stream) return;
+
+  const el =
+    zoomed.type === "screen"
+      ? screenRef.current
+      : zoomed.type === "streamer"
+        ? videoRef.current
+        : zoomedVideoRef.current;
+
+  if (!el) return;
+
+  if (el.srcObject !== zoomed.stream) {
+    el.srcObject = zoomed.stream;
+  }
+
+  const p = el.play?.();
+  if (p?.catch) p.catch(() => {});
+}, [zoomed?.type, zoomed?.stream, zoomed?.userId]);
+
 
 
 // Mobile detection and handlers
@@ -5161,7 +5223,7 @@ return (
                         playsInline
                         muted={zoomed.type !== "viewer"}
                         className="absolute inset-0 w-full h-full object-contain bg-black"
-                        srcObject={zoomed.stream}
+                        
                         onError={(e) => {
                           console.error('Zoomed video error:', e);
                         }}
@@ -5488,7 +5550,7 @@ return (
                         playsInline
                         muted={zoomed.type !== "viewer"}
                         className="absolute inset-0 w-full h-full object-contain bg-black"
-                        srcObject={zoomed.stream}
+                        
                         onError={(e) => {
                           console.error('Zoomed video error:', e);
                         }}
@@ -6234,32 +6296,33 @@ return (
             )}
           </button>
         ) : (
-          <button
-            onClick={startScreenShare}
-            className={`flex flex-col items-center p-4 rounded-2xl focus:outline-none transition-all duration-200 transform hover:scale-110 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 ${
-              screenCaptureActive || isRecording
-                ? 'bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700'
-                : 'bg-gradient-to-r from-gray-600 to-gray-700 hover:from-gray-700 hover:to-gray-800'
-            }`}
-            title={
-              screenCaptureActive || isRecording
-                ? "Share active screen capture with viewers"
-                : "Start screen sharing"
-            }
-            disabled={isInitializing || isRecordingLoading || isRecordingStopping}
-          >
-            <MdOutlineScreenShare className="text-xl mb-1" />
-            <span className="text-xs font-medium">
-              {screenCaptureActive || isRecording ? 'Share Active' : 'Share Screen'}
-            </span>
-            
-            {/* Indicator for existing capture */}
-            {(screenCaptureActive || isRecording) && (
-              <span className="absolute -top-1 -right-1 bg-green-500 text-white text-[8px] px-1 rounded">
-                ✓
-              </span>
-            )}
-          </button>
+         <button
+  onClick={handleStreamerScreenShareClick}
+  className={`flex flex-col items-center p-4 rounded-2xl focus:outline-none transition-all duration-200 transform hover:scale-110 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 ${
+    screenCaptureActive || isRecording
+      ? 'bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700'
+      : 'bg-gradient-to-r from-gray-600 to-gray-700 hover:from-gray-700 hover:to-gray-800'
+  }`}
+  title={
+    screenCaptureActive || isRecording
+      ? "Share active screen capture with viewers"
+      : "Start screen sharing"
+  }
+  disabled={isInitializing || isRecordingLoading || isRecordingStopping}
+>
+  <MdOutlineScreenShare className="text-xl mb-1" />
+  <span className="text-xs font-medium">
+    {screenCaptureActive || isRecording ? 'Share Active' : 'Share Screen'}
+  </span>
+
+  {/* Indicator for existing capture */}
+  {(screenCaptureActive || isRecording) && (
+    <span className="absolute -top-1 -right-1 bg-green-500 text-white text-[8px] px-1 rounded">
+      ✓
+    </span>
+  )}
+</button>
+
         )}
         
         {/* Smart Recording Button */}
