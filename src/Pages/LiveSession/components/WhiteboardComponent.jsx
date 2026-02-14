@@ -79,15 +79,29 @@ const StreamerWhiteboard = ({
         yDocRef.current = ydoc;
         
         // WebSocket URL for Yjs
-        const wsUrl = `${import.meta.env.VITE_WS_URL || 'ws://localhost:9090'}/yjs/${sessionId}?token=${wsToken}&isStreamer=true&allowViewersToDraw=${allowViewersToDraw}&roomCode=${roomCode}`;
-        
-        // Create WebSocket provider
-        const provider = new WebsocketProvider(
-          wsUrl,
-          sessionId,
-          ydoc,
-          { WebSocketPolyfill: WebSocket }
-        );
+    const baseWs = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
+
+// ✅ url me sirf /yjs
+const url = `${baseWs}/yjs`;
+
+// ✅ roomName = sessionId
+const provider = new WebsocketProvider(
+  url,
+  sessionId,
+  ydoc,
+  {
+    WebSocketPolyfill: WebSocket,
+    params: {
+      token: wsToken,
+      isStreamer: true,
+      allowViewersToDraw,
+      roomCode,
+      userId: sessionInfo?.streamerId,
+      userName: sessionInfo?.streamerName,
+    }
+  }
+);
+
         
         yProviderRef.current = provider;
         
