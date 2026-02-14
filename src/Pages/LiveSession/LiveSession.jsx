@@ -1644,7 +1644,7 @@ const confirmRemoveAudio = () => {
     addDebugLog(`New viewer screen producer: ${data.producerId} from user: ${data.userId}`);
     const socket = getSocket();
     if (socket) {
-      createConsumer(sessionId || roomCode, data.producerId, data.kind);
+      createConsumer(socket, sessionId || roomCode, data.producerId, data.kind);
     } else {
       addDebugLog('❌ Cannot create consumer: Socket not available');
     }
@@ -4094,7 +4094,7 @@ if (data.source === "viewer-screen-audio") {
       // Handle viewer screen video
       if (data.source === "viewer-screen") {
         addDebugLog("🖥️ Consuming viewer screen producer:", data.producerId);
-        createConsumer(sessionId || roomCode, data.producerId, data.kind);
+        createConsumer(newSocket, sessionId || roomCode, data.producerId, data.kind);
       }
 
       // Handle viewer mic OR viewer screen audio
