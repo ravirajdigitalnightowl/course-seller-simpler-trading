@@ -2162,6 +2162,11 @@ const createConsumer = async (currentSessionId, producerId, kind, transportId = 
                     stream: screenStream,
                     source: info.source,
                   });
+
+                  if (screenRef.current) {
+                      screenRef.current.srcObject = screenStream;
+                     screenRef.current.play?.().catch(() => {});
+                   }
                   addDebugLog(`🖥️ Active screen set (${info.source})`);
 
                 } else if (info.source === "viewer-screen-audio" || info.source === "viewer-mic") {
