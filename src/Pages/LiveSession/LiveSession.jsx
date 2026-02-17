@@ -679,20 +679,12 @@ const cleanupScreenCapture = (force = false) => {
 
   addDebugLog(force ? "🧹 Screen capture cleaned up (force)" : "🧹 Screen capture cleaned up");
 };
-
-const handleOpenWhiteboard = () => {
-  // Agar already open hai to close karo
+const handleOpenWhiteboard = useCallback(() => {
   if (showWhiteboard) {
-    setShowWhiteboard(false);
-    // ✅ IMPORTANT: Whiteboard ko unmount hone do, phir se mount mat karo!
-    setTimeout(() => {
-      setWhiteboardSessionInfo(null);
-    }, 100);
-    addDebugLog("📝 Whiteboard closed");
+    handleCloseWhiteboard();
     return;
   }
 
-  // ✅ Naya session - SIRF EK BAAR!
   const whiteboardInfo = {
     title: session?.title || "Collaborative Whiteboard",
     roomCode: session?.roomCode || roomCode,
@@ -702,17 +694,11 @@ const handleOpenWhiteboard = () => {
     allowViewersToDraw: true,
     isStreamer: true
   };
-  
+
   setWhiteboardSessionInfo(whiteboardInfo);
   setShowWhiteboard(true);
-  setZoomed({ 
-    type: "whiteboard", 
-    userId: "whiteboard",
-    stream: null 
-  });
-  
-  addDebugLog("📝 Whiteboard opened");
-};
+  setZoomed({ type: "whiteboard", userId: "whiteboard", stream: null });
+}, [showWhiteboard, session, roomCode, user, token, sessionId]); // Dependencies add karein [cite: 136, 137, 250, 256]
 
 // ✅ CLOSE WHITEBOARD
 const handleCloseWhiteboard = () => {
@@ -5604,7 +5590,9 @@ return (
                     autoPlay
                     playsInline
                     muted={true}
-                    className="absolute inset-0 w-full h-full object-contain bg-black"
+                    className={`absolute inset-0 w-full h-full object-contain bg-black ${
+    zoomed?.type === "whiteboard" ? "invisible" : "visible"
+  }`}
                     srcObject={mediaStream}
                     onError={(e) => {
                       console.error('Main video error:', e);

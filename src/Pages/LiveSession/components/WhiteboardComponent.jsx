@@ -69,123 +69,6 @@ const StreamerWhiteboard = memo(({
   const canvasOffsetRef = useRef({ x: 0, y: 0 });
   const lastPanPointRef = useRef({ x: 0, y: 0 });
   
-  // Memoized callbacks to prevent unnecessary re-renders
-  const handleZoomIn = useCallback(() => {
-    setCurrentZoom(prev => Math.min(prev + 0.1, 3));
-    if (yWhiteboardRef.current) {
-      const state = yWhiteboardRef.current.toArray()[0] || {};
-      redrawCanvas(state.objects || []);
-    }
-  }, [redrawCanvas]);
-  
-  const handleZoomOut = useCallback(() => {
-    setCurrentZoom(prev => Math.max(prev - 0.1, 0.5));
-    if (yWhiteboardRef.current) {
-      const state = yWhiteboardRef.current.toArray()[0] || {};
-      redrawCanvas(state.objects || []);
-    }
-  }, [redrawCanvas]);
-  
-  const handleZoomReset = useCallback(() => {
-    setCurrentZoom(1);
-    canvasOffsetRef.current = { x: 0, y: 0 };
-    
-    if (yWhiteboardRef.current) {
-      const state = yWhiteboardRef.current.toArray()[0] || {};
-      redrawCanvas(state.objects || []);
-    }
-  }, [redrawCanvas]);
-  
-  const handleClearWhiteboard = useCallback(() => {
-    if (window.confirm('Clear entire whiteboard?')) {
-      const emptyState = {
-        version: '1.0.0',
-        objects: [],
-        background: backgroundColor,
-        clearedAt: new Date().toISOString(),
-        clearedBy: sessionInfo?.streamerId
-      };
-      
-      yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
-      yWhiteboardRef.current.insert(0, [emptyState]);
-      
-      redrawCanvas([]);
-      toast.success('Whiteboard cleared');
-    }
-  }, [backgroundColor, sessionInfo, redrawCanvas]);
-  
-  const handleExport = useCallback(() => {
-    const canvas = canvasRef.current;
-    const bgCanvas = backgroundCanvasRef.current;
-    
-    // Create a combined canvas
-    const exportCanvas = document.createElement('canvas');
-    exportCanvas.width = canvas.width;
-    exportCanvas.height = canvas.height;
-    
-    const exportCtx = exportCanvas.getContext('2d');
-    
-    // Draw background
-    exportCtx.drawImage(bgCanvas, 0, 0);
-    
-    // Draw drawings
-    exportCtx.drawImage(canvas, 0, 0);
-    
-    // Download
-    const link = document.createElement('a');
-    link.download = `whiteboard-${sessionId}-${Date.now()}.png`;
-    link.href = exportCanvas.toDataURL('image/png');
-    link.click();
-    
-    toast.success('Whiteboard exported');
-  }, [sessionId]);
-  
-  const handleUndo = useCallback(() => {
-    if (yUndoManagerRef.current) {
-      yUndoManagerRef.current.undo();
-    }
-  }, []);
-  
-  const handleRedo = useCallback(() => {
-    if (yUndoManagerRef.current) {
-      yUndoManagerRef.current.redo();
-    }
-  }, []);
-  
-  // Redraw canvas from objects (memoized)
-  const redrawCanvas = useCallback((objects) => {
-    if (!ctxRef.current || !bgCtxRef.current) return;
-    
-    const ctx = ctxRef.current;
-    const bgCtx = bgCtxRef.current;
-    const canvas = canvasRef.current;
-    
-    // Clear canvases
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    bgCtx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    // Draw background
-    bgCtx.fillStyle = backgroundColor;
-    bgCtx.fillRect(0, 0, canvas.width, canvas.height);
-    
-    // Draw grid if visible
-    if (isGridVisible) {
-      drawGrid(bgCtx, canvas.width, canvas.height);
-    }
-    
-    // Apply zoom and pan
-    ctx.save();
-    ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
-    ctx.scale(currentZoom, currentZoom);
-    
-    // Draw all objects
-    objects.forEach(obj => {
-      drawObject(ctx, obj);
-    });
-    
-    ctx.restore();
-  }, [backgroundColor, isGridVisible, currentZoom]);
-  
   // Draw grid (memoized)
   const drawGrid = useCallback((ctx, width, height) => {
     ctx.save();
@@ -278,41 +161,39 @@ const StreamerWhiteboard = memo(({
     ctx.restore();
   }, [currentZoom]);
   
-  // Add object to Yjs document (memoized)
-  const addObject = useCallback((obj) => {
-    if (!yWhiteboardRef.current) return;
+  // Redraw canvas from objects (memoized)
+  const redrawCanvas = useCallback((objects) => {
+    if (!ctxRef.current || !bgCtxRef.current) return;
     
-    setIsLocalDrawing(true);
+    const ctx = ctxRef.current;
+    const bgCtx = bgCtxRef.current;
+    const canvas = canvasRef.current;
     
-    try {
-      const currentState = yWhiteboardRef.current.toArray()[0] || {
-        version: '1.0.0',
-        objects: [],
-        background: backgroundColor,
-        createdAt: new Date().toISOString()
-      };
-      
-      const updatedState = {
-        ...currentState,
-        objects: [...(currentState.objects || []), obj],
-        updatedBy: sessionInfo?.streamerId,
-        updatedAt: new Date().toISOString()
-      };
-      
-      // Update Yjs document
-      if (yWhiteboardRef.current.length === 0) {
-        yWhiteboardRef.current.insert(0, [updatedState]);
-      } else {
-        yWhiteboardRef.current.delete(0, 1);
-        yWhiteboardRef.current.insert(0, [updatedState]);
-      }
-      
-    } catch (error) {
-      console.error('Error adding object to Yjs:', error);
-    } finally {
-      setIsLocalDrawing(false);
+    // Clear canvases
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    bgCtx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw background
+    bgCtx.fillStyle = backgroundColor;
+    bgCtx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw grid if visible
+    if (isGridVisible) {
+      drawGrid(bgCtx, canvas.width, canvas.height);
     }
-  }, [backgroundColor, sessionInfo]);
+    
+    // Apply zoom and pan
+    ctx.save();
+    ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+    ctx.scale(currentZoom, currentZoom);
+    
+    // Draw all objects
+    objects.forEach(obj => {
+      drawObject(ctx, obj);
+    });
+    
+    ctx.restore();
+  }, [backgroundColor, isGridVisible, currentZoom, drawGrid, drawObject]);
   
   // Load whiteboard state from Yjs (memoized)
   const loadWhiteboardState = useCallback(() => {
@@ -336,6 +217,42 @@ const StreamerWhiteboard = memo(({
     }
   }, [redrawCanvas]);
   
+  // Add object to Yjs document (memoized)
+const addObject = useCallback((obj) => {
+  if (!yWhiteboardRef.current || !yDocRef.current) return;
+
+  setIsLocalDrawing(true);
+  
+  try {
+    // ✅ Use transaction for atomic updates
+    yDocRef.current.transact(() => {
+      const currentState = yWhiteboardRef.current.toArray()[0] || {
+        version: '1.0.0',
+        objects: [],
+        background: backgroundColor,
+        createdAt: new Date().toISOString()
+      };
+      
+      const updatedState = {
+        ...currentState,
+        objects: [...(currentState.objects || []), obj],
+        updatedBy: sessionInfo?.streamerId,
+        updatedAt: new Date().toISOString()
+      };
+      
+      if (yWhiteboardRef.current.length === 0) {
+        yWhiteboardRef.current.insert(0, [updatedState]);
+      } else {
+        yWhiteboardRef.current.delete(0, 1);
+        yWhiteboardRef.current.insert(0, [updatedState]);
+      }
+    });
+  } catch (error) {
+    console.error('Error adding object:', error);
+  } finally {
+    setIsLocalDrawing(false);
+  }
+}, [backgroundColor, sessionInfo]);
   // Initialize Yjs document and WebSocket provider
   useEffect(() => {
     if (!sessionId || !wsToken) return;
@@ -348,8 +265,11 @@ const StreamerWhiteboard = memo(({
         
         // WebSocket URL for Yjs
         const baseWs = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
+
+        // ✅ url me sirf /yjs
         const url = `${baseWs}/yjs`;
-        
+
+        // ✅ roomName = sessionId
         const provider = new WebsocketProvider(
           url,
           sessionId,
@@ -366,7 +286,7 @@ const StreamerWhiteboard = memo(({
             }
           }
         );
-        
+
         yProviderRef.current = provider;
         
         // Get or create shared whiteboard array
@@ -530,59 +450,64 @@ const StreamerWhiteboard = memo(({
     }
   }, [tool, color, strokeWidth, opacity, currentZoom, addObject, backgroundColor]);
   
-  const handleMouseMove = useCallback((e) => {
-    if (isPanning) {
-      // Handle panning
-      const dx = e.clientX - lastPanPointRef.current.x;
-      const dy = e.clientY - lastPanPointRef.current.y;
-      
-      canvasOffsetRef.current.x += dx;
-      canvasOffsetRef.current.y += dy;
-      
-      lastPanPointRef.current = { x: e.clientX, y: e.clientY };
-      
-      // Redraw with new offset
-      if (yWhiteboardRef.current) {
-        const state = yWhiteboardRef.current.toArray()[0] || {};
-        redrawCanvas(state.objects || []);
-      }
-      
-      return;
+const handleMouseMove = useCallback((e) => {
+  if (isPanning) {
+    const dx = e.clientX - lastPanPointRef.current.x;
+    const dy = e.clientY - lastPanPointRef.current.y;
+    canvasOffsetRef.current.x += dx;
+    canvasOffsetRef.current.y += dy;
+    lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+
+    if (yWhiteboardRef.current) {
+      const state = yWhiteboardRef.current.toArray()[0] || {};
+      redrawCanvas(state.objects || []);
     }
-    
-    if (!isDrawing || !yWhiteboardRef.current) return;
-    
+    return;
+  }
+
+  if (!isDrawing || !yWhiteboardRef.current) return;
+
+  // ✅ Use requestAnimationFrame for smoother performance during recording
+  window.requestAnimationFrame(() => {
     const rect = canvasRef.current.getBoundingClientRect();
     const scaleX = canvasRef.current.width / rect.width;
     const scaleY = canvasRef.current.height / rect.height;
-    
+
     const x = (e.clientX - rect.left) * scaleX;
     const y = (e.clientY - rect.top) * scaleY;
-    
+
     const transformedX = (x - canvasOffsetRef.current.x) / currentZoom;
     const transformedY = (y - canvasOffsetRef.current.y) / currentZoom;
-    
+
     const currentState = yWhiteboardRef.current.toArray()[0] || {};
     const objects = [...(currentState.objects || [])];
     const lastObject = objects[objects.length - 1];
-    
+
     if (lastObject && (lastObject.type === 'pen' || lastObject.type === 'eraser')) {
-      // Continue drawing
-      lastObject.points.push({ x: transformedX, y: transformedY });
+      // ✅ Sirf tab point add karein jab mouse actually move hua ho
+      const lastPoint = lastObject.points[lastObject.points.length - 1];
+      const dist = Math.hypot(transformedX - lastPoint.x, transformedY - lastPoint.y);
       
+      if (dist < 2) return; // Bahut chote movement ko skip karein (CPU bachega)
+
+      lastObject.points.push({ x: transformedX, y: transformedY });
+
       const updatedState = {
         ...currentState,
         objects,
         updatedAt: new Date().toISOString()
       };
-      
-      yWhiteboardRef.current.delete(0, 1);
-      yWhiteboardRef.current.insert(0, [updatedState]);
-      
+
+      // ✅ Yjs Transact: Isse networking aur sync background mein efficient ho jata hai
+      yDocRef.current.transact(() => {
+        yWhiteboardRef.current.delete(0, 1);
+        yWhiteboardRef.current.insert(0, [updatedState]);
+      }, 'drawing'); 
+
       redrawCanvas(objects);
     }
-  }, [isDrawing, isPanning, redrawCanvas, currentZoom]);
-  
+  });
+}, [isDrawing, isPanning, redrawCanvas, currentZoom]);
   const handleMouseUp = useCallback(() => {
     setIsDrawing(false);
     setIsPanning(false);
@@ -620,10 +545,98 @@ const StreamerWhiteboard = memo(({
     }
   }, [currentZoom, redrawCanvas]);
   
+  // Zoom controls (memoized)
+  const handleZoomIn = useCallback(() => {
+    setCurrentZoom(prev => Math.min(prev + 0.1, 3));
+    if (yWhiteboardRef.current) {
+      const state = yWhiteboardRef.current.toArray()[0] || {};
+      redrawCanvas(state.objects || []);
+    }
+  }, [redrawCanvas]);
+  
+  const handleZoomOut = useCallback(() => {
+    setCurrentZoom(prev => Math.max(prev - 0.1, 0.5));
+    if (yWhiteboardRef.current) {
+      const state = yWhiteboardRef.current.toArray()[0] || {};
+      redrawCanvas(state.objects || []);
+    }
+  }, [redrawCanvas]);
+  
+  const handleZoomReset = useCallback(() => {
+    setCurrentZoom(1);
+    canvasOffsetRef.current = { x: 0, y: 0 };
+    
+    if (yWhiteboardRef.current) {
+      const state = yWhiteboardRef.current.toArray()[0] || {};
+      redrawCanvas(state.objects || []);
+    }
+  }, [redrawCanvas]);
+  
+  // Clear whiteboard (memoized)
+  const handleClearWhiteboard = useCallback(() => {
+    if (window.confirm('Clear entire whiteboard?')) {
+      const emptyState = {
+        version: '1.0.0',
+        objects: [],
+        background: backgroundColor,
+        clearedAt: new Date().toISOString(),
+        clearedBy: sessionInfo?.streamerId
+      };
+      
+      yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
+      yWhiteboardRef.current.insert(0, [emptyState]);
+      
+      redrawCanvas([]);
+      toast.success('Whiteboard cleared');
+    }
+  }, [backgroundColor, sessionInfo, redrawCanvas]);
+  
+  // Export as image (memoized)
+  const handleExport = useCallback(() => {
+    const canvas = canvasRef.current;
+    const bgCanvas = backgroundCanvasRef.current;
+    
+    // Create a combined canvas
+    const exportCanvas = document.createElement('canvas');
+    exportCanvas.width = canvas.width;
+    exportCanvas.height = canvas.height;
+    
+    const exportCtx = exportCanvas.getContext('2d');
+    
+    // Draw background
+    exportCtx.drawImage(bgCanvas, 0, 0);
+    
+    // Draw drawings
+    exportCtx.drawImage(canvas, 0, 0);
+    
+    // Download
+    const link = document.createElement('a');
+    link.download = `whiteboard-${sessionId}-${Date.now()}.png`;
+    link.href = exportCanvas.toDataURL('image/png');
+    link.click();
+    
+    toast.success('Whiteboard exported');
+  }, [sessionId]);
+  
+  // Undo/Redo (memoized)
+  const handleUndo = useCallback(() => {
+    if (yUndoManagerRef.current) {
+      yUndoManagerRef.current.undo();
+    }
+  }, []);
+  
+  const handleRedo = useCallback(() => {
+    if (yUndoManagerRef.current) {
+      yUndoManagerRef.current.redo();
+    }
+  }, []);
+  
   return (
     <div 
       ref={containerRef}
-      className="relative w-full h-full bg-gray-900 overflow-hidden"
+      className={`absolute inset-0 z-20 w-full h-full bg-gray-900 overflow-hidden ${
+        isActive ? "block" : "hidden"
+      }`}
       onWheel={handleWheel}
     >
       {/* Background canvas */}
