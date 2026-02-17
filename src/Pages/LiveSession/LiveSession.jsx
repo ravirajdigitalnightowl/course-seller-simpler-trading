@@ -1444,103 +1444,11 @@ useEffect(() => {
 }, []);
 
 
-// const getMixedAudioStream = (screenStream, micStream) => {
-//   try {
-//     addDebugLog("🎚️ Starting Audio Mixing...");
-    
-//     // Create Audio Context
-//     const AudioContext = window.AudioContext || window.webkitAudioContext;
-//     const audioContext = new AudioContext();
-//     const destination = audioContext.createMediaStreamDestination();
-
-//     audioContextRef.current = audioContext;
-//     audioDestinationRef.current = destination;
-
-//     // Add Streamer Mic 🎤
-//     if (micStream && micStream.getAudioTracks().length > 0) {
-//       const micSource = audioContext.createMediaStreamSource(micStream);
-//       const micGain = audioContext.createGain();
-//       micGain.gain.value = 1.0; // Normal volume
-//       micSource.connect(micGain).connect(destination);
-//       addDebugLog("✅ Streamer Mic mixed");
-//     }
-
-//     // Add Screen Audio 🖥️ (from streamer's screen share)
-//     if (screenStream && screenStream.getAudioTracks().length > 0) {
-//       const screenSource = audioContext.createMediaStreamSource(screenStream);
-//       const screenGain = audioContext.createGain();
-//       screenGain.gain.value = 0.8; // Slightly lower volume for screen audio
-//       screenSource.connect(screenGain).connect(destination);
-//       addDebugLog("✅ Streamer Screen Audio mixed");
-//     }
-
-//     // ✅ FIXED: Add ALL viewer audio streams (mic + screen share audio)
-//     // Now using viewerAudiosRef which stores all audio with source-specific keys
-//     const audioEntries = Array.from(viewerAudiosRef.current.entries());
-    
-//     audioEntries.forEach(([audioKey, stream]) => {
-//       if (stream && stream.getAudioTracks().length > 0) {
-//         try {
-//           // Parse the audioKey to determine source type
-//           // Format can be: "viewer-mic-userId", "viewer-screen-audio-userId", or "mic-userId", "screen-userId"
-//           const isScreenAudio = audioKey.includes('screen-audio') || audioKey.includes('screen');
-//           const isMicAudio = audioKey.includes('mic') || audioKey.includes('viewer-mic');
-          
-//           // Extract userId from audioKey (last part after last '-')
-//           const userIdParts = audioKey.split('-');
-//           const userId = userIdParts[userIdParts.length - 1];
-          
-//           const viewerSource = audioContext.createMediaStreamSource(stream);
-//           const viewerGain = audioContext.createGain();
-          
-//           // Different volume levels based on audio type
-//           if (isScreenAudio) {
-//             viewerGain.gain.value = 0.7; // 70% volume for screen audio
-//             addDebugLog(`✅ Viewer Screen Audio mixed for user ${userId} (${audioKey})`);
-//           } else {
-//             viewerGain.gain.value = 0.8; // 80% volume for mic audio
-//             addDebugLog(`✅ Viewer Mic Audio mixed for user ${userId} (${audioKey})`);
-//           }
-          
-//           viewerSource.connect(viewerGain).connect(destination);
-          
-//         } catch (err) {
-//           console.warn(`Could not mix viewer audio ${audioKey}:`, err);
-//           addDebugLog(`⚠️ Failed to mix viewer audio ${audioKey}: ${err.message}`);
-//         }
-//       }
-//     });
-
-//     // Also check viewerScreenShare for any additional audio (if it has separate audio stream)
-//     if (viewerScreenShare?.audioStream) {
-//       try {
-//         const screenAudioSource = audioContext.createMediaStreamSource(viewerScreenShare.audioStream);
-//         const screenAudioGain = audioContext.createGain();
-//         screenAudioGain.gain.value = 0.7;
-//         screenAudioSource.connect(screenAudioGain).connect(destination);
-//         addDebugLog(`✅ Viewer Screen Share Audio mixed for ${viewerScreenShare.userName}`);
-//       } catch (err) {
-//         console.warn("Could not mix viewer screen share audio:", err);
-//       }
-//     }
-
-//     // Log total audio tracks mixed
-//     const totalTracks = destination.stream.getAudioTracks().length;
-//     addDebugLog(`🎵 Total audio tracks in mix: ${totalTracks}`);
-
-//     return destination.stream.getAudioTracks()[0];
-
-//   } catch (error) {
-//     console.error("Audio mixing failed:", error);
-//     addDebugLog(`❌ Audio mixing error: ${error.message}`);
-//     return null;
-//   }
-// };
-  
 const getMixedAudioStream = (screenStream, micStream) => {
   try {
-    addDebugLog("🎚️ Starting Audio Mixing (Echo-Safe)...");
-
+    addDebugLog("🎚️ Starting Audio Mixing...");
+    
+    // Create Audio Context
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     const audioContext = new AudioContext();
     const destination = audioContext.createMediaStreamDestination();
@@ -1548,98 +1456,87 @@ const getMixedAudioStream = (screenStream, micStream) => {
     audioContextRef.current = audioContext;
     audioDestinationRef.current = destination;
 
-    // Track whether mic is present (important for echo prevention)
-    const hasMic = !!(micStream && micStream.getAudioTracks && micStream.getAudioTracks().length > 0);
-    const hasScreenAudio = !!(screenStream && screenStream.getAudioTracks && screenStream.getAudioTracks().length > 0);
-
-    // (Optional) store sources for cleanup/debug
-    if (!window.__mixSources) window.__mixSources = new Map();
-    const mixSources = window.__mixSources;
-
-    // ========== 1) Streamer Mic ==========
-    if (hasMic) {
+    // Add Streamer Mic 🎤
+    if (micStream && micStream.getAudioTracks().length > 0) {
       const micSource = audioContext.createMediaStreamSource(micStream);
       const micGain = audioContext.createGain();
-      micGain.gain.value = 1.0;
-
+      micGain.gain.value = 1.0; // Normal volume
       micSource.connect(micGain).connect(destination);
-      mixSources.set("streamer-mic", { source: micSource, gain: micGain });
-
       addDebugLog("✅ Streamer Mic mixed");
     }
 
-    // ========== 2) Screen/System Audio ==========
-    // ✅ Echo-safe rule:
-    // If MIC exists, DON'T mix screen audio (most systems leak screen audio into mic => double audio/echo)
-    if (hasScreenAudio && !hasMic) {
+    // Add Screen Audio 🖥️ (from streamer's screen share)
+    if (screenStream && screenStream.getAudioTracks().length > 0) {
       const screenSource = audioContext.createMediaStreamSource(screenStream);
       const screenGain = audioContext.createGain();
-      screenGain.gain.value = 0.9;
-
+      screenGain.gain.value = 0.8; // Slightly lower volume for screen audio
       screenSource.connect(screenGain).connect(destination);
-      mixSources.set("streamer-screen-audio", { source: screenSource, gain: screenGain });
-
-      addDebugLog("✅ Streamer Screen Audio mixed (mic not present)");
-    } else if (hasScreenAudio && hasMic) {
-      addDebugLog("⏭️ Skipping Streamer Screen Audio (mic present) to prevent echo");
+      addDebugLog("✅ Streamer Screen Audio mixed");
     }
 
-    // ========== 3) Viewer Audios ==========
-    // ✅ Echo-safe rule:
-    // Mix only viewer MIC audio; skip viewer screen-audio to prevent loop/double
+    // ✅ FIXED: Add ALL viewer audio streams (mic + screen share audio)
+    // Now using viewerAudiosRef which stores all audio with source-specific keys
     const audioEntries = Array.from(viewerAudiosRef.current.entries());
-
+    
     audioEntries.forEach(([audioKey, stream]) => {
-      if (!stream || !stream.getAudioTracks || stream.getAudioTracks().length === 0) return;
-
-      const isViewerScreenAudio =
-        audioKey.includes("viewer-screen-audio") ||
-        audioKey.includes("screen-audio") ||
-        audioKey.includes("viewer-screen");
-
-      const isViewerMic =
-        audioKey.includes("viewer-mic") ||
-        (audioKey.includes("mic") && !isViewerScreenAudio);
-
-      // ✅ Skip viewer screen audio in recording mix
-      if (isViewerScreenAudio) {
-        addDebugLog(`⏭️ Skipping ${audioKey} (viewer screen audio) to prevent echo`);
-        return;
-      }
-
-      if (!isViewerMic) {
-        // If unknown type, skip safe-side
-        addDebugLog(`⏭️ Skipping ${audioKey} (unknown audio type)`);
-        return;
-      }
-
-      try {
-        const viewerSource = audioContext.createMediaStreamSource(stream);
-        const viewerGain = audioContext.createGain();
-        viewerGain.gain.value = 0.85; // slightly lower than streamer
-
-        viewerSource.connect(viewerGain).connect(destination);
-        mixSources.set(`viewer-mic:${audioKey}`, { source: viewerSource, gain: viewerGain });
-
-        addDebugLog(`✅ Viewer Mic Audio mixed (${audioKey})`);
-      } catch (err) {
-        console.warn(`Could not mix viewer mic ${audioKey}:`, err);
-        addDebugLog(`⚠️ Failed to mix viewer mic ${audioKey}: ${err.message}`);
+      if (stream && stream.getAudioTracks().length > 0) {
+        try {
+          // Parse the audioKey to determine source type
+          // Format can be: "viewer-mic-userId", "viewer-screen-audio-userId", or "mic-userId", "screen-userId"
+          const isScreenAudio = audioKey.includes('screen-audio') || audioKey.includes('screen');
+          const isMicAudio = audioKey.includes('mic') || audioKey.includes('viewer-mic');
+          
+          // Extract userId from audioKey (last part after last '-')
+          const userIdParts = audioKey.split('-');
+          const userId = userIdParts[userIdParts.length - 1];
+          
+          const viewerSource = audioContext.createMediaStreamSource(stream);
+          const viewerGain = audioContext.createGain();
+          
+          // Different volume levels based on audio type
+          if (isScreenAudio) {
+            viewerGain.gain.value = 0.7; // 70% volume for screen audio
+            addDebugLog(`✅ Viewer Screen Audio mixed for user ${userId} (${audioKey})`);
+          } else {
+            viewerGain.gain.value = 0.8; // 80% volume for mic audio
+            addDebugLog(`✅ Viewer Mic Audio mixed for user ${userId} (${audioKey})`);
+          }
+          
+          viewerSource.connect(viewerGain).connect(destination);
+          
+        } catch (err) {
+          console.warn(`Could not mix viewer audio ${audioKey}:`, err);
+          addDebugLog(`⚠️ Failed to mix viewer audio ${audioKey}: ${err.message}`);
+        }
       }
     });
 
-    const mixedTrack = destination.stream.getAudioTracks()[0];
-    addDebugLog(`🎵 Mix ready. Tracks in destination: ${destination.stream.getAudioTracks().length}`);
+    // Also check viewerScreenShare for any additional audio (if it has separate audio stream)
+    if (viewerScreenShare?.audioStream) {
+      try {
+        const screenAudioSource = audioContext.createMediaStreamSource(viewerScreenShare.audioStream);
+        const screenAudioGain = audioContext.createGain();
+        screenAudioGain.gain.value = 0.7;
+        screenAudioSource.connect(screenAudioGain).connect(destination);
+        addDebugLog(`✅ Viewer Screen Share Audio mixed for ${viewerScreenShare.userName}`);
+      } catch (err) {
+        console.warn("Could not mix viewer screen share audio:", err);
+      }
+    }
 
-    return mixedTrack || null;
+    // Log total audio tracks mixed
+    const totalTracks = destination.stream.getAudioTracks().length;
+    addDebugLog(`🎵 Total audio tracks in mix: ${totalTracks}`);
+
+    return destination.stream.getAudioTracks()[0];
+
   } catch (error) {
     console.error("Audio mixing failed:", error);
     addDebugLog(`❌ Audio mixing error: ${error.message}`);
     return null;
   }
 };
-
-const handleClose = () => {
+  const handleClose = () => {
     setShowRecorder(false);
     setIsRecording(false);
   };
@@ -5609,7 +5506,7 @@ return (
                   {zoomed.type === "whiteboard" ? (
                     showWhiteboard && whiteboardSessionInfo ? (
                       <StreamerWhiteboard
-                        key={`whiteboard-${whiteboardSessionInfo.sessionId}}`}
+                        key={`whiteboard-${whiteboardSessionInfo.sessionId}`}
                         sessionId={whiteboardSessionInfo.sessionId}
                         roomCode={whiteboardSessionInfo.roomCode}
                         wsToken={whiteboardSessionInfo.wsToken}
@@ -5973,7 +5870,7 @@ return (
                   {zoomed.type === "whiteboard" ? (
                     showWhiteboard && whiteboardSessionInfo ? (
                       <StreamerWhiteboard
-                        key={`whiteboard-${whiteboardSessionInfo.sessionId}-${Date.now()}`}
+                        key={`whiteboard-${whiteboardSessionInfo.sessionId}`}
                         sessionId={whiteboardSessionInfo.sessionId}
                         roomCode={whiteboardSessionInfo.roomCode}
                         wsToken={whiteboardSessionInfo.wsToken}
