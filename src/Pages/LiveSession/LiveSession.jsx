@@ -95,6 +95,8 @@ import {
 const LiveSession = () => {
   const [showAudioModal, setShowAudioModal] = useState(false);
 const [whiteboardSessionInfo, setWhiteboardSessionInfo] = useState(null);
+// Viewer screen share ke liye alag state
+const [viewerScreenShare, setViewerScreenShare] = useState(null);
   // Existing states में add करें:
 const [screenCaptureStream, setScreenCaptureStream] = useState(null);
 const [screenCaptureActive, setScreenCaptureActive] = useState(false);
@@ -195,6 +197,8 @@ const activeScreenShareRef = useRef(null);
 
 
 const screenCaptureActiveRef = useRef(false);
+const viewerScreenRef = useRef(null);
+
 
   const streamerMediaRef = useRef(new MediaStream());
   const viewerAudiosRef = useRef(new Map());
@@ -226,7 +230,12 @@ const audioDestinationRef = useRef(null);
   const [device] = useState(new mediasoupClient.Device());
   const [showRecorder, setShowRecorder] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
-  const thumbnailsCount = (mediaStream ? 1 : 0) + viewerCameras.size + (activeScreenShare ? 1 : 0);
+  // const thumbnailsCount = (mediaStream ? 1 : 0) + viewerCameras.size + (activeScreenShare ? 1 : 0);
+  // Line ~234 par update karo
+const thumbnailsCount = (mediaStream ? 1 : 0) + 
+                       viewerCameras.size + 
+                       (activeScreenShare ? 1 : 0) + 
+                       (viewerScreenShare ? 1 : 0); // ✅ YEH ADD KARO
 
   const [roomState, setRoomState] = useState({
     isStreaming: false,
@@ -1435,13 +1444,103 @@ useEffect(() => {
 }, []);
 
 
-// getMixedAudioStream function में improvement करें
-// getMixedAudioStream function में improvement करें
+// const getMixedAudioStream = (screenStream, micStream) => {
+//   try {
+//     addDebugLog("🎚️ Starting Audio Mixing...");
+    
+//     // Create Audio Context
+//     const AudioContext = window.AudioContext || window.webkitAudioContext;
+//     const audioContext = new AudioContext();
+//     const destination = audioContext.createMediaStreamDestination();
+
+//     audioContextRef.current = audioContext;
+//     audioDestinationRef.current = destination;
+
+//     // Add Streamer Mic 🎤
+//     if (micStream && micStream.getAudioTracks().length > 0) {
+//       const micSource = audioContext.createMediaStreamSource(micStream);
+//       const micGain = audioContext.createGain();
+//       micGain.gain.value = 1.0; // Normal volume
+//       micSource.connect(micGain).connect(destination);
+//       addDebugLog("✅ Streamer Mic mixed");
+//     }
+
+//     // Add Screen Audio 🖥️ (from streamer's screen share)
+//     if (screenStream && screenStream.getAudioTracks().length > 0) {
+//       const screenSource = audioContext.createMediaStreamSource(screenStream);
+//       const screenGain = audioContext.createGain();
+//       screenGain.gain.value = 0.8; // Slightly lower volume for screen audio
+//       screenSource.connect(screenGain).connect(destination);
+//       addDebugLog("✅ Streamer Screen Audio mixed");
+//     }
+
+//     // ✅ FIXED: Add ALL viewer audio streams (mic + screen share audio)
+//     // Now using viewerAudiosRef which stores all audio with source-specific keys
+//     const audioEntries = Array.from(viewerAudiosRef.current.entries());
+    
+//     audioEntries.forEach(([audioKey, stream]) => {
+//       if (stream && stream.getAudioTracks().length > 0) {
+//         try {
+//           // Parse the audioKey to determine source type
+//           // Format can be: "viewer-mic-userId", "viewer-screen-audio-userId", or "mic-userId", "screen-userId"
+//           const isScreenAudio = audioKey.includes('screen-audio') || audioKey.includes('screen');
+//           const isMicAudio = audioKey.includes('mic') || audioKey.includes('viewer-mic');
+          
+//           // Extract userId from audioKey (last part after last '-')
+//           const userIdParts = audioKey.split('-');
+//           const userId = userIdParts[userIdParts.length - 1];
+          
+//           const viewerSource = audioContext.createMediaStreamSource(stream);
+//           const viewerGain = audioContext.createGain();
+          
+//           // Different volume levels based on audio type
+//           if (isScreenAudio) {
+//             viewerGain.gain.value = 0.7; // 70% volume for screen audio
+//             addDebugLog(`✅ Viewer Screen Audio mixed for user ${userId} (${audioKey})`);
+//           } else {
+//             viewerGain.gain.value = 0.8; // 80% volume for mic audio
+//             addDebugLog(`✅ Viewer Mic Audio mixed for user ${userId} (${audioKey})`);
+//           }
+          
+//           viewerSource.connect(viewerGain).connect(destination);
+          
+//         } catch (err) {
+//           console.warn(`Could not mix viewer audio ${audioKey}:`, err);
+//           addDebugLog(`⚠️ Failed to mix viewer audio ${audioKey}: ${err.message}`);
+//         }
+//       }
+//     });
+
+//     // Also check viewerScreenShare for any additional audio (if it has separate audio stream)
+//     if (viewerScreenShare?.audioStream) {
+//       try {
+//         const screenAudioSource = audioContext.createMediaStreamSource(viewerScreenShare.audioStream);
+//         const screenAudioGain = audioContext.createGain();
+//         screenAudioGain.gain.value = 0.7;
+//         screenAudioSource.connect(screenAudioGain).connect(destination);
+//         addDebugLog(`✅ Viewer Screen Share Audio mixed for ${viewerScreenShare.userName}`);
+//       } catch (err) {
+//         console.warn("Could not mix viewer screen share audio:", err);
+//       }
+//     }
+
+//     // Log total audio tracks mixed
+//     const totalTracks = destination.stream.getAudioTracks().length;
+//     addDebugLog(`🎵 Total audio tracks in mix: ${totalTracks}`);
+
+//     return destination.stream.getAudioTracks()[0];
+
+//   } catch (error) {
+//     console.error("Audio mixing failed:", error);
+//     addDebugLog(`❌ Audio mixing error: ${error.message}`);
+//     return null;
+//   }
+// };
+  
 const getMixedAudioStream = (screenStream, micStream) => {
   try {
-    addDebugLog("🎚️ Starting Audio Mixing...");
-    
-    // Create Audio Context
+    addDebugLog("🎚️ Starting Audio Mixing (Echo-Safe)...");
+
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     const audioContext = new AudioContext();
     const destination = audioContext.createMediaStreamDestination();
@@ -1449,47 +1548,98 @@ const getMixedAudioStream = (screenStream, micStream) => {
     audioContextRef.current = audioContext;
     audioDestinationRef.current = destination;
 
-    // Add Streamer Mic 🎤
-    if (micStream && micStream.getAudioTracks().length > 0) {
+    // Track whether mic is present (important for echo prevention)
+    const hasMic = !!(micStream && micStream.getAudioTracks && micStream.getAudioTracks().length > 0);
+    const hasScreenAudio = !!(screenStream && screenStream.getAudioTracks && screenStream.getAudioTracks().length > 0);
+
+    // (Optional) store sources for cleanup/debug
+    if (!window.__mixSources) window.__mixSources = new Map();
+    const mixSources = window.__mixSources;
+
+    // ========== 1) Streamer Mic ==========
+    if (hasMic) {
       const micSource = audioContext.createMediaStreamSource(micStream);
       const micGain = audioContext.createGain();
-      micGain.gain.value = 1.0; // Normal volume
+      micGain.gain.value = 1.0;
+
       micSource.connect(micGain).connect(destination);
+      mixSources.set("streamer-mic", { source: micSource, gain: micGain });
+
       addDebugLog("✅ Streamer Mic mixed");
     }
 
-    // Add Screen Audio 🖥️
-    if (screenStream && screenStream.getAudioTracks().length > 0) {
+    // ========== 2) Screen/System Audio ==========
+    // ✅ Echo-safe rule:
+    // If MIC exists, DON'T mix screen audio (most systems leak screen audio into mic => double audio/echo)
+    if (hasScreenAudio && !hasMic) {
       const screenSource = audioContext.createMediaStreamSource(screenStream);
       const screenGain = audioContext.createGain();
-      screenGain.gain.value = 0.8; // Slightly lower volume for screen audio
+      screenGain.gain.value = 0.9;
+
       screenSource.connect(screenGain).connect(destination);
-      addDebugLog("✅ Screen Audio mixed");
+      mixSources.set("streamer-screen-audio", { source: screenSource, gain: screenGain });
+
+      addDebugLog("✅ Streamer Screen Audio mixed (mic not present)");
+    } else if (hasScreenAudio && hasMic) {
+      addDebugLog("⏭️ Skipping Streamer Screen Audio (mic present) to prevent echo");
     }
 
-    // ✅ IMPORTANT FIX: Add all viewer audios
-    viewerAudiosRef.current.forEach((stream, userId) => {
-      if (stream && stream.getAudioTracks().length > 0) {
-        try {
-          const viewerSource = audioContext.createMediaStreamSource(stream);
-          const viewerGain = audioContext.createGain();
-          viewerGain.gain.value = 1.0;
-          viewerSource.connect(viewerGain).connect(destination);
-          addDebugLog(`✅ Viewer ${userId} audio mixed`);
-        } catch (err) {
-          console.warn(`Could not mix viewer ${userId} audio:`, err);
-        }
+    // ========== 3) Viewer Audios ==========
+    // ✅ Echo-safe rule:
+    // Mix only viewer MIC audio; skip viewer screen-audio to prevent loop/double
+    const audioEntries = Array.from(viewerAudiosRef.current.entries());
+
+    audioEntries.forEach(([audioKey, stream]) => {
+      if (!stream || !stream.getAudioTracks || stream.getAudioTracks().length === 0) return;
+
+      const isViewerScreenAudio =
+        audioKey.includes("viewer-screen-audio") ||
+        audioKey.includes("screen-audio") ||
+        audioKey.includes("viewer-screen");
+
+      const isViewerMic =
+        audioKey.includes("viewer-mic") ||
+        (audioKey.includes("mic") && !isViewerScreenAudio);
+
+      // ✅ Skip viewer screen audio in recording mix
+      if (isViewerScreenAudio) {
+        addDebugLog(`⏭️ Skipping ${audioKey} (viewer screen audio) to prevent echo`);
+        return;
+      }
+
+      if (!isViewerMic) {
+        // If unknown type, skip safe-side
+        addDebugLog(`⏭️ Skipping ${audioKey} (unknown audio type)`);
+        return;
+      }
+
+      try {
+        const viewerSource = audioContext.createMediaStreamSource(stream);
+        const viewerGain = audioContext.createGain();
+        viewerGain.gain.value = 0.85; // slightly lower than streamer
+
+        viewerSource.connect(viewerGain).connect(destination);
+        mixSources.set(`viewer-mic:${audioKey}`, { source: viewerSource, gain: viewerGain });
+
+        addDebugLog(`✅ Viewer Mic Audio mixed (${audioKey})`);
+      } catch (err) {
+        console.warn(`Could not mix viewer mic ${audioKey}:`, err);
+        addDebugLog(`⚠️ Failed to mix viewer mic ${audioKey}: ${err.message}`);
       }
     });
 
-    return destination.stream.getAudioTracks()[0];
+    const mixedTrack = destination.stream.getAudioTracks()[0];
+    addDebugLog(`🎵 Mix ready. Tracks in destination: ${destination.stream.getAudioTracks().length}`);
 
+    return mixedTrack || null;
   } catch (error) {
     console.error("Audio mixing failed:", error);
+    addDebugLog(`❌ Audio mixing error: ${error.message}`);
     return null;
   }
 };
-  const handleClose = () => {
+
+const handleClose = () => {
     setShowRecorder(false);
     setIsRecording(false);
   };
@@ -1644,7 +1794,7 @@ const confirmRemoveAudio = () => {
     addDebugLog(`New viewer screen producer: ${data.producerId} from user: ${data.userId}`);
     const socket = getSocket();
     if (socket) {
-      createConsumer(socket, sessionId || roomCode, data.producerId, data.kind);
+      createConsumer(sessionId || roomCode, data.producerId, data.kind);
     } else {
       addDebugLog('❌ Cannot create consumer: Socket not available');
     }
@@ -1772,52 +1922,140 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
 
   addDebugLog(`🎵 New audio consumer: ${userId} (${sourceType})`);
 
-  // ✅ Check if we already have audio for this user
-  const existingAudioEl = audioElementsRef.current.get(userId);
+  // ✅ Create unique key based on source type
+  const audioKey = `${sourceType}-${userId}`;
+  
+  // ✅ Check if we already have audio for this combination
+  const existingAudioEl = audioElementsRef.current.get(audioKey);
   
   if (existingAudioEl) {
-    // ✅ पहले से audio element है - update करें
+    // ✅ Update existing audio element
     addDebugLog(`🔄 Updating existing audio element for ${userId} with ${sourceType}`);
     
-    // पुराने tracks को stop करें
+    // Stop old tracks
     if (existingAudioEl.srcObject) {
       existingAudioEl.srcObject.getTracks().forEach(track => {
         if (track.readyState === 'live') {
           track.stop();
-          addDebugLog(`🛑 Stopped old audio track: ${track.id}`);
         }
       });
     }
     
-    // नया stream set करें
+    // Set new stream
     existingAudioEl.srcObject = audioStream;
     
     if (userInteractedRef.current) {
       existingAudioEl.play().catch(err => {
-        addDebugLog(`⚠️ Play failed for updated audio: ${err.message}`);
+        if (err.name !== 'NotAllowedError') {
+          addDebugLog(`⚠️ Play failed for updated audio: ${err.message}`);
+        }
       });
     }
     
-    // Update refs
-    viewerAudiosRef.current.set(userId, audioStream);
+    // Update refs with source-specific key
+    viewerAudiosRef.current.set(audioKey, audioStream);
     
   } else {
-    // ✅ नया audio element create करें
-    const audioEl = createAndPlayAudioElement(userId, audioStream, userName);
+    // ✅ Create new audio element with source-specific ID
+    const audioElementId = `audio-${userId}-${sourceType}`;
+    let audioEl = document.getElementById(audioElementId);
+    
     if (!audioEl) {
-      addDebugLog(`❌ Failed to create audio element for ${userId}`);
-      return;
+      audioEl = document.createElement("audio");
+      audioEl.id = audioElementId;
+      audioEl.playsInline = true;
+      audioEl.controls = false;
+      audioEl.muted = false;
+      audioEl.setAttribute('data-user-id', userId);
+      audioEl.setAttribute('data-source', sourceType);
+      audioEl.setAttribute('data-user-name', userName);
+      document.body.appendChild(audioEl);
     }
+    
+    audioEl.srcObject = audioStream;
+    
+    // Play if user interacted
+    if (userInteractedRef.current) {
+      audioEl.play().catch(err => {
+        if (err.name !== 'NotAllowedError') {
+          addDebugLog(`⚠️ Play failed for ${audioElementId}: ${err.message}`);
+        }
+      });
+    } else {
+      // Queue for later
+      pendingAudioQueueRef.current.set(audioKey, {
+        userId,
+        userName,
+        audioStream,
+        sourceType,
+        timestamp: Date.now(),
+      });
+      setPendingAudioStreams(new Map(pendingAudioQueueRef.current));
+    }
+    
+    // Store references
+    audioElementsRef.current.set(audioKey, audioEl);
+    viewerAudiosRef.current.set(audioKey, audioStream);
+    
+    // Update viewerAudios state for mic only (for backward compatibility)
+    if (sourceType === 'viewer-mic') {
+      setViewerAudios(prev => {
+        const newMap = new Map(prev);
+        newMap.set(userId, audioStream);
+        return newMap;
+      });
+    }
+    
+    addDebugLog(`✅ ${sourceType} audio setup completed for ${userName}`);
   }
 
-  // ✅ Recording में add करें (यदि active है)
+  // ✅ FIXED: RECORDING - Add BOTH mic AND screen audio to recording
   if (isRecording && audioContextRef.current && audioDestinationRef.current) {
     try {
-      const newSource = audioContextRef.current.createMediaStreamSource(audioStream);
-      newSource.connect(audioDestinationRef.current);
-      addDebugLog(`➕ ${sourceType} added to recording mix for ${userId}`);
+      // ✅ NOW ALLOW BOTH viewer-mic AND viewer-screen-audio
+      if (sourceType === 'viewer-mic' || sourceType === 'viewer-screen-audio') {
+        // Create unique key for this audio source
+        const sourceKey = `recording-${audioKey}`;
+        
+        // Check if already added
+        if (window.recordingAudioSources?.has(sourceKey)) {
+          addDebugLog(`⏩ ${sourceType} from ${userId} already in recording`);
+          return;
+        }
+        
+        // Create audio source node
+        const newSource = audioContextRef.current.createMediaStreamSource(audioStream);
+        const gainNode = audioContextRef.current.createGain();
+        
+        // Different gain levels for different audio types
+        if (sourceType === 'viewer-mic') {
+          gainNode.gain.value = 0.8; // 80% volume for viewer mic
+          addDebugLog(`✅ Viewer mic audio added to recording for ${userId}`);
+        } else if (sourceType === 'viewer-screen-audio') {
+          gainNode.gain.value = 0.7; // 70% volume for screen audio (slightly lower)
+          addDebugLog(`✅ Viewer screen audio added to recording for ${userId}`);
+        }
+        
+        newSource.connect(gainNode).connect(audioDestinationRef.current);
+        
+        // Store for cleanup
+        if (!window.recordingAudioSources) {
+          window.recordingAudioSources = new Map();
+        }
+        window.recordingAudioSources.set(sourceKey, {
+          source: newSource,
+          gainNode: gainNode,
+          stream: audioStream,
+          sourceType: sourceType,
+          userId: userId,
+          timestamp: Date.now()
+        });
+        
+        addDebugLog(`✅ ${sourceType} added to recording mix for ${userId}`);
+      }
     } catch (err) {
       console.warn(`Failed to add ${sourceType} to recording:`, err);
+      addDebugLog(`⚠️ Failed to add ${sourceType} to recording: ${err.message}`);
     }
   }
 };
@@ -1886,7 +2124,7 @@ const handleEnableAudio = () => {
 const handleScreenShareStarted = useCallback((data) => {
   addDebugLog(`Screen share started by viewer: ${data.userId}`);
 
-  setActiveScreenShare(prev => {
+  setViewerScreenShare(prev => {
     if (prev?.source === "streamer") return prev;
     return {
       userId: data.userId,
@@ -1900,40 +2138,93 @@ const handleScreenShareStarted = useCallback((data) => {
 
 const handleScreenShareStopped = useCallback((data) => {
   addDebugLog(
-    `🛑 Screen share stopped by viewer: ${data.userId}, source: ${data.source}`
+    `🛑 Screen share stopped: ${data.userId}, source: ${data.source}`
   );
 
-  // ✅ Reset zoom if same user's screen was zoomed
+  // ✅ Only handle VIEWER screen stop here
+  if (data.source !== "viewer-screen") {
+    addDebugLog(`ℹ️ Ignored stop event (not viewer-screen): ${data.source}`);
+    return;
+  }
+
+  // ✅ Reset zoom if viewer screen was zoomed
   setZoomed((prev) => {
-    if (prev && prev.type === "screen" && prev.userId === data.userId) {
-      addDebugLog(`🔄 Resetting zoom for stopped user: ${data.userId}`);
+    if (
+      prev &&
+      (prev.type === "viewer-screen" || prev.type === "screen") &&
+      prev.userId === data.userId
+    ) {
+      addDebugLog(`🔄 Resetting zoom for stopped viewer: ${data.userId}`);
       return null;
     }
     return prev;
   });
 
-  // ✅ Forcefully clear active screen share
-  setActiveScreenShare((prev) => {
-    if (prev && prev.stream) {
+  // ✅ Clear viewer screen share state ONLY
+  setViewerScreenShare((prev) => {
+    if (prev?.stream) {
       try {
         prev.stream.getTracks().forEach((track) => track.stop());
       } catch (e) {
         console.warn("Error stopping viewer screen tracks", e);
       }
     }
-
-    if (screenRef.current) {
-      try {
-        screenRef.current.srcObject = null;
-        screenRef.current.load?.();
-      } catch (e) {
-        console.warn("Error clearing screenRef", e);
-      }
-    }
-    addDebugLog(`✅ Forced reset of active screen share (viewer: ${data.userId})`);
     return null;
   });
-}, [screenRef]);
+
+  // ✅ Clear viewer screen element if you use separate ref
+  if (viewerScreenRef?.current) {
+    try {
+      viewerScreenRef.current.srcObject = null;
+      viewerScreenRef.current.load?.();
+    } catch (e) {
+      console.warn("Error clearing viewerScreenRef", e);
+    }
+  }
+
+  addDebugLog(`✅ Viewer screen share cleared for viewer: ${data.userId}`);
+}, [setZoomed, setViewerScreenShare]);
+
+
+const handleViewerScreenShareStopped = useCallback((data) => {
+  addDebugLog(`🛑 Viewer screen share stopped: ${data.userId}`);
+  
+  // ✅ Clear viewer screen share state
+  setViewerScreenShare(null);
+  
+  // ✅ Cleanup viewer screen stream
+  if (viewerScreenShare?.stream) {
+    try {
+      viewerScreenShare.stream.getTracks().forEach((track) => {
+        if (track.readyState === 'live') track.stop();
+      });
+    } catch (e) {
+      console.warn("Error stopping viewer screen tracks", e);
+    }
+  }
+  
+  // ✅ Cleanup viewer screen audio
+  const audioElementId = `audio-${data.userId}-viewer-screen-audio`;
+  const audioEl = document.getElementById(audioElementId);
+  if (audioEl) {
+    audioEl.pause();
+    audioEl.srcObject = null;
+    if (audioEl.parentNode) {
+      audioEl.parentNode.removeChild(audioEl);
+    }
+  }
+  
+  // ✅ Reset zoom if this viewer's screen was zoomed
+  setZoomed((prev) => {
+    if (prev && prev.type === "screen" && prev.userId === data.userId) {
+      addDebugLog(`🔄 Resetting zoom for stopped viewer screen: ${data.userId}`);
+      return null;
+    }
+    return prev;
+  });
+  
+  addDebugLog(`✅ Viewer screen share cleared for user: ${data.userId}`);
+}, [viewerScreenShare]);
 
   const handleStopViewerScreenShare = useCallback((targetUserId) => {
     emitSocketEvent('screen-share-force-stop', {
@@ -2007,8 +2298,7 @@ const createConsumer = async (currentSessionId, producerId, kind, transportId = 
 
     addDebugLog(`🎯 Creating consumer for producer: ${producerId}`);
 
-    // ✅ FIX: Skip ONLY if EXACT same producerId exists
-    // (क्योंकि एक user के दो अलग producers हो सकते हैं - mic और screen-audio)
+    // ✅ Skip if EXACT same producerId exists
     if (consumers.current.has(producerId)) {
       addDebugLog(`⚠️ Already have consumer for exact producer ${producerId}, skipping`);
       return;
@@ -2023,9 +2313,7 @@ const createConsumer = async (currentSessionId, producerId, kind, transportId = 
           return;
         }
 
-        addDebugLog(
-          `📡 Producer info: kind=${info.kind}, userId=${info.userId}, source=${info.source}, userName=${info.userName}`
-        );
+        addDebugLog(`📡 Producer info: kind=${info.kind}, userId=${info.userId}, source=${info.source}, userName=${info.userName}`);
 
         // ✅ DEBUG LOG
         console.log("PRODUCER INFO RECEIVED:", {
@@ -2037,41 +2325,27 @@ const createConsumer = async (currentSessionId, producerId, kind, transportId = 
           isAudio: info.kind === 'audio'
         });
 
-        // ✅ CRITICAL FIX: Check if this user already has active mic consumer
+        // ✅ Check existing consumers
         const existingConsumersForUser = Array.from(consumers.current.values()).filter(
           (consumer) => consumer.appData?.userId === info.userId
         );
 
-        console.log(`🔄 Existing consumers for user ${info.userId}:`, 
-          existingConsumersForUser.map(c => ({
-            id: c.id,
-            source: c.appData?.source,
-            producerId: c.producerId
-          }))
-        );
-
-        // ✅ IMPORTANT: अगर user का screen-audio आ रहा है, और पहले से mic चल रहा है
-        // तो mic को बंद न करें - दोनों एक साथ चलने दें
+        // ✅ Handle both audio types together
         if (info.source === "viewer-screen-audio") {
           const existingMicConsumer = existingConsumersForUser.find(
             c => c.appData?.source === "viewer-mic"
           );
-          
           if (existingMicConsumer) {
             addDebugLog(`🔊 User ${info.userId} already has mic audio, KEEPING BOTH (mic + screen-audio)`);
-            // ✅ Continue with screen-audio - mic को disturb न करें
           }
         }
 
-        // ✅ IMPORTANT: अगर user का mic audio आ रहा है, और पहले से screen-audio चल रहा है
         if (info.source === "viewer-mic") {
           const existingScreenAudioConsumer = existingConsumersForUser.find(
             c => c.appData?.source === "viewer-screen-audio"
           );
-          
           if (existingScreenAudioConsumer) {
             addDebugLog(`🔊 User ${info.userId} already has screen-audio, KEEPING BOTH (mic + screen-audio)`);
-            // ✅ Continue with mic - screen-audio को disturb न करें
           }
         }
 
@@ -2132,97 +2406,167 @@ const createConsumer = async (currentSessionId, producerId, kind, transportId = 
                   source: info.source || "camera",
                   userId: info.userId,
                   userName: info.userName,
-                  timestamp: Date.now() // Track when consumer was created
+                  timestamp: Date.now()
                 },
               });
 
               consumers.current.set(consumer.id, consumer);
               addDebugLog(`✅ Consumer created: ${consumer.id} (${info.source}) for user ${info.userId}`);
 
-              // ✅ DEBUG: consumer details
-              console.log("CONSUMER CREATED DETAILS:", {
-                id: consumer.id,
-                kind: consumer.kind,
-                source: info.source,
-                userId: info.userId,
-                track: consumer.track ? "Has track" : "No track",
-                trackKind: consumer.track?.kind,
-                trackReadyState: consumer.track?.readyState,
-                totalConsumersForThisUser: existingConsumersForUser.length + 1
-              });
-
-              // === Handle sources ===
+              // === HANDLE DIFFERENT SOURCES ===
               if (consumer.track) {
-                if (info.source === "screen" || info.source === "viewer-screen") {
-                  // 🔹 Screen share VIDEO
+                
+                // ===== 1. STREAMER SCREEN SHARE =====
+                if (info.source === "screen") {
                   const screenStream = new MediaStream([consumer.track]);
+                  
+                  // ✅ Use activeScreenShare for streamer
                   setActiveScreenShare({
                     userId: info.userId,
-                    userName: info.userName || (info.source === "screen" ? "Streamer" : "Viewer"),
+                    userName: info.userName || "Streamer",
                     stream: screenStream,
-                    source: info.source,
+                    source: "streamer",
                   });
 
                   if (screenRef.current) {
-                      screenRef.current.srcObject = screenStream;
-                     screenRef.current.play?.().catch(() => {});
-                   }
-                  addDebugLog(`🖥️ Active screen set (${info.source})`);
-
-                } else if (info.source === "viewer-screen-audio" || info.source === "viewer-mic") {
-                  // 🔹 BOTH audio types - मुख्य FIX यहां है
-                  console.log(`🎵 Handling ${info.source} for user:`, info.userId);
+                    screenRef.current.srcObject = screenStream;
+                    screenRef.current.play?.().catch(() => {});
+                  }
+                  addDebugLog(`🖥️ STREAMER screen share active`);
+                }
+                
+                // ===== 2. VIEWER SCREEN SHARE =====
+                else if (info.source === "viewer-screen") {
+                  const screenStream = new MediaStream([consumer.track]);
                   
-                  // ✅ Create unique element ID for each audio source
-                  const audioElementId = `audio-${info.userId}-${info.source}`;
+                  // ✅ Use separate viewerScreenShare state
+                  setViewerScreenShare({
+                    userId: info.userId,
+                    userName: info.userName || "Viewer",
+                    stream: screenStream,
+                    source: "viewer-screen",
+                    producerId: producerId,
+                    hasAudio: false
+                  });
                   
-                  // Check if audio element already exists
+                  addDebugLog(`📱 VIEWER screen share stored separately`);
+                }
+                
+                // ===== 3. VIEWER SCREEN AUDIO =====
+                else if (info.source === "viewer-screen-audio") {
+                  const audioStream = new MediaStream([consumer.track]);
+                  
+                  // Update viewerScreenShare with audio
+                  setViewerScreenShare(prev => {
+                    if (prev && prev.userId === info.userId) {
+                      return { ...prev, audioStream, hasAudio: true };
+                    }
+                    return prev;
+                  });
+                  
+                  // Create audio element for playback
+                  const audioElementId = `audio-${info.userId}-screen`;
                   let audioEl = document.getElementById(audioElementId);
                   if (!audioEl) {
-                    // Create new audio element
                     audioEl = document.createElement("audio");
                     audioEl.id = audioElementId;
                     audioEl.playsInline = true;
                     audioEl.controls = false;
                     audioEl.muted = false;
                     audioEl.setAttribute('data-user-id', info.userId);
-                    audioEl.setAttribute('data-source', info.source);
-                    audioEl.setAttribute('data-user-name', info.userName);
+                    audioEl.setAttribute('data-source', 'viewer-screen-audio');
                     document.body.appendChild(audioEl);
-                    addDebugLog(`🎧 Created new audio element: ${audioElementId}`);
                   }
                   
-                  // Set the stream
-                  const audioStream = new MediaStream([consumer.track]);
                   audioEl.srcObject = audioStream;
                   
-                  // Store in viewerAudiosRef with unique key
-                  viewerAudiosRef.current.set(audioElementId, audioStream);
-                  
-                  // Play if user has interacted
+                  // Play if user interacted
                   if (userInteractedRef.current) {
                     audioEl.play().catch(err => {
                       if (err.name !== 'NotAllowedError') {
-                        addDebugLog(`⚠️ Play failed for ${audioElementId}: ${err.message}`);
+                        addDebugLog(`⚠️ Play failed for screen audio: ${err.message}`);
                       }
                     });
                   } else {
-                    // Queue for later play
-                    pendingAudioQueueRef.current.set(audioElementId, {
+                    // Queue for later
+                    pendingAudioQueueRef.current.set(`screen-${info.userId}`, {
                       userId: info.userId,
                       userName: info.userName,
                       audioStream,
-                      source: info.source,
+                      source: 'viewer-screen-audio',
                       timestamp: Date.now(),
                     });
-                    
                     setPendingAudioStreams(new Map(pendingAudioQueueRef.current));
                   }
                   
-                  addDebugLog(`✅ ${info.source} audio setup completed for ${info.userName}`);
+                  // ❌ IMPORTANT: NOT adding to recording
+                  addDebugLog(`📢 Viewer screen audio setup (NOT added to recording)`);
+                }
+                
+                // ===== 4. VIEWER MIC AUDIO =====
+                else if (info.source === "viewer-mic") {
+                  const audioStream = new MediaStream([consumer.track]);
                   
-                } else if (info.source === "viewer-camera") {
-                  // 🔹 Viewer camera
+                  // Store in viewerAudios
+                  const audioElementId = `audio-${info.userId}-mic`;
+                  let audioEl = document.getElementById(audioElementId);
+                  if (!audioEl) {
+                    audioEl = document.createElement("audio");
+                    audioEl.id = audioElementId;
+                    audioEl.playsInline = true;
+                    audioEl.controls = false;
+                    audioEl.muted = false;
+                    audioEl.setAttribute('data-user-id', info.userId);
+                    audioEl.setAttribute('data-source', 'viewer-mic');
+                    document.body.appendChild(audioEl);
+                  }
+                  
+                  audioEl.srcObject = audioStream;
+                  viewerAudiosRef.current.set(`mic-${info.userId}`, audioStream);
+                  
+                  // Update viewerAudios state
+                  setViewerAudios(prev => {
+                    const newMap = new Map(prev);
+                    newMap.set(info.userId, audioStream);
+                    return newMap;
+                  });
+                  
+                  // Play if user interacted
+                  if (userInteractedRef.current) {
+                    audioEl.play().catch(err => {
+                      if (err.name !== 'NotAllowedError') {
+                        addDebugLog(`⚠️ Play failed for mic: ${err.message}`);
+                      }
+                    });
+                  } else {
+                    pendingAudioQueueRef.current.set(`mic-${info.userId}`, {
+                      userId: info.userId,
+                      userName: info.userName,
+                      audioStream,
+                      source: 'viewer-mic',
+                      timestamp: Date.now(),
+                    });
+                    setPendingAudioStreams(new Map(pendingAudioQueueRef.current));
+                  }
+                  
+                  // ✅ MIC AUDIO - Add to recording (if active)
+                  if (isRecording && audioContextRef.current && audioDestinationRef.current) {
+                    try {
+                      const newSource = audioContextRef.current.createMediaStreamSource(audioStream);
+                      const gainNode = audioContextRef.current.createGain();
+                      gainNode.gain.value = 0.8;
+                      newSource.connect(gainNode).connect(audioDestinationRef.current);
+                      addDebugLog(`➕ Viewer mic added to recording: ${info.userId}`);
+                    } catch (err) {
+                      console.warn("Failed to add viewer mic to recording", err);
+                    }
+                  }
+                  
+                  addDebugLog(`🎤 Viewer mic audio setup for ${info.userName}`);
+                }
+                
+                // ===== 5. VIEWER CAMERA =====
+                else if (info.source === "viewer-camera") {
                   try {
                     const videoStream = new MediaStream([consumer.track]);
                     setViewerCameras((prev) => {
@@ -2234,15 +2578,13 @@ const createConsumer = async (currentSessionId, producerId, kind, transportId = 
                   } catch (err) {
                     addDebugLog(`❌ Error storing viewer camera: ${err?.message || err}`);
                   }
-
-                } else if (consumer.track.kind === "video") {
-                  // Streamer video skip
+                }
+                
+                // ===== 6. STREAMER VIDEO/AUDIO =====
+                else if (consumer.track.kind === "video") {
                   addDebugLog(`⏩ Skipping streamer video: ${info.source}`);
-
                 } else if (consumer.track.kind === "audio") {
-                  // Streamer audio skip
                   addDebugLog(`⏩ Skipping streamer audio: ${info.source}`);
-
                 } else {
                   addDebugLog(`ℹ️ Unhandled source: ${info.source}, kind: ${consumer.track.kind}`);
                 }
@@ -3715,7 +4057,7 @@ newSocket.on('recording_stopped', (data) => {
     newSocket.on('viewer-audio-started', handleViewerAudioStarted);
     newSocket.on('viewer-audio-muted', handleViewerAudioMuted);
     newSocket.on('screen-share-started-by-viewer', handleScreenShareStarted);
-    newSocket.on('screen-share-stopped-by-viewer', handleScreenShareStopped);
+    newSocket.on('screen-share-stopped-by-viewer', handleViewerScreenShareStopped);
     newSocket.on("viewer-video-request", handleViewerVideoRequest);
 
 
@@ -3999,53 +4341,100 @@ newSocket.on("producer-closed", (data) => {
     `❌ Producer closed: ${data.producerId}, source: ${data.source}, user: ${data.userId}`
   );
 
-  // 🖥️ Screen share cleanup (streamer OR viewer)
-  if (data.source === "screen" || data.source === "viewer-screen") {
-    // 🔴 Forcefully clear state
+  // ==============================
+  // 1) STREAMER SCREEN cleanup ONLY
+  // ==============================
+  if (data.source === "screen") {
+    // ✅ Clear only streamer screen share state
     setActiveScreenShare(null);
 
-    // 🔴 Stop only video tracks from screen share
+    // ✅ Stop ONLY VIDEO tracks from screenRef
     try {
-      if (screenRef.current?.srcObject) {
-        const tracks = screenRef.current.srcObject.getTracks?.() || [];
-        tracks.forEach((t) => {
-          if (t.kind === 'video') {
-            t.stop(); // Only stop video tracks
-          }
-        });
-      }
+      const obj = screenRef.current?.srcObject;
+      const tracks = obj?.getTracks?.() || [];
+      tracks.forEach((t) => {
+        if (t.kind === "video") t.stop();
+      });
     } catch (e) {
-      console.warn("Error stopping screen share tracks on producer-closed", e);
+      console.warn("Error stopping streamer screen tracks", e);
     }
 
-    // 🔴 Clear video ref
+    // ✅ Clear screenRef
     if (screenRef.current) {
       try {
         screenRef.current.srcObject = null;
         screenRef.current.load?.();
       } catch (e) {
-        console.warn("Error clearing screenRef on producer-closed", e);
+        console.warn("Error clearing screenRef", e);
       }
     }
 
-    addDebugLog(
-      `✅ Producer closed → forced activeScreenShare reset for ${data.userId}`
-    );
+    // ✅ Reset zoom if streamer screen was zoomed
+    setZoomed((prev) => {
+      if (prev && (prev.type === "screen" || prev.type === "streamer-screen") && prev.userId === data.userId) {
+        addDebugLog(`🔄 Resetting zoom for streamer screen stop: ${data.userId}`);
+        return null;
+      }
+      return prev;
+    });
+
+    addDebugLog(`✅ Streamer screen producer closed → activeScreenShare reset`);
   }
 
-if (data.source === "viewer-screen-audio") {
-    // यह सिर्फ स्क्रीन शेयर का audio है
+  // ==============================
+  // 2) VIEWER SCREEN cleanup ONLY
+  // ==============================
+  if (data.source === "viewer-screen") {
+    // ✅ Reset zoom if viewer screen was zoomed
+    setZoomed((prev) => {
+      if (prev && (prev.type === "viewer-screen" || prev.type === "screen") && prev.userId === data.userId) {
+        addDebugLog(`🔄 Resetting zoom for viewer screen stop: ${data.userId}`);
+        return null;
+      }
+      return prev;
+    });
+
+    // ✅ Clear viewer screen state (and stop its tracks)
+    setViewerScreenShare((prev) => {
+      if (prev?.stream) {
+        try {
+          prev.stream.getTracks().forEach((t) => {
+            if (t.kind === "video") t.stop(); // only video
+          });
+        } catch (e) {
+          console.warn("Error stopping viewer screen tracks", e);
+        }
+      }
+      return null;
+    });
+
+    // ✅ Clear viewer screen ref if you use it
+    if (typeof viewerScreenRef !== "undefined" && viewerScreenRef?.current) {
+      try {
+        viewerScreenRef.current.srcObject = null;
+        viewerScreenRef.current.load?.();
+      } catch (e) {
+        console.warn("Error clearing viewerScreenRef", e);
+      }
+    }
+
+    addDebugLog(`✅ Viewer screen producer closed → viewerScreenShare cleared`);
+  }
+
+  // ==============================
+  // 3) AUDIO cleanup (as you had)
+  // ==============================
+  if (data.source === "viewer-screen-audio") {
     cleanupScreenShareAudio(data.userId);
     addDebugLog(`🎤 Screen share audio stopped for user: ${data.userId}`);
-  } 
-  else if (data.source === "viewer-mic") {
-    // यह viewer का मूल microphone audio है
-    // इसे cleanupViewerAudio से अलग handle करें
+  } else if (data.source === "viewer-mic") {
     cleanupOnlyMicrophoneAudio(data.userId);
     addDebugLog(`🎤 Viewer microphone stopped for user: ${data.userId}`);
   }
 
-  // 📷 Camera cleanup - ONLY for camera video
+  // ==============================
+  // 4) CAMERA cleanup - ONLY VIDEO
+  // ==============================
   if (data.source === "viewer-camera") {
     setViewerCameras((prev) => {
       const newMap = new Map(prev);
@@ -4053,13 +4442,11 @@ if (data.source === "viewer-screen-audio") {
         const stream = newMap.get(data.userId);
         if (stream) {
           try {
-            // ✅ ONLY stop VIDEO tracks, leave audio tracks alone
             stream.getTracks().forEach((t) => {
-              if (t.kind === 'video') {
+              if (t.kind === "video") {
                 t.stop();
-                addDebugLog(`📹 Stopped video track for user ${data.userId}`);
+                addDebugLog(`📹 Stopped camera video track for user ${data.userId}`);
               }
-              // Audio tracks continue playing
             });
           } catch (e) {
             console.warn("Error stopping camera tracks", e);
@@ -4069,15 +4456,18 @@ if (data.source === "viewer-screen-audio") {
       }
       return newMap;
     });
+
     addDebugLog(`📷 Viewer camera removed for user ${data.userId}`);
   }
 
-  // 🔊 Streamer audio cleanup - if needed
+  // ==============================
+  // 5) Streamer mic (no viewer cleanup)
+  // ==============================
   if (data.source === "mic" || data.source === "streamer-mic") {
     addDebugLog(`🎤 Streamer audio producer closed: ${data.userId}`);
-    // Don't cleanup viewer audio here, this is streamer's audio
   }
 });
+
 
 
     newSocket.on("new-producer", (data) => {
@@ -4099,7 +4489,7 @@ if (data.source === "viewer-screen-audio") {
       // Handle viewer screen video
       if (data.source === "viewer-screen") {
         addDebugLog("🖥️ Consuming viewer screen producer:", data.producerId);
-        createConsumer(newSocket, sessionId || roomCode, data.producerId, data.kind);
+        createConsumer(sessionId || roomCode, data.producerId, data.kind);
       }
 
       // Handle viewer mic OR viewer screen audio
@@ -5138,6 +5528,32 @@ return (
                   </div>
                 </div>
               )}
+
+              {/* ✅ YEH ADD KARO - Viewer Screen Share Thumbnail */}
+{viewerScreenShare?.stream && (
+  <div className="relative group">
+    <ThumbnailVideo
+      uid={viewerScreenShare.userId}
+      stream={viewerScreenShare.stream}
+      userName={`${viewerScreenShare.userName}'s Screen`}
+      onClick={() => {
+        setZoomed({ 
+          type: "viewer-screen", 
+          stream: viewerScreenShare.stream, 
+          userId: viewerScreenShare.userId 
+        });
+        setShowPlayButton(false);
+      }}
+      isZoomed={zoomed?.type === "viewer-screen" && zoomed.userId === viewerScreenShare.userId}
+      videoEnabled={true}
+      isScreenShare={true}
+    />
+    <div className="absolute top-2 left-2 bg-orange-600/80 text-white text-xs px-2 py-1 rounded flex items-center">
+      <FiMonitor className="h-3 w-3 mr-1" />
+      Viewer Screen
+    </div>
+  </div>
+)}
             </div>
           </div>
           
@@ -5193,7 +5609,7 @@ return (
                   {zoomed.type === "whiteboard" ? (
                     showWhiteboard && whiteboardSessionInfo ? (
                       <StreamerWhiteboard
-                        key={`whiteboard-${whiteboardSessionInfo.sessionId}-${Date.now()}`}
+                        key={`whiteboard-${whiteboardSessionInfo.sessionId}}`}
                         sessionId={whiteboardSessionInfo.sessionId}
                         roomCode={whiteboardSessionInfo.roomCode}
                         wsToken={whiteboardSessionInfo.wsToken}
@@ -5258,6 +5674,13 @@ return (
                             </span>
                           </>
                         )}
+
+                        {zoomed.type === "viewer-screen" && (
+            <>
+              <FiMonitor className="h-4 w-4 text-orange-400" />
+              <span>{viewerScreenShare?.userName}'s Screen</span>
+            </>
+          )}
                       </div>
 
                       {/* Close button for whiteboard (only when whiteboard is zoomed) */}
@@ -5471,6 +5894,36 @@ return (
                   isScreenShare={true}
                 />
               )}
+
+                {viewerScreenShare?.stream && (
+    <div className="relative group">
+      <ThumbnailVideo
+        uid={viewerScreenShare.userId}
+        stream={viewerScreenShare?.stream}
+        userName={`${viewerScreenShare.userName}'s Screen`}
+        onClick={() => {
+          setZoomed({ 
+            type: "viewer-screen", 
+            stream: viewerScreenShare.stream, 
+            userId: viewerScreenShare.userId 
+          });
+          setShowPlayButton(false);
+          setThumbnailsExpanded(false);
+        }}
+        isZoomed={zoomed?.type === "viewer-screen" && zoomed.userId === viewerScreenShare.userId}
+        videoEnabled={true}
+        isScreenShare={true}
+        expanded={true}
+      />
+      <div className="absolute top-2 left-2 bg-orange-600/80 text-white text-xs px-2 py-1 rounded flex items-center">
+        <FiMonitor className="h-3 w-3 mr-1" />
+        Viewer Screen
+      </div>
+    </div>
+  )}
+
+
+
               
               {/* Empty state */}
               {thumbnailsCount === 0 && (
@@ -5798,6 +6251,24 @@ return (
                   isScreenShare={true}
                 />
               )}
+               {viewerScreenShare?.stream && (
+    <ThumbnailVideo
+      uid={viewerScreenShare.userId}
+      stream={viewerScreenShare.stream}
+      userName={`${viewerScreenShare.userName}'s Screen`}
+      onClick={() => {
+        setZoomed({ 
+          type: "viewer-screen", 
+          stream: viewerScreenShare.stream, 
+          userId: viewerScreenShare.userId 
+        });
+        setShowPlayButton(false);
+      }}
+      isZoomed={zoomed?.type === "viewer-screen" && zoomed.userId === viewerScreenShare.userId}
+      videoEnabled={true}
+      isScreenShare={true}
+    />
+  )}
               
               {/* Empty state */}
               {thumbnailsCount === 0 && (
