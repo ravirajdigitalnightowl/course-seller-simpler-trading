@@ -1432,91 +1432,44 @@ useEffect(() => {
 
 const getMixedAudioStream = (screenStream, micStream) => {
   try {
-    addDebugLog("🎚️ Starting Optimized Audio Mixing...");
-    
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     const audioContext = new AudioContext();
     const destination = audioContext.createMediaStreamDestination();
 
-    audioContextRef.current = audioContext;
-    audioDestinationRef.current = destination;
-
-    // 1. Add Streamer Mic 🎤
+    // 1. Streamer Mic
     if (micStream && micStream.getAudioTracks().length > 0) {
       const micSource = audioContext.createMediaStreamSource(micStream);
       const micGain = audioContext.createGain();
       micGain.gain.value = 1.0; 
       micSource.connect(micGain).connect(destination);
-      addDebugLog("✅ Streamer Mic mixed");
     }
 
-    // 2. Add Screen Audio 🖥️
+    // 2. Streamer Screen Audio (Passed directly)
     if (screenStream && screenStream.getAudioTracks().length > 0) {
       const screenSource = audioContext.createMediaStreamSource(screenStream);
       const screenGain = audioContext.createGain();
-      // ✅ Optimization: Gain thoda kam kiya (0.8 -> 0.5) echo aur noise leak rokne ke liye 
-      screenGain.gain.value = 0.5; 
+      screenGain.gain.value = 0.6; // Clear voice, low echo risk
       screenSource.connect(screenGain).connect(destination);
-      addDebugLog("✅ Streamer Screen Audio mixed at optimized volume");
     }
 
-    // 3. Add Viewer Audio Streams (Avoiding Self-Mixing)
+    // 3. Viewers Audio (Mic + Screen Share)
     const audioEntries = Array.from(viewerAudiosRef.current.entries());
-    
     audioEntries.forEach(([audioKey, stream]) => {
+      // ✅ FIX: Streamer ke apne system audio ko yahan se filter karein
+      // Kyunki streamer ka audio upar 'screenStream' argument se mix ho chuka hai
+      if (audioKey.includes('streamer')) return;
+
       if (stream && stream.getAudioTracks().length > 0) {
-        try {
-          const userIdParts = audioKey.split('-');
-          const userId = userIdParts[userIdParts.length - 1];
-
-          // ✅ CRITICAL FIX: Streamer ke apne audio ko yahan mix hone se rokein [cite: 271, 381]
-          // Kyunki streamer ka mic aur screen pehle hi upar mix ho chuka hai.
-          if (userId === user?.id) {
-            addDebugLog(`⏩ Skipping self-audio mixing for ${audioKey} to prevent double-mix echo`);
-            return; 
-          }
-
-          const isScreenAudio = audioKey.includes('screen-audio') || audioKey.includes('screen');
-          const viewerSource = audioContext.createMediaStreamSource(stream);
-          const viewerGain = audioContext.createGain();
-          
-          if (isScreenAudio) {
-            viewerGain.gain.value = 0.6; // Consistent 60% for viewer screen audio [cite: 272]
-            addDebugLog(`✅ Viewer Screen Audio mixed: ${userId}`);
-          } else {
-            viewerGain.gain.value = 0.8; // 80% for viewer mic [cite: 273]
-            addDebugLog(`✅ Viewer Mic Audio mixed: ${userId}`);
-          }
-          
-          viewerSource.connect(viewerGain).connect(destination);
-          
-        } catch (err) {
-          addDebugLog(`⚠️ Failed to mix viewer audio ${audioKey}: ${err.message}`);
-        }
+        const viewerSource = audioContext.createMediaStreamSource(stream);
+        const viewerGain = audioContext.createGain();
+        viewerGain.gain.value = 0.8; 
+        viewerSource.connect(viewerGain).connect(destination);
       }
     });
 
-    // 4. Viewer Screen Share Audio (Separate State)
-    if (viewerScreenShare?.audioStream && viewerScreenShare.userId !== user?.id) {
-      try {
-        const screenAudioSource = audioContext.createMediaStreamSource(viewerScreenShare.audioStream);
-        const screenAudioGain = audioContext.createGain();
-        screenAudioGain.gain.value = 0.6;
-        screenAudioSource.connect(screenAudioGain).connect(destination);
-        addDebugLog(`✅ Viewer Screen Share Audio mixed for ${viewerScreenShare.userName}`);
-      } catch (err) {
-        console.warn("Could not mix viewer screen share audio:", err);
-      }
-    }
-
-    const totalTracks = destination.stream.getAudioTracks().length;
-    addDebugLog(`🎵 Total audio tracks in mix: ${totalTracks}`);
-
     return destination.stream.getAudioTracks()[0];
-
   } catch (error) {
     console.error("Audio mixing failed:", error);
-    addDebugLog(`❌ Audio mixing error: ${error.message}`);
     return null;
   }
 };
@@ -4802,20 +4755,16 @@ useEffect(() => {
       });
     }
   }, [roomState.isPaused, roomState.isStreaming, mediaStream]);
-
-// ✅ always keep PiP screen video in sync, even after zoom toggle
 useEffect(() => {
   if (screenRef.current && activeScreenShare?.stream && !(zoomed && zoomed.type === "screen")) {
-    // Stream set karein
     screenRef.current.srcObject = activeScreenShare.stream;
-
-    // ✅ FIX: Echo rokne ke liye streamer ka apna audio mute karein
-    // Agar activeScreenShare streamer ka apna hai (source === "streamer"), toh use mute rakhein
-    if (activeScreenShare.source === "streamer" || activeScreenShare.userId === user?.id) {
-      screenRef.current.muted = true;
-      addDebugLog("🔇 Local screen share muted to prevent echo loop");
+    
+    // ✅ FIX: Echo rokne ke liye streamer ka apna share mute rakhein
+    // Agar source 'streamer' hai, toh browser UI element ko mute kar dega
+    if (activeScreenShare.source === "streamer") {
+      screenRef.current.muted = true; 
     } else {
-      // Agar kisi viewer ka screen share dekh rahe hain, toh audio sunna chahiye
+      // Agar kisi viewer ne screen share kiya hai, toh streamer ko wo sunayi dega
       screenRef.current.muted = false;
     }
 
@@ -4825,7 +4774,7 @@ useEffect(() => {
   } else if (screenRef.current && (!activeScreenShare?.stream || (zoomed && zoomed.type === "screen"))) {
     screenRef.current.srcObject = null;
   }
-}, [activeScreenShare?.stream, activeScreenShare?.source, activeScreenShare?.userId, zoomed, user?.id]);
+}, [activeScreenShare?.stream, activeScreenShare?.source, zoomed]);
   useEffect(() => {
     if (mediaStream) {
       const tracks = mediaStream.getTracks();
