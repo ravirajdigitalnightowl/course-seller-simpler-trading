@@ -560,7 +560,7 @@ const startScreenCapture = async (purpose = "share") => {
     const stream = await navigator.mediaDevices.getDisplayMedia({
       video: {
         cursor: "always",
-        frameRate: { ideal: 60, max: 70 },
+        frameRate: { ideal: 30, max: 30 },
         width: { ideal: 1280 },
         height: { ideal: 720 },
       },
@@ -952,7 +952,7 @@ const startScreenShareForParticipants = async (screenStream) => {
     // ✅ IMPORTANT: Mobile latency fix = cap FPS (and keep res stable)
     try {
       await videoTrack.applyConstraints({
-        frameRate: { ideal: 30, max: 30 },
+        frameRate: { ideal: 24, max: 24 },
         width: { ideal: 1280, max: 1280 },
         height: { ideal: 720, max: 720 },
         resizeMode: "crop-and-scale",
