@@ -952,7 +952,7 @@ const startScreenShareForParticipants = async (screenStream) => {
     // ✅ IMPORTANT: Mobile latency fix = cap FPS (and keep res stable)
     try {
       await videoTrack.applyConstraints({
-        frameRate: { ideal: 24, max: 24 },
+        frameRate: { ideal: 30, max: 30 },
         width: { ideal: 1280, max: 1280 },
         height: { ideal: 720, max: 720 },
         resizeMode: "crop-and-scale",
@@ -4808,15 +4808,26 @@ useEffect(() => {
 // ✅ always keep PiP screen video in sync, even after zoom toggle
 useEffect(() => {
   if (screenRef.current && activeScreenShare?.stream && !(zoomed && zoomed.type === "screen")) {
+    // Stream set karein
     screenRef.current.srcObject = activeScreenShare.stream;
-    screenRef.current.play().catch(() => {
-      console.warn("Autoplay blocked for screen PiP");
+
+    // ✅ FIX: Echo rokne ke liye streamer ka apna audio mute karein
+    // Agar activeScreenShare streamer ka apna hai (source === "streamer"), toh use mute rakhein
+    if (activeScreenShare.source === "streamer" || activeScreenShare.userId === user?.id) {
+      screenRef.current.muted = true;
+      addDebugLog("🔇 Local screen share muted to prevent echo loop");
+    } else {
+      // Agar kisi viewer ka screen share dekh rahe hain, toh audio sunna chahiye
+      screenRef.current.muted = false;
+    }
+
+    screenRef.current.play().catch((err) => {
+      console.warn("Autoplay blocked for screen PiP", err);
     });
   } else if (screenRef.current && (!activeScreenShare?.stream || (zoomed && zoomed.type === "screen"))) {
     screenRef.current.srcObject = null;
   }
-}, [activeScreenShare?.stream, zoomed]);
-
+}, [activeScreenShare?.stream, activeScreenShare?.source, activeScreenShare?.userId, zoomed, user?.id]);
   useEffect(() => {
     if (mediaStream) {
       const tracks = mediaStream.getTracks();
