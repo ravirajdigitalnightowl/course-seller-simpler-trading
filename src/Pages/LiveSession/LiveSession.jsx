@@ -3647,7 +3647,7 @@ const constraints = {
     facingMode: { ideal: "user" },     // ✅ front camera
     width: { ideal: 640, max: 640 },   // ✅ viewer-like
     height: { ideal: 360, max: 360 },  // ✅ viewer-like
-    frameRate: { ideal: 40, max: 40 }, // ✅ 40 fps
+    frameRate: { ideal: 24, max: 24 }, // ✅ 40 fps
   },
   audio: audioConstraints
 };
