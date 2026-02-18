@@ -2300,26 +2300,26 @@ const createConsumer = async (currentSessionId, producerId, kind, transportId = 
               if (consumer.track) {
                 
                 // ===== 1. STREAMER SCREEN SHARE =====
-                if (info.source === "screen") {
-                  const screenStream = new MediaStream([consumer.track]);
+                // if (info.source === "screen") {
+                //   const screenStream = new MediaStream([consumer.track]);
                   
-                  // ✅ Use activeScreenShare for streamer
-                  setActiveScreenShare({
-                    userId: info.userId,
-                    userName: info.userName || "Streamer",
-                    stream: screenStream,
-                    source: "streamer",
-                  });
+                //   // ✅ Use activeScreenShare for streamer
+                //   setActiveScreenShare({
+                //     userId: info.userId,
+                //     userName: info.userName || "Streamer",
+                //     stream: screenStream,
+                //     source: "streamer",
+                //   });
 
-                  if (screenRef.current) {
-                    screenRef.current.srcObject = screenStream;
-                    screenRef.current.play?.().catch(() => {});
-                  }
-                  addDebugLog(`🖥️ STREAMER screen share active`);
-                }
+                //   if (screenRef.current) {
+                //     screenRef.current.srcObject = screenStream;
+                //     screenRef.current.play?.().catch(() => {});
+                //   }
+                //   addDebugLog(`🖥️ STREAMER screen share active`);
+                // }
                 
                 // ===== 2. VIEWER SCREEN SHARE =====
-                else if (info.source === "viewer-screen") {
+                if (info.source === "viewer-screen") {
                   const screenStream = new MediaStream([consumer.track]);
                   
                   // ✅ Use separate viewerScreenShare state
