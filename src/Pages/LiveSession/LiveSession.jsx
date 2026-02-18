@@ -1432,9 +1432,8 @@ useEffect(() => {
 
 const getMixedAudioStream = (screenStream, micStream) => {
   try {
-    addDebugLog("🎚️ Starting Audio Mixing...");
+    addDebugLog("🎚️ Starting Optimized Audio Mixing...");
     
-    // Create Audio Context
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     const audioContext = new AudioContext();
     const destination = audioContext.createMediaStreamDestination();
@@ -1442,67 +1441,67 @@ const getMixedAudioStream = (screenStream, micStream) => {
     audioContextRef.current = audioContext;
     audioDestinationRef.current = destination;
 
-    // Add Streamer Mic 🎤
+    // 1. Add Streamer Mic 🎤
     if (micStream && micStream.getAudioTracks().length > 0) {
       const micSource = audioContext.createMediaStreamSource(micStream);
       const micGain = audioContext.createGain();
-      micGain.gain.value = 1.0; // Normal volume
+      micGain.gain.value = 1.0; 
       micSource.connect(micGain).connect(destination);
       addDebugLog("✅ Streamer Mic mixed");
     }
 
-    // Add Screen Audio 🖥️ (from streamer's screen share)
+    // 2. Add Screen Audio 🖥️
     if (screenStream && screenStream.getAudioTracks().length > 0) {
       const screenSource = audioContext.createMediaStreamSource(screenStream);
       const screenGain = audioContext.createGain();
-      screenGain.gain.value = 0.8; // Slightly lower volume for screen audio
+      // ✅ Optimization: Gain thoda kam kiya (0.8 -> 0.5) echo aur noise leak rokne ke liye 
+      screenGain.gain.value = 0.5; 
       screenSource.connect(screenGain).connect(destination);
-      addDebugLog("✅ Streamer Screen Audio mixed");
+      addDebugLog("✅ Streamer Screen Audio mixed at optimized volume");
     }
 
-    // ✅ FIXED: Add ALL viewer audio streams (mic + screen share audio)
-    // Now using viewerAudiosRef which stores all audio with source-specific keys
+    // 3. Add Viewer Audio Streams (Avoiding Self-Mixing)
     const audioEntries = Array.from(viewerAudiosRef.current.entries());
     
     audioEntries.forEach(([audioKey, stream]) => {
       if (stream && stream.getAudioTracks().length > 0) {
         try {
-          // Parse the audioKey to determine source type
-          // Format can be: "viewer-mic-userId", "viewer-screen-audio-userId", or "mic-userId", "screen-userId"
-          const isScreenAudio = audioKey.includes('screen-audio') || audioKey.includes('screen');
-          const isMicAudio = audioKey.includes('mic') || audioKey.includes('viewer-mic');
-          
-          // Extract userId from audioKey (last part after last '-')
           const userIdParts = audioKey.split('-');
           const userId = userIdParts[userIdParts.length - 1];
-          
+
+          // ✅ CRITICAL FIX: Streamer ke apne audio ko yahan mix hone se rokein [cite: 271, 381]
+          // Kyunki streamer ka mic aur screen pehle hi upar mix ho chuka hai.
+          if (userId === user?.id) {
+            addDebugLog(`⏩ Skipping self-audio mixing for ${audioKey} to prevent double-mix echo`);
+            return; 
+          }
+
+          const isScreenAudio = audioKey.includes('screen-audio') || audioKey.includes('screen');
           const viewerSource = audioContext.createMediaStreamSource(stream);
           const viewerGain = audioContext.createGain();
           
-          // Different volume levels based on audio type
           if (isScreenAudio) {
-            viewerGain.gain.value = 0.7; // 70% volume for screen audio
-            addDebugLog(`✅ Viewer Screen Audio mixed for user ${userId} (${audioKey})`);
+            viewerGain.gain.value = 0.6; // Consistent 60% for viewer screen audio [cite: 272]
+            addDebugLog(`✅ Viewer Screen Audio mixed: ${userId}`);
           } else {
-            viewerGain.gain.value = 0.8; // 80% volume for mic audio
-            addDebugLog(`✅ Viewer Mic Audio mixed for user ${userId} (${audioKey})`);
+            viewerGain.gain.value = 0.8; // 80% for viewer mic [cite: 273]
+            addDebugLog(`✅ Viewer Mic Audio mixed: ${userId}`);
           }
           
           viewerSource.connect(viewerGain).connect(destination);
           
         } catch (err) {
-          console.warn(`Could not mix viewer audio ${audioKey}:`, err);
           addDebugLog(`⚠️ Failed to mix viewer audio ${audioKey}: ${err.message}`);
         }
       }
     });
 
-    // Also check viewerScreenShare for any additional audio (if it has separate audio stream)
-    if (viewerScreenShare?.audioStream) {
+    // 4. Viewer Screen Share Audio (Separate State)
+    if (viewerScreenShare?.audioStream && viewerScreenShare.userId !== user?.id) {
       try {
         const screenAudioSource = audioContext.createMediaStreamSource(viewerScreenShare.audioStream);
         const screenAudioGain = audioContext.createGain();
-        screenAudioGain.gain.value = 0.7;
+        screenAudioGain.gain.value = 0.6;
         screenAudioSource.connect(screenAudioGain).connect(destination);
         addDebugLog(`✅ Viewer Screen Share Audio mixed for ${viewerScreenShare.userName}`);
       } catch (err) {
@@ -1510,7 +1509,6 @@ const getMixedAudioStream = (screenStream, micStream) => {
       }
     }
 
-    // Log total audio tracks mixed
     const totalTracks = destination.stream.getAudioTracks().length;
     addDebugLog(`🎵 Total audio tracks in mix: ${totalTracks}`);
 
