@@ -1432,11 +1432,15 @@ useEffect(() => {
 
 const getMixedAudioStream = (screenStream, micStream) => {
   try {
+    addDebugLog("🎚️ Starting Clean Audio Mixing for Recording...");
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     const audioContext = new AudioContext();
     const destination = audioContext.createMediaStreamDestination();
 
-    // 1. Streamer Mic
+    audioContextRef.current = audioContext;
+    audioDestinationRef.current = destination;
+
+    // 1. Streamer Mic (Direct Source)
     if (micStream && micStream.getAudioTracks().length > 0) {
       const micSource = audioContext.createMediaStreamSource(micStream);
       const micGain = audioContext.createGain();
@@ -1444,20 +1448,24 @@ const getMixedAudioStream = (screenStream, micStream) => {
       micSource.connect(micGain).connect(destination);
     }
 
-    // 2. Streamer Screen Audio (Passed directly)
+    // 2. Streamer Screen Audio (Direct Source - Passed from capture)
     if (screenStream && screenStream.getAudioTracks().length > 0) {
       const screenSource = audioContext.createMediaStreamSource(screenStream);
       const screenGain = audioContext.createGain();
-      screenGain.gain.value = 0.6; // Clear voice, low echo risk
+      // Gain 0.5 rakhein taaki video sound clear rahe aur mic feedback kam ho
+      screenGain.gain.value = 0.5; 
       screenSource.connect(screenGain).connect(destination);
+      addDebugLog("✅ Streamer Screen Audio added to mix");
     }
 
     // 3. Viewers Audio (Mic + Screen Share)
     const audioEntries = Array.from(viewerAudiosRef.current.entries());
     audioEntries.forEach(([audioKey, stream]) => {
-      // ✅ FIX: Streamer ke apne system audio ko yahan se filter karein
-      // Kyunki streamer ka audio upar 'screenStream' argument se mix ho chuka hai
-      if (audioKey.includes('streamer')) return;
+      const userIdParts = audioKey.split('-');
+      const userId = userIdParts[userIdParts.length - 1];
+
+      // ✅ FIX: Streamer ke apne kisi bhi consumed track ko yahan mix na karein
+      if (userId === user?.id) return;
 
       if (stream && stream.getAudioTracks().length > 0) {
         const viewerSource = audioContext.createMediaStreamSource(stream);
@@ -1467,9 +1475,18 @@ const getMixedAudioStream = (screenStream, micStream) => {
       }
     });
 
+    // 4. Viewer Screen Share Audio (Separate State Check)
+    if (viewerScreenShare?.audioStream && viewerScreenShare.userId !== user?.id) {
+      const screenAudioSource = audioContext.createMediaStreamSource(viewerScreenShare.audioStream);
+      const screenAudioGain = audioContext.createGain();
+      screenAudioGain.gain.value = 0.7;
+      screenAudioSource.connect(screenAudioGain).connect(destination);
+    }
+
     return destination.stream.getAudioTracks()[0];
   } catch (error) {
     console.error("Audio mixing failed:", error);
+    addDebugLog(`❌ Mixing error: ${error.message}`);
     return null;
   }
 };
@@ -1908,22 +1925,28 @@ const handleEndSession = async () => {
 };
 
 const handleEnableAudio = () => {
-  addDebugLog('🎵 User manually enabled audio');
+  addDebugLog('🎵 User manually enabled audio - Locking gesture for Echo Prevention');
+  
+  // 1) Mark interaction immediately
+  userInteractedRef.current = true; [cite: 349]
+  setUserInteracted(true); [cite: 351]
+  setShowAudioPermissionModal(false); [cite: 351]
 
-  // ✅ 1) Mark interaction immediately (no stale state)
-  userInteractedRef.current = true;
+  // 2) ✅ CRITICAL: Mute any local loopback audio elements
+  // Hum saare audio/video elements ko check karke unhe mute karenge jo loopback paida kar rahe hain
+  const localScreenShare = activeScreenShareRef.current;
+  
+  if (localScreenShare && localScreenShare.source === "streamer") {
+    // UI PiP element ko force mute karein
+    if (screenRef.current) {
+      screenRef.current.muted = true;
+      screenRef.current.volume = 0;
+      addDebugLog("🔇 Streamer local screen playback muted via gesture");
+    }
+  }
 
-  // ✅ 2) Lock modal forever (so it never opens again)
-  audioModalLockRef.current = true;
-
-  // ✅ 3) Close modal + update state
-  setUserInteracted(true);
-  setShowAudioPermissionModal(false);
-
-  // ✅ 4) Play all queued audio after gesture
-  setTimeout(() => {
-    playAllAudio();
-  }, 100);
+  // 3) Baki viewer audios ko play karein taaki streamer ko viewers sunayi dein [cite: 352]
+  playAllAudio(); [cite: 300, 352]
 };
 
   const handleScreenShareRequest = useCallback((data) => {
@@ -6884,6 +6907,29 @@ return (
             </div>
           </div>
         )}
+
+        // Is modal ko render function mein add karein
+{isRecording && !userInteracted && (
+  <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center z-[100]">
+    <div className="bg-gray-800 p-8 rounded-2xl border border-blue-500/30 text-center max-w-md shadow-2xl">
+      <div className="w-20 h-20 bg-blue-600/20 rounded-full flex items-center justify-center mx-auto mb-6">
+        <FiVolume2 className="h-10 w-10 text-blue-400 animate-pulse" />
+      </div>
+      <h2 className="text-2xl font-bold mb-4 text-white">Optimize Audio for Recording</h2>
+      <p className="text-gray-300 mb-8 text-sm">
+        To prevent echo during screen recording, we need to sync your audio context. 
+        Please click the button below.
+      </p>
+      <button
+        onClick={handleEnableAudio}
+        className="w-full py-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-xl font-bold transition-all transform hover:scale-105 shadow-lg flex items-center justify-center space-x-2"
+      >
+        <FiCheck className="h-5 w-5" />
+        <span>Enable Echo-Free Audio</span>
+      </button>
+    </div>
+  </div>
+)}
       </div>
     </div>
   </div>
