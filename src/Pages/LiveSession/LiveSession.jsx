@@ -1193,12 +1193,61 @@ const stopRecording = useCallback(async () => {
   }
 }, [recorder, recordingStream, activeScreenShare, screenCaptureActive]);
 
-const stopScreenShare = useCallback(() => {
-  addDebugLog("🛑 Stopping screen share...");
+// const stopScreenShare = useCallback(() => {
+//   addDebugLog("🛑 Stopping screen share...");
 
+//   const recordingOn = isRecordingRef.current;
+
+//   // 1) Socket notify (only if streamer share was active)
+//   if (socket && activeScreenShareRef.current?.source === "streamer") {
+//     socket.emit("screen-share-stop", {
+//       sessionId: sessionId || roomCode,
+//       userId: user?.id,
+//       source: "streamer",
+//     });
+//   }
+
+//   // 2) Close screen producers (screen + screen-audio)
+//   producers.current.forEach((producer, id) => {
+//     const src = producer?.appData?.source;
+//     if (src === "screen" || src === "screen-audio") {
+//       try { producer.close(); } catch (err) {
+//         addDebugLog(`⚠️ Error closing producer: ${err?.message || err}`);
+//       }
+//       producers.current.delete(id);
+
+//       setProducersState((prev) => {
+//         const m = new Map(prev);
+//         m.delete(id);
+//         return m;
+//       });
+//     }
+//   });
+
+//   // 3) Reset active share UI state
+//   setActiveScreenShare(null);
+
+//   // 4) ✅ Capture cleanup ONLY if recording is NOT running
+//   if (!recordingOn && screenCaptureActiveRef.current) {
+//     addDebugLog("🧹 Cleaning up screen capture (no active recording)");
+//     cleanupScreenCapture();
+//     toast.success("Screen share stopped");
+//   } else {
+//     toast.info(recordingOn ? "Screen share stopped (recording continues)" : "Screen share stopped");
+//   }
+
+//   // 5) Reset zoom if it was showing screen
+//   setZoomed((prev) => (prev?.type === "screen" ? null : prev));
+
+// }, [socket, sessionId, roomCode, user, cleanupScreenCapture]);
+
+const stopScreenShare = useCallback(() => {
+  addDebugLog("🛑 Stopping screen share (Producer only)...");
+
+  // 1. Check karein ki recording chal rahi hai ya nahi [cite: 121]
   const recordingOn = isRecordingRef.current;
 
-  // 1) Socket notify (only if streamer share was active)
+  // 2. Socket notify karein taaki server ko pata chale sharing band hai [cite: 220]
   if (socket && activeScreenShareRef.current?.source === "streamer") {
     socket.emit("screen-share-stop", {
       sessionId: sessionId || roomCode,
@@ -1207,15 +1256,18 @@ const stopScreenShare = useCallback(() => {
     });
   }
 
-  // 2) Close screen producers (screen + screen-audio)
+  // 3. IMPORTANT: Producers ko close karein (viewer side audio yahan se rukega) 
   producers.current.forEach((producer, id) => {
     const src = producer?.appData?.source;
     if (src === "screen" || src === "screen-audio") {
-      try { producer.close(); } catch (err) {
-        addDebugLog(`⚠️ Error closing producer: ${err?.message || err}`);
+      try {
+        producer.close(); // Ye viewer side consumer ko 'producer-closed' bhejega 
+        addDebugLog(`🧹 Producer ${src} closed explicitly`);
+      } catch (err) {
+        addDebugLog(`⚠️ Error closing producer: ${err?.message}`);
       }
       producers.current.delete(id);
-
+      
       setProducersState((prev) => {
         const m = new Map(prev);
         m.delete(id);
@@ -1224,24 +1276,20 @@ const stopScreenShare = useCallback(() => {
     }
   });
 
-  // 3) Reset active share UI state
+  // 4. UI state reset karein [cite: 223]
   setActiveScreenShare(null);
+  setZoomed((prev) => (prev?.type === "screen" ? null : prev)); [cite: 225]
 
-  // 4) ✅ Capture cleanup ONLY if recording is NOT running
+  // 5. Stream Cleanup sirf tab karein jab recording OFF ho [cite: 223]
   if (!recordingOn && screenCaptureActiveRef.current) {
-    addDebugLog("🧹 Cleaning up screen capture (no active recording)");
-    cleanupScreenCapture();
+    addDebugLog("🧹 Recording off: Full cleanup of screen capture stream");
+    cleanupScreenCapture(); // Tracks yahan stop honge 
     toast.success("Screen share stopped");
   } else {
-    toast.info(recordingOn ? "Screen share stopped (recording continues)" : "Screen share stopped");
+    // Agar recording ON hai, toh humne tracks stop nahi kiye, sirf producers close kiye hain
+    toast.info("Screen share stopped (Recording continues in background)"); [cite: 224]
   }
-
-  // 5) Reset zoom if it was showing screen
-  setZoomed((prev) => (prev?.type === "screen" ? null : prev));
-
 }, [socket, sessionId, roomCode, user, cleanupScreenCapture]);
-
-
 const handleStreamerScreenShareClick = async () => {
   try {
     if (activeScreenShareRef.current?.source === "streamer") {
