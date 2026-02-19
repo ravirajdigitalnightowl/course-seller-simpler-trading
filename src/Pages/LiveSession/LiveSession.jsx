@@ -1196,7 +1196,7 @@ const stopScreenShare = useCallback(() => {
 
   // 1) Socket notify (only if streamer share was active)
   if (socket && activeScreenShareRef.current?.source === "streamer") {
-    socket.emit("screen-share-stop", {
+    socket.emit("streamer-screen-share-stop", {
       sessionId: sessionId || roomCode,
       userId: user?.id,
       source: "streamer",
