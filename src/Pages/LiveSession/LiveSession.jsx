@@ -944,7 +944,6 @@ const startNewScreenShareWithRecording = async () => {
   }
 };
 
-
 const startScreenShareForParticipants = async (screenStream) => {
   if (!sendTransportRef.current || !user) return;
 
@@ -952,13 +951,10 @@ const startScreenShareForParticipants = async (screenStream) => {
     const videoTrack = screenStream.getVideoTracks()[0];
     if (!videoTrack) return;
 
-    // ✅ Content hint (already in your code)
     if ("contentHint" in videoTrack) {
       videoTrack.contentHint = "motion";
-      addDebugLog("✅ Screen video track: Applied contentHint 'motion'");
     }
 
-    // ✅ IMPORTANT: Mobile latency fix = cap FPS (and keep res stable)
     try {
       await videoTrack.applyConstraints({
         frameRate: { ideal: 30, max: 30 },
@@ -966,14 +962,10 @@ const startScreenShareForParticipants = async (screenStream) => {
         height: { ideal: 720, max: 720 },
         resizeMode: "crop-and-scale",
       });
-      addDebugLog("✅ Screen video constraints locked to 1280x720 @ 30fps");
     } catch (e) {
       addDebugLog(`⚠️ Screen constraint lock failed: ${e.message}`);
     }
 
-    // =========================
-    // ✅ PRODUCE VIDEO (2-layer SIMULCAST)
-    // =========================
     let videoProducer;
     try {
       videoProducer = await sendTransportRef.current.produce({
@@ -983,26 +975,13 @@ const startScreenShareForParticipants = async (screenStream) => {
           userId: user.id,
           userName: user.name || "Streamer",
         },
-
-        // ✅ 2-LAYER SIMULCAST (low + high)
         encodings: [
-          // LOW layer (mobile-friendly)
           { maxBitrate: 350_000, scaleResolutionDownBy: 2 },
-          // HIGH layer (laptop/desktop)
           { maxBitrate: 1_500_000, scaleResolutionDownBy: 1 },
         ],
-
-        // ✅ Helps Chrome start faster at a stable bitrate
-        codecOptions: {
-          videoGoogleStartBitrate: 800, // kbps
-        },
+        codecOptions: { videoGoogleStartBitrate: 800 },
       });
-
-      addDebugLog(`✅ Screen share VIDEO producer (2-layer simulcast): ${videoProducer.id}`);
     } catch (simulcastErr) {
-      // ✅ Fallback: some devices/browsers may not like simulcast for screen
-      addDebugLog(`⚠️ Simulcast failed, falling back to single layer: ${simulcastErr.message}`);
-
       videoProducer = await sendTransportRef.current.produce({
         track: videoTrack,
         appData: {
@@ -1010,21 +989,27 @@ const startScreenShareForParticipants = async (screenStream) => {
           userId: user.id,
           userName: user.name || "Streamer",
         },
-        encodings: [{ maxBitrate: 900_000 }], // single layer cap
+        encodings: [{ maxBitrate: 900_000 }],
         codecOptions: { videoGoogleStartBitrate: 600 },
       });
-
-      addDebugLog(`✅ Screen share VIDEO producer (single layer fallback): ${videoProducer.id}`);
     }
 
-    // =========================
-    // 🔊 PRODUCE AUDIO (same as your code, direct)
-    // =========================
+    // ✅ FIX 1: VIDEO PRODUCER KO SAVE KARO
+    if (videoProducer) {
+      producers.current.set(videoProducer.id, videoProducer);
+      setProducersState((prev) => new Map(prev).set(videoProducer.id, {
+        id: videoProducer.id,
+        kind: 'video',
+        paused: false,
+        source: 'screen'
+      }));
+      addDebugLog(`✅ Screen share VIDEO producer saved: ${videoProducer.id}`);
+    }
+
     const audioTrack = screenStream.getAudioTracks()[0];
     if (audioTrack) {
       if ("contentHint" in audioTrack) {
         audioTrack.contentHint = "music";
-        addDebugLog("✅ Screen audio track: Applied contentHint 'music'");
       }
 
       const audioProducer = await sendTransportRef.current.produce({
@@ -1035,11 +1020,20 @@ const startScreenShareForParticipants = async (screenStream) => {
           userName: user.name || "Streamer",
         },
       });
-
-      addDebugLog(`✅ Screen share AUDIO producer: ${audioProducer.id}`);
+      
+      // ✅ FIX 2: AUDIO PRODUCER KO SAVE KARO
+      if (audioProducer) {
+        producers.current.set(audioProducer.id, audioProducer);
+        setProducersState((prev) => new Map(prev).set(audioProducer.id, {
+          id: audioProducer.id,
+          kind: 'audio',
+          paused: false,
+          source: 'screen-audio'
+        }));
+        addDebugLog(`✅ Screen share AUDIO producer saved: ${audioProducer.id}`);
+      }
     }
 
-    // ✅ keep original stream reference
     setActiveScreenShare({
       userId: user.id,
       userName: user.name || "Streamer",
@@ -1047,7 +1041,6 @@ const startScreenShareForParticipants = async (screenStream) => {
       source: "streamer",
     });
 
-    // notify server
     if (socket) {
       socket.emit("screen-share-started", {
         sessionId: sessionId || roomCode,
@@ -1242,12 +1235,11 @@ const stopRecording = useCallback(async () => {
 // }, [socket, sessionId, roomCode, user, cleanupScreenCapture]);
 
 const stopScreenShare = useCallback(() => {
-  addDebugLog("🛑 Stopping screen share (Producer only)...");
+  addDebugLog("🛑 Stopping screen share...");
 
-  // 1. Check karein ki recording chal rahi hai ya nahi [cite: 121]
   const recordingOn = isRecordingRef.current;
 
-  // 2. Socket notify karein taaki server ko pata chale sharing band hai [cite: 220]
+  // 1) Socket notify (only if streamer share was active)
   if (socket && activeScreenShareRef.current?.source === "streamer") {
     socket.emit("screen-share-stop", {
       sessionId: sessionId || roomCode,
@@ -1256,18 +1248,21 @@ const stopScreenShare = useCallback(() => {
     });
   }
 
-  // 3. IMPORTANT: Producers ko close karein (viewer side audio yahan se rukega) 
+  // 2) Close screen producers (screen + screen-audio)
   producers.current.forEach((producer, id) => {
     const src = producer?.appData?.source;
     if (src === "screen" || src === "screen-audio") {
-      try {
-        producer.close(); // Ye viewer side consumer ko 'producer-closed' bhejega 
-        addDebugLog(`🧹 Producer ${src} closed explicitly`);
-      } catch (err) {
-        addDebugLog(`⚠️ Error closing producer: ${err?.message}`);
+      try { producer.close(); } catch (err) {
+        addDebugLog(`⚠️ Error closing producer: ${err?.message || err}`);
       }
       producers.current.delete(id);
-      
+
+      // ✅ YEH LINE ADD KI GAYI HAI: Backend ko explicitly notify karo ki producer close kare
+      emitSocketEvent('producer-close', {
+        sessionId: sessionId || roomCode,
+        producerId: id
+      });
+
       setProducersState((prev) => {
         const m = new Map(prev);
         m.delete(id);
@@ -1276,19 +1271,20 @@ const stopScreenShare = useCallback(() => {
     }
   });
 
-  // 4. UI state reset karein [cite: 223]
+  // 3) Reset active share UI state
   setActiveScreenShare(null);
-  setZoomed((prev) => (prev?.type === "screen" ? null : prev)); [cite: 225]
 
-  // 5. Stream Cleanup sirf tab karein jab recording OFF ho [cite: 223]
+  // 4) ✅ Capture cleanup ONLY if recording is NOT running
   if (!recordingOn && screenCaptureActiveRef.current) {
-    addDebugLog("🧹 Recording off: Full cleanup of screen capture stream");
-    cleanupScreenCapture(); // Tracks yahan stop honge 
+    addDebugLog("🧹 Cleaning up screen capture (no active recording)");
+    cleanupScreenCapture();
     toast.success("Screen share stopped");
   } else {
-    // Agar recording ON hai, toh humne tracks stop nahi kiye, sirf producers close kiye hain
-    toast.info("Screen share stopped (Recording continues in background)"); [cite: 224]
+    toast.info(recordingOn ? "Screen share stopped (recording continues)" : "Screen share stopped");
   }
+
+  // 5) Reset zoom if it was showing screen
+  setZoomed((prev) => (prev?.type === "screen" ? null : prev));
 }, [socket, sessionId, roomCode, user, cleanupScreenCapture]);
 const handleStreamerScreenShareClick = async () => {
   try {
