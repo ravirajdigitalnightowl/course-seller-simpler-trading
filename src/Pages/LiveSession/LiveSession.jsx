@@ -196,6 +196,9 @@ const [showRequests, setShowRequests] = useState(false);
   const [viewerAudios, setViewerAudios] = useState(new Map());
 const [viewerVideoRequests, setViewerVideoRequests] = useState([]);
 const [viewerCameras, setViewerCameras] = useState(new Map()); 
+const recordingAudioContextRef = useRef(null);
+const recordingDestinationRef = useRef(null);
+const speakingAudioContextRef = useRef(null);
 const isRecordingRef = useRef(false);
 
 const screenCaptureStreamRef = useRef(null);
@@ -286,50 +289,56 @@ const thumbnailsCount = (mediaStream ? 1 : 0) +
   // ========== SOCKET EVENT HANDLERS ==========
 
   // Automatic speaking detection functions
+// ✅ IMPORTANT (top of component):
+// const speakingAudioContextRef = useRef(null);
+// const speakingSourceRef = useRef(null); // NEW: to disconnect source cleanly
 
-  const startStreamerSpeakingDetection = () => {
+const startStreamerSpeakingDetection = () => {
   if (!mediaStream || !socket) return;
-  
+
   try {
     // Stop existing detection if any
     stopStreamerSpeakingDetection();
-    
+
     // Get audio track
     const audioTracks = mediaStream.getAudioTracks();
     if (audioTracks.length === 0) {
-      addDebugLog('🎤 No audio track found for streamer speaking detection');
+      addDebugLog("🎤 No audio track found for streamer speaking detection");
       return;
     }
-    
+
     const AudioContext = window.AudioContext || window.webkitAudioContext;
-    audioContextRef.current = new AudioContext();
-    
-    const streamSource = audioContextRef.current.createMediaStreamSource(mediaStream);
-    analyserRef.current = audioContextRef.current.createAnalyser();
+
+    // ✅ Use separate AudioContext for speaking detection (NOT recording)
+    speakingAudioContextRef.current = new AudioContext();
+
+    // ✅ Keep a reference to source node so we can disconnect later
+    speakingSourceRef.current =
+      speakingAudioContextRef.current.createMediaStreamSource(mediaStream);
+
+    analyserRef.current = speakingAudioContextRef.current.createAnalyser();
     analyserRef.current.fftSize = 256;
     analyserRef.current.smoothingTimeConstant = 0.8;
-    
-    streamSource.connect(analyserRef.current);
-    
+
+    speakingSourceRef.current.connect(analyserRef.current);
+
     const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
     let lastSpeakingState = false;
     let consecutiveSpeakingCount = 0;
     let consecutiveSilenceCount = 0;
-    
+
     speakingDetectionIntervalRef.current = setInterval(() => {
-      if (!analyserRef.current || !audioContextRef.current) return;
-      
+      if (!analyserRef.current || !speakingAudioContextRef.current) return;
+
       try {
         analyserRef.current.getByteFrequencyData(dataArray);
-        
+
         let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-          sum += dataArray[i];
-        }
+        for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
         const averageVolume = sum / dataArray.length;
-        
+
         const isCurrentlySpeaking = averageVolume > speakingThreshold;
-        
+
         // Debounce logic
         if (isCurrentlySpeaking) {
           consecutiveSpeakingCount++;
@@ -338,38 +347,34 @@ const thumbnailsCount = (mediaStream ? 1 : 0) +
           consecutiveSilenceCount++;
           consecutiveSpeakingCount = 0;
         }
-        
+
         const detectedSpeaking = consecutiveSpeakingCount >= 2;
         const detectedSilence = consecutiveSilenceCount >= 3;
-        
+
         if (detectedSpeaking && !lastSpeakingState) {
-          // Streamer started speaking
           setIsSpeaking(true);
-          socket.emit('user_speaking', {
+          socket.emit("user_speaking", {
             sessionId: sessionId || roomCode,
-            isSpeaking: true
+            isSpeaking: true,
           });
           lastSpeakingState = true;
           addDebugLog(`🎤 Streamer started speaking (volume: ${averageVolume.toFixed(1)})`);
-          
         } else if (detectedSilence && lastSpeakingState) {
-          // Streamer stopped speaking
           setIsSpeaking(false);
-          socket.emit('user_stopped_speaking', {
-            sessionId: sessionId || roomCode
+          socket.emit("user_stopped_speaking", {
+            sessionId: sessionId || roomCode,
           });
           lastSpeakingState = false;
           addDebugLog(`🎤 Streamer stopped speaking (volume: ${averageVolume.toFixed(1)})`);
         }
       } catch (error) {
-        console.error('Streamer speaking detection error:', error);
+        console.error("Streamer speaking detection error:", error);
       }
     }, 300);
-    
-    addDebugLog('🎤 Streamer speaking detection started');
-    
+
+    addDebugLog("🎤 Streamer speaking detection started");
   } catch (error) {
-    console.error('Error starting streamer speaking detection:', error);
+    console.error("Error starting streamer speaking detection:", error);
     addDebugLog(`❌ Streamer speaking detection error: ${error.message}`);
   }
 };
@@ -379,86 +384,82 @@ const stopStreamerSpeakingDetection = () => {
     clearInterval(speakingDetectionIntervalRef.current);
     speakingDetectionIntervalRef.current = null;
   }
-  
+
+  // ✅ Disconnect source + analyser cleanly
+  try { speakingSourceRef.current?.disconnect?.(); } catch {}
+  speakingSourceRef.current = null;
+
   if (analyserRef.current) {
-    analyserRef.current.disconnect();
+    try { analyserRef.current.disconnect?.(); } catch {}
     analyserRef.current = null;
   }
-  
-  if (audioContextRef.current) {
-    audioContextRef.current.close();
-    audioContextRef.current = null;
+
+  // ✅ Close speaking AudioContext (NOT recording)
+  if (speakingAudioContextRef.current) {
+    speakingAudioContextRef.current.close().catch(() => {});
+    speakingAudioContextRef.current = null;
   }
-  
+
   // If currently speaking, emit stop event
   if (isSpeaking) {
     setIsSpeaking(false);
     if (socket) {
-      socket.emit('user_stopped_speaking', {
-        sessionId: sessionId || roomCode
+      socket.emit("user_stopped_speaking", {
+        sessionId: sessionId || roomCode,
       });
     }
   }
-  
-  addDebugLog('🎤 Streamer speaking detection stopped');
+
+  addDebugLog("🎤 Streamer speaking detection stopped");
 };
+
 const startSpeakingDetection = () => {
   if (!mediaStream || !socket) return;
-  
+
   try {
-    // Stop existing detection if any
     stopSpeakingDetection();
-    
-    // Get audio track from media stream
+
     const audioTracks = mediaStream.getAudioTracks();
     if (audioTracks.length === 0) {
-      addDebugLog('🎤 No audio track found for speaking detection');
+      addDebugLog("🎤 No audio track found for speaking detection");
       return;
     }
-    
+
     localAudioTrackRef.current = audioTracks[0];
-    
-    // Setup audio context and analyser
+
     const AudioContext = window.AudioContext || window.webkitAudioContext;
-    audioContextRef.current = new AudioContext();
-    
-    // Create media stream source
-    const streamSource = audioContextRef.current.createMediaStreamSource(
-      new MediaStream([localAudioTrackRef.current])
-    );
-    
-    // Create analyser
-    analyserRef.current = audioContextRef.current.createAnalyser();
+
+    // ✅ Use separate AudioContext for speaking detection
+    speakingAudioContextRef.current = new AudioContext();
+
+    // Create media stream source from local track (only)
+    const trackStream = new MediaStream([localAudioTrackRef.current]);
+    speakingSourceRef.current =
+      speakingAudioContextRef.current.createMediaStreamSource(trackStream);
+
+    analyserRef.current = speakingAudioContextRef.current.createAnalyser();
     analyserRef.current.fftSize = 256;
     analyserRef.current.smoothingTimeConstant = 0.8;
-    
-    // Connect source to analyser
-    streamSource.connect(analyserRef.current);
-    
-    // Data array for frequency analysis
+
+    speakingSourceRef.current.connect(analyserRef.current);
+
     const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
     let lastSpeakingState = false;
     let consecutiveSpeakingCount = 0;
     let consecutiveSilenceCount = 0;
-    
-    // Start detection interval
+
     speakingDetectionIntervalRef.current = setInterval(() => {
-      if (!analyserRef.current || !audioContextRef.current) return;
-      
+      if (!analyserRef.current || !speakingAudioContextRef.current) return;
+
       try {
         analyserRef.current.getByteFrequencyData(dataArray);
-        
-        // Calculate average volume
+
         let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-          sum += dataArray[i];
-        }
+        for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
         const averageVolume = sum / dataArray.length;
-        
-        // Check if speaking (threshold 40)
+
         const isCurrentlySpeaking = averageVolume > speakingThreshold;
-        
-        // Debounce logic: require 2 consecutive samples
+
         if (isCurrentlySpeaking) {
           consecutiveSpeakingCount++;
           consecutiveSilenceCount = 0;
@@ -466,39 +467,34 @@ const startSpeakingDetection = () => {
           consecutiveSilenceCount++;
           consecutiveSpeakingCount = 0;
         }
-        
-        // Detect state change with debouncing
+
         const detectedSpeaking = consecutiveSpeakingCount >= 2;
         const detectedSilence = consecutiveSilenceCount >= 3;
-        
-        // Only emit if state changed
+
         if (detectedSpeaking && !lastSpeakingState) {
-          // Start speaking
           setIsSpeaking(true);
-          socket.emit('user_speaking', {
+          socket.emit("user_speaking", {
             sessionId: sessionId || roomCode,
-            isSpeaking: true
+            isSpeaking: true,
           });
           lastSpeakingState = true;
           addDebugLog(`🎤 Streamer started speaking (volume: ${averageVolume.toFixed(1)})`);
         } else if (detectedSilence && lastSpeakingState) {
-          // Stop speaking
           setIsSpeaking(false);
-          socket.emit('user_stopped_speaking', {
-            sessionId: sessionId || roomCode
+          socket.emit("user_stopped_speaking", {
+            sessionId: sessionId || roomCode,
           });
           lastSpeakingState = false;
           addDebugLog(`🎤 Streamer stopped speaking (volume: ${averageVolume.toFixed(1)})`);
         }
       } catch (error) {
-        console.error('Speaking detection error:', error);
+        console.error("Speaking detection error:", error);
       }
-    }, 300); // Check every 300ms
-    
-    addDebugLog('🎤 Automatic speaking detection started for streamer');
-    
+    }, 300);
+
+    addDebugLog("🎤 Automatic speaking detection started for streamer");
   } catch (error) {
-    console.error('Error starting speaking detection:', error);
+    console.error("Error starting speaking detection:", error);
     addDebugLog(`❌ Speaking detection error: ${error.message}`);
   }
 };
@@ -508,28 +504,32 @@ const stopSpeakingDetection = () => {
     clearInterval(speakingDetectionIntervalRef.current);
     speakingDetectionIntervalRef.current = null;
   }
-  
+
+  // ✅ Disconnect source + analyser cleanly
+  try { speakingSourceRef.current?.disconnect?.(); } catch {}
+  speakingSourceRef.current = null;
+
   if (analyserRef.current) {
-    analyserRef.current.disconnect();
+    try { analyserRef.current.disconnect?.(); } catch {}
     analyserRef.current = null;
   }
-  
-  if (audioContextRef.current) {
-    audioContextRef.current.close();
-    audioContextRef.current = null;
+
+  // ✅ Close speaking AudioContext
+  if (speakingAudioContextRef.current) {
+    speakingAudioContextRef.current.close().catch(() => {});
+    speakingAudioContextRef.current = null;
   }
-  
-  // If currently speaking, emit stop event
+
   if (isSpeaking) {
     setIsSpeaking(false);
     if (socket) {
-      socket.emit('user_stopped_speaking', {
-        sessionId: sessionId || roomCode
+      socket.emit("user_stopped_speaking", {
+        sessionId: sessionId || roomCode,
       });
     }
   }
-  
-  addDebugLog('🎤 Speaking detection stopped');
+
+  addDebugLog("🎤 Speaking detection stopped");
 };
 
 // Hand control functions
@@ -777,8 +777,8 @@ const startRecordingFromScreenShare = async (screenShareStream) => {
 
     // ✅ Resume AudioContext if suspended (important on some browsers)
     try {
-      if (audioContextRef.current?.state === "suspended") {
-        await audioContextRef.current.resume();
+      if (recordingAudioContextRef.current?.state === "suspended") {
+        await recordingAudioContextRef.current.resume();
         addDebugLog("🔊 Recording mixer AudioContext resumed");
       }
     } catch (e) {
@@ -1239,9 +1239,11 @@ const stopRecording = useCallback(async () => {
     // =========================
     try {
       if (window.recordingAudioSources && window.recordingAudioSources.size > 0) {
-        addDebugLog(`🧹 Disconnecting ${window.recordingAudioSources.size} recording audio sources...`);
+        addDebugLog(
+          `🧹 Disconnecting ${window.recordingAudioSources.size} recording audio sources...`
+        );
 
-        window.recordingAudioSources.forEach((obj, key) => {
+        window.recordingAudioSources.forEach((obj) => {
           try { obj.source?.disconnect?.(); } catch {}
           try { obj.gainNode?.disconnect?.(); } catch {}
         });
@@ -1267,23 +1269,19 @@ const stopRecording = useCallback(async () => {
     }
 
     // =========================
-    // ✅ 3) Close AudioContext cleanly
+    // ✅ 3) Close RECORDING AudioContext (NOT speaking-detection one)
     // =========================
-    if (audioContextRef.current) {
+    if (recordingAudioContextRef.current) {
       try {
-        // Disconnect destination if any
-        try {
-          audioDestinationRef.current?.disconnect?.();
-        } catch {}
+        // destination disconnect
+        try { recordingDestinationRef.current?.disconnect?.(); } catch {}
 
-        // If suspended/running - close safely
-        await audioContextRef.current.close();
+        await recordingAudioContextRef.current.close();
       } catch (e) {
-        console.warn("AudioContext close failed:", e);
-        try { audioContextRef.current = null; } catch {}
+        console.warn("Recording AudioContext close failed:", e);
       } finally {
-        audioContextRef.current = null;
-        audioDestinationRef.current = null;
+        recordingAudioContextRef.current = null;
+        recordingDestinationRef.current = null;
       }
     }
 
@@ -1301,9 +1299,7 @@ const stopRecording = useCallback(async () => {
     setIsRecording(false);
     setRecordingSource(null);
 
-    // ⚠️ IMPORTANT:
-    // stopScreenShare() call yahan tabhi karo jab tum REALLY recording ke saath screen share bhi band karna chahte ho.
-    // Abhi tumhare code me always call ho raha hai, so keep as-is (same behavior).
+    // Keep same behavior as your current code
     stopScreenShare();
 
     toast.info("Processing recording...");
@@ -1322,6 +1318,7 @@ const stopRecording = useCallback(async () => {
   stopScreenShare,
   stopRecordingTimer,
 ]);
+
 
 
 // const stopScreenShare = useCallback(() => {
@@ -1577,23 +1574,24 @@ useEffect(() => {
 }, []);
 
 
+
 const getMixedAudioStream = (screenStream, micStream) => {
   try {
     const AudioContext = window.AudioContext || window.webkitAudioContext;
 
-    // ✅ 1) Create (or reuse) ONE shared audio context for recording
-    if (!audioContextRef.current) {
-      audioContextRef.current = new AudioContext();
+    // ✅ 1) Create (or reuse) ONE shared audio context for RECORDING only
+    if (!recordingAudioContextRef.current) {
+      recordingAudioContextRef.current = new AudioContext();
     }
-    const audioContext = audioContextRef.current;
+    const audioContext = recordingAudioContextRef.current;
 
-    // ✅ 2) Create (or reuse) ONE shared destination for recording
-    if (!audioDestinationRef.current) {
-      audioDestinationRef.current = audioContext.createMediaStreamDestination();
+    // ✅ 2) Create (or reuse) ONE shared destination for RECORDING only
+    if (!recordingDestinationRef.current) {
+      recordingDestinationRef.current = audioContext.createMediaStreamDestination();
     }
-    const destination = audioDestinationRef.current;
+    const destination = recordingDestinationRef.current;
 
-    // ✅ 3) Map to prevent duplicate connections (optional but recommended)
+    // ✅ 3) Map to prevent duplicate connections (recommended)
     if (!window.recordingAudioSources) {
       window.recordingAudioSources = new Map();
     }
@@ -1609,7 +1607,7 @@ const getMixedAudioStream = (screenStream, micStream) => {
       gainNode.gain.value = gainValue;
 
       source.connect(gainNode).connect(destination);
-      window.recordingAudioSources.set(key, { source, gainNode });
+      window.recordingAudioSources.set(key, { source, gainNode, type: "mixer" });
     };
 
     // ✅ 4) Mix Streamer Mic (always)
@@ -1622,8 +1620,8 @@ const getMixedAudioStream = (screenStream, micStream) => {
     const audioEntries = Array.from(viewerAudiosRef.current?.entries?.() || []);
     audioEntries.forEach(([audioKey, stream]) => {
       try {
-        const userIdParts = String(audioKey).split("-");
-        const userId = userIdParts[userIdParts.length - 1];
+        const parts = String(audioKey).split("-");
+        const userId = parts[parts.length - 1];
 
         // ✅ Skip streamer's own loopback
         if (userId && user?.id && String(userId) === String(user?.id)) return;
@@ -1642,6 +1640,7 @@ const getMixedAudioStream = (screenStream, micStream) => {
     return null;
   }
 };
+
 
   const handleClose = () => {
     setShowRecorder(false);
@@ -1949,12 +1948,11 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
   const existingAudioEl = audioElementsRef.current.get(audioKey);
 
   const safeReplaceAudioElementStream = (audioEl, newStream) => {
-
+    // NOTE: don't stop consumer tracks here; just detach old srcObject
     try {
-      if (audioEl?.srcObject) {
-        audioEl.srcObject = null;
-      }
+      if (audioEl?.srcObject) audioEl.srcObject = null;
     } catch {}
+
     audioEl.srcObject = newStream;
 
     if (userInteractedRef.current) {
@@ -1964,7 +1962,6 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
         }
       });
     } else {
-      // Queue for later playback (UI / user gesture)
       pendingAudioQueueRef.current.set(audioKey, {
         userId,
         userName,
@@ -2017,9 +2014,8 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
   // =========================
   // ✅ RECORDING: Add to shared mixer (late join support)
   // =========================
-  if (isRecording && audioContextRef.current && audioDestinationRef.current) {
+  if (isRecording && recordingAudioContextRef.current && recordingDestinationRef.current) {
     try {
-      // Allow both viewer mic and viewer screen-audio
       if (normalizedSourceType === "viewer-mic" || normalizedSourceType === "viewer-screen-audio") {
         if (!window.recordingAudioSources) window.recordingAudioSources = new Map();
 
@@ -2031,18 +2027,14 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
           return;
         }
 
-        // Create nodes
-        const newSource = audioContextRef.current.createMediaStreamSource(audioStream);
-        const gainNode = audioContextRef.current.createGain();
+        // ✅ IMPORTANT: use RECORDING context/destination (not audioContextRef/audioDestinationRef)
+        const newSource = recordingAudioContextRef.current.createMediaStreamSource(audioStream);
+        const gainNode = recordingAudioContextRef.current.createGain();
 
         // Gain tuning
-        if (normalizedSourceType === "viewer-mic") {
-          gainNode.gain.value = 0.8;
-        } else {
-          gainNode.gain.value = 0.7;
-        }
+        gainNode.gain.value = normalizedSourceType === "viewer-mic" ? 0.8 : 0.7;
 
-        newSource.connect(gainNode).connect(audioDestinationRef.current);
+        newSource.connect(gainNode).connect(recordingDestinationRef.current);
 
         // Store for cleanup
         window.recordingAudioSources.set(sourceKey, {
