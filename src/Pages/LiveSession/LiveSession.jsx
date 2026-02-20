@@ -618,7 +618,9 @@ const getOrCreateCapture = async (purpose) => {
 };
 
 
-
+useEffect(() => {
+  isRecordingRef.current = isRecording;
+}, [isRecording]);
 
 useEffect(() => { activeScreenShareRef.current = activeScreenShare; }, [activeScreenShare]);
 
@@ -1922,6 +1924,10 @@ const createAndPlayAudioElement = (userId, audioStream, userName) => {
 
 
 
+// ✅ IMPORTANT (add once at top of component):
+// const isRecordingRef = useRef(false);
+// useEffect(() => { isRecordingRef.current = isRecording; }, [isRecording]);
+
 const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
   // =========================
   // 0) Normalize sourceType
@@ -2014,7 +2020,8 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
   // =========================
   // ✅ RECORDING: Add to shared mixer (late join support)
   // =========================
-  if (isRecording && recordingAudioContextRef.current && recordingDestinationRef.current) {
+  // 🔥 FIX: use isRecordingRef.current (avoids stale socket listener closures)
+  if (isRecordingRef.current && recordingAudioContextRef.current && recordingDestinationRef.current) {
     try {
       if (normalizedSourceType === "viewer-mic" || normalizedSourceType === "viewer-screen-audio") {
         if (!window.recordingAudioSources) window.recordingAudioSources = new Map();
@@ -2027,7 +2034,7 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
           return;
         }
 
-        // ✅ IMPORTANT: use RECORDING context/destination (not audioContextRef/audioDestinationRef)
+        // ✅ Use RECORDING context/destination
         const newSource = recordingAudioContextRef.current.createMediaStreamSource(audioStream);
         const gainNode = recordingAudioContextRef.current.createGain();
 
@@ -2052,6 +2059,11 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
       console.warn(`Failed to add ${normalizedSourceType} to recording:`, err);
       addDebugLog(`⚠️ Failed to add ${normalizedSourceType} to recording: ${err.message}`);
     }
+  } else {
+    // Helpful debug to confirm the gate
+    addDebugLog(
+      `🧱 recordGate blocked: isRecordingRef=${!!isRecordingRef.current}, ctx=${!!recordingAudioContextRef.current}, dest=${!!recordingDestinationRef.current}, type=${normalizedSourceType}`
+    );
   }
 };
 
