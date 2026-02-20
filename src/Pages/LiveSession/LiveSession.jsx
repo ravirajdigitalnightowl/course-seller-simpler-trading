@@ -9,7 +9,6 @@ import { getOptimizedAudioConstraints, detectEarphones } from './audioConstraint
 import ChatComponent from './ChatComponent';
 import AudioPermissionModal from './AudioPermissionModal';
 import StreamerWhiteboard from './components/WhiteboardComponent';
-import { isStreamZoomed } from '../../utils/streamHelpers';
 import { Dialog } from "@headlessui/react";
 
 
@@ -5424,104 +5423,101 @@ return (
           <div className="flex-1 overflow-y-auto p-6">
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-4">
               {/* ✅ WHITEBOARD THUMBNAIL - Only show when whiteboard is open */}
-         {/* WHITEBOARD THUMBNAIL */}
-{showWhiteboard && !isStreamZoomed(zoomed, 'whiteboard') && (
-  <div className="relative group">
-    <ThumbnailVideo
-      uid="whiteboard"
-      stream={null}
-      userName="Whiteboard"
-      onClick={() => {
-        setZoomed({ type: "whiteboard", stream: null, userId: "whiteboard" });
-        setShowPlayButton(false);
-        setThumbnailsExpanded(false);
-      }}
-      isZoomed={zoomed?.type === "whiteboard"}
-      videoEnabled={true}
-      expanded={true}
-      isWhiteboard={true}
-      showWhiteboard={showWhiteboard}
-      onCloseWhiteboard={handleCloseWhiteboard}
-    />
-    <div className="absolute top-2 left-2 bg-purple-600/80 text-white text-xs px-2 py-1 rounded flex items-center">
-      <FiEdit3 className="h-3 w-3 mr-1" />
-      Whiteboard
-    </div>
-  </div>
-)}
+              {showWhiteboard && (
+                <div className="relative group">
+                  <ThumbnailVideo
+                    uid="whiteboard"
+                    stream={null}
+                    userName="Whiteboard"
+                    onClick={() => {
+                      setZoomed({ type: "whiteboard", stream: null, userId: "whiteboard" });
+                      setShowPlayButton(false);
+                      setThumbnailsExpanded(false);
+                    }}
+                    isZoomed={zoomed?.type === "whiteboard"}
+                    videoEnabled={true}
+                    expanded={true}
+                    isWhiteboard={true}
+                    showWhiteboard={showWhiteboard}
+                    onCloseWhiteboard={handleCloseWhiteboard}
+                  />
+                  <div className="absolute top-2 left-2 bg-purple-600/80 text-white text-xs px-2 py-1 rounded flex items-center">
+                    <FiEdit3 className="h-3 w-3 mr-1" />
+                    Whiteboard
+                  </div>
+                </div>
+              )}
 
-{/* Streamer thumbnail */}
-{mediaStream && !isStreamZoomed(zoomed, 'streamer', user?.id) && (
-  <div className="relative group">
-    <ThumbnailVideo
-      uid="streamer"
-      stream={mediaStream}
-      userName="You"
-      onClick={() => {
-        setZoomed({ type: "streamer", stream: mediaStream, userId: user?.id });
-        setShowPlayButton(false);
-        setThumbnailsExpanded(false);
-      }}
-      isZoomed={zoomed?.type === "streamer"}
-      videoEnabled={videoEnabled}
-      expanded={true}
-    />
-    <div className="absolute top-2 left-2 bg-blue-600/80 text-white text-xs px-2 py-1 rounded">
-      Host
-    </div>
-  </div>
-)}
+              {/* Streamer thumbnail */}
+              {mediaStream && (
+                <div className="relative group">
+                  <ThumbnailVideo
+                    uid="streamer"
+                    stream={mediaStream}
+                    userName="You"
+                    onClick={() => {
+                      setZoomed({ type: "streamer", stream: mediaStream, userId: user?.id });
+                      setShowPlayButton(false);
+                      setThumbnailsExpanded(false);
+                    }}
+                    isZoomed={zoomed?.type === "streamer"}
+                    videoEnabled={videoEnabled}
+                    expanded={true}
+                  />
+                  <div className="absolute top-2 left-2 bg-blue-600/80 text-white text-xs px-2 py-1 rounded">
+                    Host
+                  </div>
+                </div>
+              )}
+              
+              {/* Viewer cameras */}
+              {[...viewerCameras.entries()].map(([uid, stream]) => (
+                <div key={uid} className="relative group">
+                  <ThumbnailVideo
+                    uid={uid}
+                    stream={stream}
+                    userName={participants.find(p => p.userId === uid)?.name || `User ${uid}`}
+                    onClick={() => {
+                      setZoomed({ type: "viewer", stream, userId: uid });
+                      setShowPlayButton(false);
+                      setThumbnailsExpanded(false);
+                    }}
+                    isZoomed={zoomed?.type === "viewer" && zoomed.userId === uid}
+                    videoEnabled={true}
+                    expanded={true}
+                  />
+                  <div className="absolute top-2 left-2 bg-green-600/80 text-white text-xs px-2 py-1 rounded">
+                    Viewer
+                  </div>
+                </div>
+              ))}
+              
+              {/* Screen share thumbnails */}
+              {activeScreenShare && (
+                <div className="relative group">
+                  <ThumbnailVideo
+                    uid={activeScreenShare.userId}
+                    stream={activeScreenShare.stream}
+                    userName={`${activeScreenShare.userName}'s Screen`}
+                    onClick={() => {
+                      setZoomed({ type: "screen", stream: activeScreenShare.stream, userId: activeScreenShare.userId });
+                      setShowPlayButton(false);
+                      setThumbnailsExpanded(false);
+                    }}
+                    isZoomed={zoomed?.type === "screen"}
+                    videoEnabled={true}
+                    isScreenShare={true}
+                    expanded={true}
+                  />
+                  <div className="absolute top-2 left-2 bg-purple-600/80 text-white text-xs px-2 py-1 rounded flex items-center">
+                    <FiMonitor className="h-3 w-3 mr-1" />
+                    Screen
+                  </div>
+                </div>
+              )}
 
-{/* Viewer cameras */}
-{[...viewerCameras.entries()].map(([uid, stream]) => (
-  !isStreamZoomed(zoomed, 'viewer', uid) && (
-    <div key={uid} className="relative group">
-      <ThumbnailVideo
-        uid={uid}
-        stream={stream}
-        userName={participants.find(p => p.userId === uid)?.name || `User ${uid}`}
-        onClick={() => {
-          setZoomed({ type: "viewer", stream, userId: uid });
-          setShowPlayButton(false);
-          setThumbnailsExpanded(false);
-        }}
-        isZoomed={zoomed?.type === "viewer" && zoomed.userId === uid}
-        videoEnabled={true}
-        expanded={true}
-      />
-      <div className="absolute top-2 left-2 bg-green-600/80 text-white text-xs px-2 py-1 rounded">
-        Viewer
-      </div>
-    </div>
-  )
-))}
-
-{/* Streamer screen share thumbnail */}
-{activeScreenShare && !isStreamZoomed(zoomed, 'screen', activeScreenShare.userId) && (
-  <div className="relative group">
-    <ThumbnailVideo
-      uid={activeScreenShare.userId}
-      stream={activeScreenShare.stream}
-      userName={`${activeScreenShare.userName}'s Screen`}
-      onClick={() => {
-        setZoomed({ type: "screen", stream: activeScreenShare.stream, userId: activeScreenShare.userId });
-        setShowPlayButton(false);
-        setThumbnailsExpanded(false);
-      }}
-      isZoomed={zoomed?.type === "screen"}
-      videoEnabled={true}
-      isScreenShare={true}
-      expanded={true}
-    />
-    <div className="absolute top-2 left-2 bg-purple-600/80 text-white text-xs px-2 py-1 rounded flex items-center">
-      <FiMonitor className="h-3 w-3 mr-1" />
-      Screen
-    </div>
-  </div>
-)}
-
-{/* Viewer screen share thumbnail */}
-{viewerScreenShare?.stream && !isStreamZoomed(zoomed, 'viewer-screen', viewerScreenShare.userId) && (
+              {/* ✅ YEH ADD KARO - Viewer Screen Share Thumbnail */}
+{viewerScreenShare?.stream && (
   <div className="relative group">
     <ThumbnailVideo
       uid={viewerScreenShare.userId}
@@ -5534,12 +5530,10 @@ return (
           userId: viewerScreenShare.userId 
         });
         setShowPlayButton(false);
-        setThumbnailsExpanded(false);
       }}
       isZoomed={zoomed?.type === "viewer-screen" && zoomed.userId === viewerScreenShare.userId}
       videoEnabled={true}
       isScreenShare={true}
-      expanded={true}
     />
     <div className="absolute top-2 left-2 bg-orange-600/80 text-white text-xs px-2 py-1 rounded flex items-center">
       <FiMonitor className="h-3 w-3 mr-1" />
@@ -5826,103 +5820,100 @@ return (
             {/* Thumbnails container */}
             <div className="flex-1 overflow-y-auto p-3 space-y-3 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-700">
               {/* ✅ WHITEBOARD THUMBNAIL - Only show when whiteboard is open */}
-     {/* Whiteboard thumbnail */}
-{showWhiteboard && !isStreamZoomed(zoomed, 'whiteboard') && (
-  <ThumbnailVideo
-    uid="whiteboard"
-    stream={null}
-    userName="Whiteboard"
-    onClick={() => {
-      setZoomed({ type: "whiteboard", stream: null, userId: "whiteboard" });
-      setShowPlayButton(false);
-    }}
-    isZoomed={zoomed?.type === "whiteboard"}
-    videoEnabled={true}
-    isWhiteboard={true}
-    showWhiteboard={showWhiteboard}
-    onCloseWhiteboard={handleCloseWhiteboard}
-  />
-)}
+              {showWhiteboard && (
+                <ThumbnailVideo
+                  uid="whiteboard"
+                  stream={null}
+                  userName="Whiteboard"
+                  onClick={() => {
+                    setZoomed({ type: "whiteboard", stream: null, userId: "whiteboard" });
+                    setShowPlayButton(false);
+                  }}
+                  isZoomed={zoomed?.type === "whiteboard"}
+                  videoEnabled={true}
+                  isWhiteboard={true}
+                  showWhiteboard={showWhiteboard}
+                  onCloseWhiteboard={handleCloseWhiteboard}
+                />
+              )}
 
-{/* Streamer thumbnail */}
-{mediaStream && !isStreamZoomed(zoomed, 'streamer', user?.id) && (
-  <ThumbnailVideo
-    uid="streamer"
-    stream={mediaStream}
-    userName="You"
-    onClick={() => {
-      setZoomed({ type: "streamer", stream: mediaStream, userId: user?.id });
-      setShowPlayButton(false);
-    }}
-    isZoomed={zoomed?.type === "streamer"}
-    videoEnabled={videoEnabled}
-  />
-)}
+              {/* Streamer thumbnail */}
+              {mediaStream && (
+                <ThumbnailVideo
+                  uid="streamer"
+                  stream={mediaStream}
+                  userName="You"
+                  onClick={() => {
+                    setZoomed({ type: "streamer", stream: mediaStream, userId: user?.id });
+                    setShowPlayButton(false);
+                  }}
+                  isZoomed={zoomed?.type === "streamer"}
+                  videoEnabled={videoEnabled}
+                />
+              )}
+              
+              {/* Viewer cameras */}
+              {[...viewerCameras.entries()].map(([uid, stream]) => (
+                <ThumbnailVideo
+                  key={uid}
+                  uid={uid}
+                  stream={stream}
+                  userName={participants.find(p => p.userId === uid)?.name || `User ${uid}`}
+                  onClick={() => {
+                    setZoomed({ type: "viewer", stream, userId: uid });
+                    setShowPlayButton(false);
+                  }}
+                  isZoomed={zoomed?.type === "viewer" && zoomed.userId === uid}
+                  videoEnabled={true}
+                />
+              ))}
+              
+              {/* Screen share thumbnails */}
+              {activeScreenShare && (
+                <ThumbnailVideo
+                  uid={activeScreenShare.userId}
+                  stream={
+        activeScreenShare.stream?.getVideoTracks?.()[0]
+          ? new MediaStream([activeScreenShare.stream.getVideoTracks()[0]])
+          : activeScreenShare.stream
+      }
+                  userName={`${activeScreenShare.userName}'s Screen`}
+                  onClick={() => {
+                    setZoomed({ type: "screen", stream: activeScreenShare.stream, userId: activeScreenShare.userId });
+                    setShowPlayButton(false);
+                  }}
+                  isZoomed={zoomed?.type === "screen"}
+                  videoEnabled={true}
+                  isScreenShare={true}
+                />
+              )}
 
-{/* Viewer cameras */}
-{[...viewerCameras.entries()].map(([uid, stream]) => (
-  !isStreamZoomed(zoomed, 'viewer', uid) && (
-    <ThumbnailVideo
-      key={uid}
-      uid={uid}
-      stream={stream}
-      userName={participants.find(p => p.userId === uid)?.name || `User ${uid}`}
-      onClick={() => {
-        setZoomed({ type: "viewer", stream, userId: uid });
-        setShowPlayButton(false);
-      }}
-      isZoomed={zoomed?.type === "viewer" && zoomed.userId === uid}
-      videoEnabled={true}
-    />
-  )
-))}
-
-{/* Streamer screen share thumbnail */}
-{activeScreenShare && !isStreamZoomed(zoomed, 'screen', activeScreenShare.userId) && (
-  <ThumbnailVideo
-    uid={activeScreenShare.userId}
-    stream={activeScreenShare.stream?.getVideoTracks?.()[0]
-      ? new MediaStream([activeScreenShare.stream.getVideoTracks()[0]])
-      : activeScreenShare.stream
-    }
-    userName={`${activeScreenShare.userName}'s Screen`}
-    onClick={() => {
-      setZoomed({ type: "screen", stream: activeScreenShare.stream, userId: activeScreenShare.userId });
-      setShowPlayButton(false);
-    }}
-    isZoomed={zoomed?.type === "screen"}
-    videoEnabled={true}
-    isScreenShare={true}
-  />
-)}
-
-{/* Viewer screen share thumbnail */}
-{viewerScreenShare?.stream && !isStreamZoomed(zoomed, 'viewer-screen', viewerScreenShare.userId) && (
-  <div className="relative group">
-    <ThumbnailVideo
-      uid={viewerScreenShare.userId}
-      stream={viewerScreenShare.stream}
-      userName={`${viewerScreenShare.userName}'s Screen`}
-      onClick={() => {
-        setZoomed({ 
-          type: "viewer-screen", 
-          stream: viewerScreenShare.stream, 
-          userId: viewerScreenShare.userId 
-        });
-        setShowPlayButton(false);
-        setThumbnailsExpanded(false);
-      }}
-      isZoomed={zoomed?.type === "viewer-screen" && zoomed.userId === viewerScreenShare.userId}
-      videoEnabled={true}
-      isScreenShare={true}
-      expanded={true}
-    />
-    <div className="absolute top-2 left-2 bg-orange-600/80 text-white text-xs px-2 py-1 rounded flex items-center">
-      <FiMonitor className="h-3 w-3 mr-1" />
-      Viewer Screen
+                {viewerScreenShare?.stream && (
+    <div className="relative group">
+      <ThumbnailVideo
+        uid={viewerScreenShare.userId}
+        stream={viewerScreenShare?.stream}
+        userName={`${viewerScreenShare.userName}'s Screen`}
+        onClick={() => {
+          setZoomed({ 
+            type: "viewer-screen", 
+            stream: viewerScreenShare.stream, 
+            userId: viewerScreenShare.userId 
+          });
+          setShowPlayButton(false);
+          setThumbnailsExpanded(false);
+        }}
+        isZoomed={zoomed?.type === "viewer-screen" && zoomed.userId === viewerScreenShare.userId}
+        videoEnabled={true}
+        isScreenShare={true}
+        expanded={true}
+      />
+      <div className="absolute top-2 left-2 bg-orange-600/80 text-white text-xs px-2 py-1 rounded flex items-center">
+        <FiMonitor className="h-3 w-3 mr-1" />
+        Viewer Screen
+      </div>
     </div>
-  </div>
-)}
+  )}
 
 
 
