@@ -198,6 +198,7 @@ const [viewerVideoRequests, setViewerVideoRequests] = useState([]);
 const [viewerCameras, setViewerCameras] = useState(new Map()); 
 const recordingAudioContextRef = useRef(null);
 const recordingDestinationRef = useRef(null);
+const speakingSourceRef = useRef(null);
 const speakingAudioContextRef = useRef(null);
 const isRecordingRef = useRef(false);
 
