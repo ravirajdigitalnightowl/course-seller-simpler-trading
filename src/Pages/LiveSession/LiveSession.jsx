@@ -761,16 +761,25 @@ const startRecording = async () => {
 };
 
 
+// ✅ UPDATED: Recording start that supports late viewer audio mixing too
+// Key changes:
+// 1) Initializes shared mixer via getMixedAudioStream() (sets audioContextRef + destination)
+// 2) Ensures AudioContext is resumed (some browsers start it suspended)
+// 3) Uses mixed audio track as main audio (fallback to mic if mixing fails)
+// 4) Stores recordingStream cleanly
+
 const startRecordingFromScreenShare = async (screenShareStream) => {
   try {
     setIsRecordingLoading(true);
 
-    // 1. Get Streamer Mic
+    // =========================
+    // 1) Get Streamer Mic Stream
+    // =========================
     let currentMicStream = null;
-    if (mediaStream && mediaStream.getAudioTracks().length > 0) {
+
+    if (mediaStream?.getAudioTracks?.().length > 0) {
       currentMicStream = mediaStream;
     } else {
-      // Agar mic nahi hai to request karein
       try {
         currentMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch (e) {
@@ -778,71 +787,90 @@ const startRecordingFromScreenShare = async (screenShareStream) => {
       }
     }
 
-    // 2. 🔥 Get Mixed Audio (Streamer + Screen + Viewers)
+    // =========================
+    // 2) Build / Init shared audio mixer
+    //    (Streamer mic + Screen audio + Existing viewers)
+    //    Later viewers will be added in handleAudioConsumer() because refs exist now.
+    // =========================
     const mixedAudioTrack = getMixedAudioStream(screenShareStream, currentMicStream);
 
-    // 3. Prepare Recording Stream
-    const recordingStream = new MediaStream();
-
-    // Add Video
-    const videoTrack = screenShareStream.getVideoTracks()[0];
-    
-    // ✅ ORIGINAL SCREEN VIDEO TRACK PE CONTENT HINT
-    if (videoTrack && 'contentHint' in videoTrack) {
-      videoTrack.contentHint = 'motion';
-      addDebugLog("🎬 Screen video: Applied contentHint 'motion' for recording");
+    // ✅ Resume AudioContext if suspended (important on some browsers)
+    try {
+      if (audioContextRef.current?.state === "suspended") {
+        await audioContextRef.current.resume();
+        addDebugLog("🔊 Recording mixer AudioContext resumed");
+      }
+    } catch (e) {
+      console.warn("AudioContext resume failed:", e);
     }
-    
+
+    // =========================
+    // 3) Prepare Recording Stream
+    // =========================
+    const streamForRecording = new MediaStream();
+
+    // ---- Video: use original screen video track
+    const videoTrack = screenShareStream?.getVideoTracks?.()[0];
+    if (videoTrack && "contentHint" in videoTrack) {
+      videoTrack.contentHint = "motion";
+      addDebugLog("🎬 Screen video: contentHint 'motion' applied for recording");
+    }
     if (videoTrack) {
-      // ✅ USE ORIGINAL TRACK DIRECTLY - NO CLONING
-      recordingStream.addTrack(videoTrack); // ✅ Original track
+      streamForRecording.addTrack(videoTrack);
+    } else {
+      console.warn("❌ No screen video track found for recording");
     }
 
-    // ✅ SCREEN AUDIO TRACK PE OPTIMIZATION (if exists)
-    const screenAudioTrack = screenShareStream.getAudioTracks()[0];
-    if (screenAudioTrack && 'contentHint' in screenAudioTrack) {
-      screenAudioTrack.contentHint = 'music';
-      addDebugLog("🎬 Screen audio: Applied contentHint 'music' for recording");
+    // ---- Optional: screen audio track hint (doesn't get added directly; we mix it)
+    const screenAudioTrack = screenShareStream?.getAudioTracks?.()[0];
+    if (screenAudioTrack && "contentHint" in screenAudioTrack) {
+      screenAudioTrack.contentHint = "music";
+      addDebugLog("🎬 Screen audio: contentHint 'music' applied");
     }
 
-    // Add Mixed Audio
+    // ---- Audio: prefer mixed track
     if (mixedAudioTrack) {
-      recordingStream.addTrack(mixedAudioTrack);
-    } else if (currentMicStream) {
-      // Fallback agar mixing fail hui
-      const micAudioTrack = currentMicStream.getAudioTracks()[0];
-      if (micAudioTrack) {
-        // ✅ MIC AUDIO TRACK PE OPTIMIZATION
-        if ('contentHint' in micAudioTrack) {
-          micAudioTrack.contentHint = 'speech';
-          addDebugLog("🎬 Mic audio: Applied contentHint 'speech' for recording");
+      if ("contentHint" in mixedAudioTrack) {
+        mixedAudioTrack.contentHint = "music";
+      }
+      streamForRecording.addTrack(mixedAudioTrack);
+      addDebugLog("🎚️ Recording audio: using MIXED track (screen + mic + viewers)");
+    } else {
+      // Fallback to mic only
+      const micTrack = currentMicStream?.getAudioTracks?.()[0] || null;
+      if (micTrack) {
+        if ("contentHint" in micTrack) {
+          micTrack.contentHint = "speech";
+          addDebugLog("🎬 Mic audio: contentHint 'speech' applied for recording");
         }
-        recordingStream.addTrack(micAudioTrack);
+        streamForRecording.addTrack(micTrack);
+        addDebugLog("🎚️ Recording audio: mixing failed, using MIC fallback");
+      } else {
+        addDebugLog("⚠️ Recording audio: no mixed track, no mic track (audio will be missing)");
       }
     }
 
-    // 4. Start Recording
-    startMediaRecorder(recordingStream, screenShareStream, null);
+    // =========================
+    // 4) Start MediaRecorder
+    // =========================
+    startMediaRecorder(streamForRecording, screenShareStream, null);
 
-    setRecordingStream(recordingStream);
+    // =========================
+    // 5) State updates
+    // =========================
+    setRecordingStream(streamForRecording);
     setIsRecording(true);
     setIsRecordingLoading(false);
     startRecordingTimer();
 
-    toast.success('🎬 Recording Started (All Audio Included)!');
-
+    toast.success("🎬 Recording Started (Mixer Ready for Viewers Audio)!");
   } catch (error) {
-    console.error('Error starting recording:', error);
-    toast.error('Failed to start recording');
+    console.error("Error starting recording:", error);
+    toast.error("Failed to start recording");
     setIsRecordingLoading(false);
   }
 };
 
-// ✅ Updated: startNewScreenShareWithRecording
-// Goal: Scenario-2 safe (Recording → later ScreenShare)
-// - Screen capture ALWAYS through startScreenCapture('record') so screenCaptureStream is the single source of truth
-// - DO NOT produce / socket emit here (participants share will happen only when user clicks "Screen Share")
-// - Recording will start from the same capture stream
 const startNewScreenShareWithRecording = async () => {
   try {
     // 1) Ensure we have ONE capture stream (no direct getDisplayMedia here)
@@ -1144,50 +1172,107 @@ const startMediaRecorder = (recordingStream, screenStream, micStream_UNUSED) => 
   }
 };
 const stopRecording = useCallback(async () => {
-  if (!recorder || recorder.state === 'inactive') return;
+  if (!recorder || recorder.state === "inactive") return;
 
   try {
-    addDebugLog('⏹️ Stopping recording...');
+    addDebugLog("⏹️ Stopping recording...");
     setIsRecordingStopping(true);
-    
-    if (recorder.state === 'recording') {
+
+    // ✅ Stop recorder first (async "onstop" will fire later)
+    if (recorder.state === "recording") {
       recorder.stop();
     }
-    
+
     stopRecordingTimer();
-    
-    // Recording stream cleanup
+
+    // =========================
+    // ✅ 1) Disconnect recording mixer nodes (viewer-mic + viewer-screen-audio)
+    // =========================
+    try {
+      if (window.recordingAudioSources && window.recordingAudioSources.size > 0) {
+        addDebugLog(`🧹 Disconnecting ${window.recordingAudioSources.size} recording audio sources...`);
+
+        window.recordingAudioSources.forEach((obj, key) => {
+          try { obj.source?.disconnect?.(); } catch {}
+          try { obj.gainNode?.disconnect?.(); } catch {}
+        });
+
+        window.recordingAudioSources.clear();
+      }
+    } catch (e) {
+      console.warn("Failed to disconnect recordingAudioSources:", e);
+    }
+
+    // =========================
+    // ✅ 2) Stop recording stream tracks
+    // =========================
     if (recordingStream) {
-      recordingStream.getTracks().forEach(track => track.stop());
+      try {
+        recordingStream.getTracks().forEach((track) => {
+          try { track.stop(); } catch {}
+        });
+      } catch (e) {
+        console.warn("Failed stopping recordingStream tracks:", e);
+      }
       setRecordingStream(null);
     }
-    
-    // Audio mixer cleanup
+
+    // =========================
+    // ✅ 3) Close AudioContext cleanly
+    // =========================
     if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-      audioDestinationRef.current = null;
+      try {
+        // Disconnect destination if any
+        try {
+          audioDestinationRef.current?.disconnect?.();
+        } catch {}
+
+        // If suspended/running - close safely
+        await audioContextRef.current.close();
+      } catch (e) {
+        console.warn("AudioContext close failed:", e);
+        try { audioContextRef.current = null; } catch {}
+      } finally {
+        audioContextRef.current = null;
+        audioDestinationRef.current = null;
+      }
     }
-    
-    // Agar screen share नहीं चल रहा, to screen capture भी cleanup करें
+
+    // =========================
+    // ✅ 4) If screen share not running, cleanup capture
+    // =========================
     if (!activeScreenShare && screenCaptureActive) {
-      addDebugLog('🧹 Cleaning up screen capture (no active screen share)');
+      addDebugLog("🧹 Cleaning up screen capture (no active screen share)");
       cleanupScreenCapture();
     }
-    
+
+    // =========================
+    // ✅ 5) Update UI state
+    // =========================
     setIsRecording(false);
     setRecordingSource(null);
-    stopScreenShare()
-    
-    toast.info('Processing recording...');
-    
+
+    // ⚠️ IMPORTANT:
+    // stopScreenShare() call yahan tabhi karo jab tum REALLY recording ke saath screen share bhi band karna chahte ho.
+    // Abhi tumhare code me always call ho raha hai, so keep as-is (same behavior).
+    stopScreenShare();
+
+    toast.info("Processing recording...");
   } catch (error) {
-    console.error('Error stopping recording:', error);
-    toast.error('Error stopping recording');
+    console.error("Error stopping recording:", error);
+    toast.error("Error stopping recording");
   } finally {
     setIsRecordingStopping(false);
   }
-}, [recorder, recordingStream, activeScreenShare, screenCaptureActive]);
+}, [
+  recorder,
+  recordingStream,
+  activeScreenShare,
+  screenCaptureActive,
+  cleanupScreenCapture,
+  stopScreenShare,
+  stopRecordingTimer,
+]);
 
 const stopScreenShare = useCallback(() => {
   addDebugLog("🛑 Stopping screen share...");
@@ -1489,52 +1574,73 @@ useEffect(() => {
   };
 }, []);
 
+
 const getMixedAudioStream = (screenStream, micStream) => {
   try {
     const AudioContext = window.AudioContext || window.webkitAudioContext;
-    const audioContext = new AudioContext();
-    const destination = audioContext.createMediaStreamDestination();
 
-    // 1. Streamer Mic (Always mix)
-    if (micStream && micStream.getAudioTracks().length > 0) {
-      const micSource = audioContext.createMediaStreamSource(micStream);
-      const micGain = audioContext.createGain();
-      micGain.gain.value = 1.0; 
-      micSource.connect(micGain).connect(destination);
+    // ✅ 1) Create (or reuse) ONE shared audio context for recording
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioContext();
+    }
+    const audioContext = audioContextRef.current;
+
+    // ✅ 2) Create (or reuse) ONE shared destination for recording
+    if (!audioDestinationRef.current) {
+      audioDestinationRef.current = audioContext.createMediaStreamDestination();
+    }
+    const destination = audioDestinationRef.current;
+
+    // ✅ 3) Map to prevent duplicate connections (optional but recommended)
+    if (!window.recordingAudioSources) {
+      window.recordingAudioSources = new Map();
     }
 
-    // 2. Streamer Screen Audio (Direct from capture)
-    if (screenStream && screenStream.getAudioTracks().length > 0) {
-      const screenSource = audioContext.createMediaStreamSource(screenStream);
-      const screenGain = audioContext.createGain();
-      screenGain.gain.value = 0.5; // Gain kam rakhein
-      screenSource.connect(screenGain).connect(destination);
-    }
+    const safeConnect = (key, stream, gainValue = 1.0) => {
+      if (!stream || stream.getAudioTracks?.().length === 0) return;
 
-    // 3. Viewers Audio (Filter Streamer's own tracks)
-    const audioEntries = Array.from(viewerAudiosRef.current.entries());
+      // prevent duplicates
+      if (window.recordingAudioSources.has(key)) return;
+
+      const source = audioContext.createMediaStreamSource(stream);
+      const gainNode = audioContext.createGain();
+      gainNode.gain.value = gainValue;
+
+      source.connect(gainNode).connect(destination);
+      window.recordingAudioSources.set(key, { source, gainNode });
+    };
+
+    // ✅ 4) Mix Streamer Mic (always)
+    safeConnect("streamer-mic", micStream, 1.0);
+
+    // ✅ 5) Mix Streamer Screen Audio (if present)
+    safeConnect("streamer-screen-audio", screenStream, 0.5);
+
+    // ✅ 6) Mix existing Viewers Audio (skip streamer's own consumed audio)
+    const audioEntries = Array.from(viewerAudiosRef.current?.entries?.() || []);
     audioEntries.forEach(([audioKey, stream]) => {
-      const userIdParts = audioKey.split('-');
-      const userId = userIdParts[userIdParts.length - 1];
+      try {
+        const userIdParts = String(audioKey).split("-");
+        const userId = userIdParts[userIdParts.length - 1];
 
-      // ✅ FIX: Agar ye Streamer ka apna consumed audio hai to SKIP karein
-      // Kyunki wo upar step 2 mein already mix ho chuka hai
-      if (userId === user?.id) return; 
+        // ✅ Skip streamer's own loopback
+        if (userId && user?.id && String(userId) === String(user?.id)) return;
 
-      if (stream && stream.getAudioTracks().length > 0) {
-        const viewerSource = audioContext.createMediaStreamSource(stream);
-        const viewerGain = audioContext.createGain();
-        viewerGain.gain.value = 0.8; 
-        viewerSource.connect(viewerGain).connect(destination);
+        safeConnect(`viewer-${audioKey}`, stream, 0.8);
+      } catch (e) {
+        console.warn("Failed mixing viewer audio entry:", audioKey, e);
       }
     });
 
-    return destination.stream.getAudioTracks()[0];
+    // ✅ Return single mixed track to attach in recording stream
+    const mixedTrack = destination.stream.getAudioTracks?.()[0] || null;
+    return mixedTrack;
   } catch (error) {
     console.error("Audio mixing failed:", error);
     return null;
   }
 };
+
   const handleClose = () => {
     setShowRecorder(false);
     setIsRecording(false);
@@ -1811,150 +1917,150 @@ const createAndPlayAudioElement = (userId, audioStream, userName) => {
     return null;
   }
 };
+
+
+
+
 const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
+  // =========================
+  // 0) Normalize sourceType
+  // =========================
+  const normalizedSourceType =
+    sourceType === "screen-audio" ||
+    sourceType === "screen_audio" ||
+    sourceType === "screenAudio" ||
+    sourceType === "viewer-screen" ||
+    sourceType === "viewer-screen_audio"
+      ? "viewer-screen-audio"
+      : sourceType;
+
   const audioStream = new MediaStream([audioTrack]);
   const userId = producerInfo.userId;
   const userName = producerInfo.userName || `User ${userId}`;
 
-  addDebugLog(`🎵 New audio consumer: ${userId} (${sourceType})`);
+  addDebugLog(`🎵 New audio consumer: ${userId} (${normalizedSourceType})`);
 
-  // ✅ Create unique key based on source type
-  const audioKey = `${sourceType}-${userId}`;
-  
-  // ✅ Check if we already have audio for this combination
+  // ✅ Unique key: (type-user)
+  const audioKey = `${normalizedSourceType}-${userId}`;
+
+  // ✅ Existing audio element?
   const existingAudioEl = audioElementsRef.current.get(audioKey);
-  
-  if (existingAudioEl) {
-    // ✅ Update existing audio element
-    addDebugLog(`🔄 Updating existing audio element for ${userId} with ${sourceType}`);
-    
-    // Stop old tracks
-    if (existingAudioEl.srcObject) {
-      existingAudioEl.srcObject.getTracks().forEach(track => {
-        if (track.readyState === 'live') {
-          track.stop();
-        }
-      });
-    }
-    
-    // Set new stream
-    existingAudioEl.srcObject = audioStream;
-    
+
+  const safeReplaceAudioElementStream = (audioEl, newStream) => {
+
+    try {
+      if (audioEl?.srcObject) {
+        audioEl.srcObject = null;
+      }
+    } catch {}
+    audioEl.srcObject = newStream;
+
     if (userInteractedRef.current) {
-      existingAudioEl.play().catch(err => {
-        if (err.name !== 'NotAllowedError') {
-          addDebugLog(`⚠️ Play failed for updated audio: ${err.message}`);
+      audioEl.play().catch((err) => {
+        if (err?.name !== "NotAllowedError") {
+          addDebugLog(`⚠️ Play failed: ${err.message}`);
         }
       });
+    } else {
+      // Queue for later playback (UI / user gesture)
+      pendingAudioQueueRef.current.set(audioKey, {
+        userId,
+        userName,
+        audioStream: newStream,
+        sourceType: normalizedSourceType,
+        timestamp: Date.now(),
+      });
+      setPendingAudioStreams(new Map(pendingAudioQueueRef.current));
     }
-    
-    // Update refs with source-specific key
+  };
+
+  if (existingAudioEl) {
+    addDebugLog(`🔄 Updating existing audio element for ${userId} with ${normalizedSourceType}`);
+    safeReplaceAudioElementStream(existingAudioEl, audioStream);
     viewerAudiosRef.current.set(audioKey, audioStream);
-    
   } else {
-    // ✅ Create new audio element with source-specific ID
-    const audioElementId = `audio-${userId}-${sourceType}`;
+    // Create new audio element
+    const audioElementId = `audio-${userId}-${normalizedSourceType}`;
     let audioEl = document.getElementById(audioElementId);
-    
+
     if (!audioEl) {
       audioEl = document.createElement("audio");
       audioEl.id = audioElementId;
       audioEl.playsInline = true;
       audioEl.controls = false;
       audioEl.muted = false;
-      audioEl.setAttribute('data-user-id', userId);
-      audioEl.setAttribute('data-source', sourceType);
-      audioEl.setAttribute('data-user-name', userName);
+      audioEl.setAttribute("data-user-id", userId);
+      audioEl.setAttribute("data-source", normalizedSourceType);
+      audioEl.setAttribute("data-user-name", userName);
       document.body.appendChild(audioEl);
     }
-    
-    audioEl.srcObject = audioStream;
-    
-    // Play if user interacted
-    if (userInteractedRef.current) {
-      audioEl.play().catch(err => {
-        if (err.name !== 'NotAllowedError') {
-          addDebugLog(`⚠️ Play failed for ${audioElementId}: ${err.message}`);
-        }
-      });
-    } else {
-      // Queue for later
-      pendingAudioQueueRef.current.set(audioKey, {
-        userId,
-        userName,
-        audioStream,
-        sourceType,
-        timestamp: Date.now(),
-      });
-      setPendingAudioStreams(new Map(pendingAudioQueueRef.current));
-    }
-    
-    // Store references
+
+    safeReplaceAudioElementStream(audioEl, audioStream);
+
     audioElementsRef.current.set(audioKey, audioEl);
     viewerAudiosRef.current.set(audioKey, audioStream);
-    
-    // Update viewerAudios state for mic only (for backward compatibility)
-    if (sourceType === 'viewer-mic') {
-      setViewerAudios(prev => {
+
+    // Backward compatibility: viewerAudios state only for viewer mic
+    if (normalizedSourceType === "viewer-mic") {
+      setViewerAudios((prev) => {
         const newMap = new Map(prev);
         newMap.set(userId, audioStream);
         return newMap;
       });
     }
-    
-    addDebugLog(`✅ ${sourceType} audio setup completed for ${userName}`);
+
+    addDebugLog(`✅ ${normalizedSourceType} audio setup completed for ${userName}`);
   }
 
-  // ✅ FIXED: RECORDING - Add BOTH mic AND screen audio to recording
+  // =========================
+  // ✅ RECORDING: Add to shared mixer (late join support)
+  // =========================
   if (isRecording && audioContextRef.current && audioDestinationRef.current) {
     try {
-      // ✅ NOW ALLOW BOTH viewer-mic AND viewer-screen-audio
-      if (sourceType === 'viewer-mic' || sourceType === 'viewer-screen-audio') {
-        // Create unique key for this audio source
+      // Allow both viewer mic and viewer screen-audio
+      if (normalizedSourceType === "viewer-mic" || normalizedSourceType === "viewer-screen-audio") {
+        if (!window.recordingAudioSources) window.recordingAudioSources = new Map();
+
         const sourceKey = `recording-${audioKey}`;
-        
-        // Check if already added
-        if (window.recordingAudioSources?.has(sourceKey)) {
-          addDebugLog(`⏩ ${sourceType} from ${userId} already in recording`);
+
+        // prevent duplicates
+        if (window.recordingAudioSources.has(sourceKey)) {
+          addDebugLog(`⏩ ${normalizedSourceType} from ${userId} already in recording`);
           return;
         }
-        
-        // Create audio source node
+
+        // Create nodes
         const newSource = audioContextRef.current.createMediaStreamSource(audioStream);
         const gainNode = audioContextRef.current.createGain();
-        
-        // Different gain levels for different audio types
-        if (sourceType === 'viewer-mic') {
-          gainNode.gain.value = 0.8; // 80% volume for viewer mic
-          addDebugLog(`✅ Viewer mic audio added to recording for ${userId}`);
-        } else if (sourceType === 'viewer-screen-audio') {
-          gainNode.gain.value = 0.7; // 70% volume for screen audio (slightly lower)
-          addDebugLog(`✅ Viewer screen audio added to recording for ${userId}`);
+
+        // Gain tuning
+        if (normalizedSourceType === "viewer-mic") {
+          gainNode.gain.value = 0.8;
+        } else {
+          gainNode.gain.value = 0.7;
         }
-        
+
         newSource.connect(gainNode).connect(audioDestinationRef.current);
-        
+
         // Store for cleanup
-        if (!window.recordingAudioSources) {
-          window.recordingAudioSources = new Map();
-        }
         window.recordingAudioSources.set(sourceKey, {
           source: newSource,
-          gainNode: gainNode,
+          gainNode,
           stream: audioStream,
-          sourceType: sourceType,
-          userId: userId,
-          timestamp: Date.now()
+          sourceType: normalizedSourceType,
+          userId,
+          timestamp: Date.now(),
         });
-        
-        addDebugLog(`✅ ${sourceType} added to recording mix for ${userId}`);
+
+        addDebugLog(`✅ ${normalizedSourceType} added to recording mix for ${userId}`);
       }
     } catch (err) {
-      console.warn(`Failed to add ${sourceType} to recording:`, err);
-      addDebugLog(`⚠️ Failed to add ${sourceType} to recording: ${err.message}`);
+      console.warn(`Failed to add ${normalizedSourceType} to recording:`, err);
+      addDebugLog(`⚠️ Failed to add ${normalizedSourceType} to recording: ${err.message}`);
     }
   }
 };
+
 
 
 const handleEndSession = async () => {
