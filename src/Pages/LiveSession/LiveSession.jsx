@@ -668,26 +668,7 @@ useEffect(() => {
   showAudioPermissionModalRef.current = showAudioPermissionModal;
 }, [showAudioPermissionModal]);
 
-const cleanupScreenCapture = (force = false) => {
-  const stream = screenCaptureStreamRef.current;
 
-  if (stream) {
-    try {
-      stream.getTracks().forEach((track) => {
-        if (track.readyState === "live") track.stop();
-      });
-    } catch (e) {
-      console.warn("cleanupScreenCapture stop tracks error:", e);
-    }
-  }
-
-  // ✅ Always clear ref + state
-  screenCaptureStreamRef.current = null;
-  setScreenCaptureStream(null);
-  setScreenCaptureActive(false);
-
-  addDebugLog(force ? "🧹 Screen capture cleaned up (force)" : "🧹 Screen capture cleaned up");
-};
 const handleOpenWhiteboard = useCallback(() => {
   if (showWhiteboard) {
     handleCloseWhiteboard();
@@ -1171,6 +1152,74 @@ const startMediaRecorder = (recordingStream, screenStream, micStream_UNUSED) => 
     setIsRecordingLoading(false);
   }
 };
+const cleanupScreenCapture = (force = false) => {
+  const stream = screenCaptureStreamRef.current;
+
+  if (stream) {
+    try {
+      stream.getTracks().forEach((track) => {
+        if (track.readyState === "live") track.stop();
+      });
+    } catch (e) {
+      console.warn("cleanupScreenCapture stop tracks error:", e);
+    }
+  }
+
+  // ✅ Always clear ref + state
+  screenCaptureStreamRef.current = null;
+  setScreenCaptureStream(null);
+  setScreenCaptureActive(false);
+
+  addDebugLog(force ? "🧹 Screen capture cleaned up (force)" : "🧹 Screen capture cleaned up");
+};
+const stopScreenShare = useCallback(() => {
+  addDebugLog("🛑 Stopping screen share...");
+
+  const recordingOn = isRecordingRef.current;
+
+  // 1) Socket notify (only if streamer share was active)
+  if (socket && activeScreenShareRef.current?.source === "streamer") {
+    socket.emit("streamer-screen-share-stop", {
+      sessionId: sessionId || roomCode,
+      userId: user?.id,
+      source: "streamer",
+    });
+  }
+
+  // 2) Close screen producers (screen + screen-audio)
+  producers.current.forEach((producer, id) => {
+    const src = producer?.appData?.source;
+    if (src === "screen" || src === "screen-audio") {
+      try { producer.close(); } catch (err) {
+        addDebugLog(`⚠️ Error closing producer: ${err?.message || err}`);
+      }
+      producers.current.delete(id);
+
+      setProducersState((prev) => {
+        const m = new Map(prev);
+        m.delete(id);
+        return m;
+      });
+    }
+  });
+
+  // 3) Reset active share UI state
+  setActiveScreenShare(null);
+
+  // 4) ✅ Capture cleanup ONLY if recording is NOT running
+  if (!recordingOn && screenCaptureActiveRef.current) {
+    addDebugLog("🧹 Cleaning up screen capture (no active recording)");
+    cleanupScreenCapture();
+    toast.success("Screen share stopped");
+  } else {
+    toast.info(recordingOn ? "Screen share stopped (recording continues)" : "Screen share stopped");
+  }
+
+  // 5) Reset zoom if it was showing screen
+  setZoomed((prev) => (prev?.type === "screen" ? null : prev));
+
+}, [socket, sessionId, roomCode, user, cleanupScreenCapture]);
+
 const stopRecording = useCallback(async () => {
   if (!recorder || recorder.state === "inactive") return;
 
@@ -1274,53 +1323,6 @@ const stopRecording = useCallback(async () => {
   stopRecordingTimer,
 ]);
 
-const stopScreenShare = useCallback(() => {
-  addDebugLog("🛑 Stopping screen share...");
-
-  const recordingOn = isRecordingRef.current;
-
-  // 1) Socket notify (only if streamer share was active)
-  if (socket && activeScreenShareRef.current?.source === "streamer") {
-    socket.emit("streamer-screen-share-stop", {
-      sessionId: sessionId || roomCode,
-      userId: user?.id,
-      source: "streamer",
-    });
-  }
-
-  // 2) Close screen producers (screen + screen-audio)
-  producers.current.forEach((producer, id) => {
-    const src = producer?.appData?.source;
-    if (src === "screen" || src === "screen-audio") {
-      try { producer.close(); } catch (err) {
-        addDebugLog(`⚠️ Error closing producer: ${err?.message || err}`);
-      }
-      producers.current.delete(id);
-
-      setProducersState((prev) => {
-        const m = new Map(prev);
-        m.delete(id);
-        return m;
-      });
-    }
-  });
-
-  // 3) Reset active share UI state
-  setActiveScreenShare(null);
-
-  // 4) ✅ Capture cleanup ONLY if recording is NOT running
-  if (!recordingOn && screenCaptureActiveRef.current) {
-    addDebugLog("🧹 Cleaning up screen capture (no active recording)");
-    cleanupScreenCapture();
-    toast.success("Screen share stopped");
-  } else {
-    toast.info(recordingOn ? "Screen share stopped (recording continues)" : "Screen share stopped");
-  }
-
-  // 5) Reset zoom if it was showing screen
-  setZoomed((prev) => (prev?.type === "screen" ? null : prev));
-
-}, [socket, sessionId, roomCode, user, cleanupScreenCapture]);
 
 // const stopScreenShare = useCallback(() => {
 //   addDebugLog("🛑 Stopping screen share...");
