@@ -1923,68 +1923,62 @@ const createAndPlayAudioElement = (userId, audioStream, userName) => {
 
 
 
-
-// ✅ IMPORTANT (add once at top of component):
-// const isRecordingRef = useRef(false);
-// useEffect(() => { isRecordingRef.current = isRecording; }, [isRecording]);
-
 const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
   // =========================
-  // 0) Normalize sourceType
+  // 0) Normalize sourceType (Viewer Mic aur Screen Audio ko identify karein)
   // =========================
   const normalizedSourceType =
     sourceType === "screen-audio" ||
-    sourceType === "screen_audio" ||
-    sourceType === "screenAudio" ||
-    sourceType === "viewer-screen" ||
-    sourceType === "viewer-screen_audio"
+    sourceType === "viewer-screen-audio" ||
+    sourceType === "viewer-screen_audio" ||
+    sourceType === "screen_audio"
       ? "viewer-screen-audio"
-      : sourceType;
+      : "viewer-mic";
 
   const audioStream = new MediaStream([audioTrack]);
   const userId = producerInfo.userId;
   const userName = producerInfo.userName || `User ${userId}`;
-
-  addDebugLog(`🎵 New audio consumer: ${userId} (${normalizedSourceType})`);
-
-  // ✅ Unique key: (type-user)
   const audioKey = `${normalizedSourceType}-${userId}`;
 
-  // ✅ Existing audio element?
+  addDebugLog(`🎵 Processing audio consumer: ${userId} (${normalizedSourceType})`);
+
+  // =========================
+  // 1) UI & LOCAL PLAYBACK (Streamer ko viewer ki awaaz sunne ke liye)
+  // =========================
   const existingAudioEl = audioElementsRef.current.get(audioKey);
 
   const safeReplaceAudioElementStream = (audioEl, newStream) => {
-    // NOTE: don't stop consumer tracks here; just detach old srcObject
     try {
       if (audioEl?.srcObject) audioEl.srcObject = null;
-    } catch {}
+      audioEl.srcObject = newStream;
 
-    audioEl.srcObject = newStream;
-
-    if (userInteractedRef.current) {
-      audioEl.play().catch((err) => {
-        if (err?.name !== "NotAllowedError") {
-          addDebugLog(`⚠️ Play failed: ${err.message}`);
-        }
-      });
-    } else {
-      pendingAudioQueueRef.current.set(audioKey, {
-        userId,
-        userName,
-        audioStream: newStream,
-        sourceType: normalizedSourceType,
-        timestamp: Date.now(),
-      });
-      setPendingAudioStreams(new Map(pendingAudioQueueRef.current));
+      if (userInteractedRef.current) {
+        audioEl.play().catch((err) => {
+          if (err?.name !== "NotAllowedError") {
+            addDebugLog(`⚠️ Playback failed for ${userId}: ${err.message}`);
+          }
+        });
+      } else {
+        // Agar user ne interact nahi kiya, toh queue mein daalein
+        pendingAudioQueueRef.current.set(audioKey, {
+          userId,
+          userName,
+          audioStream: newStream,
+          sourceType: normalizedSourceType,
+          timestamp: Date.now(),
+        });
+        setPendingAudioStreams(new Map(pendingAudioQueueRef.current));
+      }
+    } catch (e) {
+      console.warn("Error in safeReplaceAudioElementStream:", e);
     }
   };
 
   if (existingAudioEl) {
-    addDebugLog(`🔄 Updating existing audio element for ${userId} with ${normalizedSourceType}`);
+    addDebugLog(`🔄 Updating existing audio element for ${userId}`);
     safeReplaceAudioElementStream(existingAudioEl, audioStream);
     viewerAudiosRef.current.set(audioKey, audioStream);
   } else {
-    // Create new audio element
     const audioElementId = `audio-${userId}-${normalizedSourceType}`;
     let audioEl = document.getElementById(audioElementId);
 
@@ -1992,104 +1986,87 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
       audioEl = document.createElement("audio");
       audioEl.id = audioElementId;
       audioEl.playsInline = true;
-      audioEl.controls = false;
-      audioEl.muted = false;
+      audioEl.muted = false; // Streamer ko sunayi dena chahiye
       audioEl.setAttribute("data-user-id", userId);
       audioEl.setAttribute("data-source", normalizedSourceType);
-      audioEl.setAttribute("data-user-name", userName);
       document.body.appendChild(audioEl);
     }
 
     safeReplaceAudioElementStream(audioEl, audioStream);
-
     audioElementsRef.current.set(audioKey, audioEl);
     viewerAudiosRef.current.set(audioKey, audioStream);
 
-    // Backward compatibility: viewerAudios state only for viewer mic
     if (normalizedSourceType === "viewer-mic") {
-      setViewerAudios((prev) => {
-        const newMap = new Map(prev);
-        newMap.set(userId, audioStream);
-        return newMap;
-      });
+      setViewerAudios((prev) => new Map(prev).set(userId, audioStream));
     }
-
-    addDebugLog(`✅ ${normalizedSourceType} audio setup completed for ${userName}`);
+    addDebugLog(`✅ UI Setup complete for ${normalizedSourceType}`);
   }
 
   // =========================
-  // ✅ RECORDING: Add to shared mixer (late join support)
+  // 2) 🔥 RECORDING MIXER (Dynamic Injection)
   // =========================
-  // 🔥 FIX: use isRecordingRef.current (avoids stale socket listener closures)
+  // Note: Hum state ki jagah Refs (isRecordingRef) use kar rahe hain kyunki socket listeners
+  // aksar closure mein purani state pakad lete hain.
   if (
     isRecordingRef.current &&
     recordingAudioContextRef.current &&
     recordingDestinationRef.current
   ) {
     try {
-      if (normalizedSourceType === "viewer-mic" || normalizedSourceType === "viewer-screen-audio") {
-        if (!window.recordingAudioSources) window.recordingAudioSources = new Map();
+      // Mixer sources map initialize karein agar nahi hai
+      if (!window.recordingAudioSources) window.recordingAudioSources = new Map();
 
-        const sourceKey = `recording-${audioKey}`;
+      const sourceKey = `recording-${audioKey}`;
 
-        // ✅ IMPORTANT FIX:
-        // Viewer mic often refreshes/reconnects. If key exists, REPLACE (don't return).
-        if (window.recordingAudioSources.has(sourceKey)) {
-          const old = window.recordingAudioSources.get(sourceKey);
-          try { old?.source?.disconnect?.(); } catch {}
-          try { old?.gainNode?.disconnect?.(); } catch {}
-          window.recordingAudioSources.delete(sourceKey);
-
-          addDebugLog(`🔁 Replacing recording source for ${normalizedSourceType} (${userId})`);
-        }
-
-        // ✅ Use RECORDING context/destination
-        const newSource =
-          recordingAudioContextRef.current.createMediaStreamSource(audioStream);
-        const gainNode = recordingAudioContextRef.current.createGain();
-
-        // Gain tuning
-        gainNode.gain.value = normalizedSourceType === "viewer-mic" ? 0.8 : 0.7;
-
-        newSource.connect(gainNode).connect(recordingDestinationRef.current);
-
-        // Store for cleanup
-        window.recordingAudioSources.set(sourceKey, {
-          source: newSource,
-          gainNode,
-          stream: audioStream,
-          sourceType: normalizedSourceType,
-          userId,
-          timestamp: Date.now(),
-        });
-
-        addDebugLog(`✅ ${normalizedSourceType} connected to recording mix for ${userId}`);
-
-        // ✅ Auto cleanup when track ends (optional but helpful)
-        try {
-          audioTrack.onended = () => {
-            const obj = window.recordingAudioSources?.get(sourceKey);
-            try { obj?.source?.disconnect?.(); } catch {}
-            try { obj?.gainNode?.disconnect?.(); } catch {}
-            window.recordingAudioSources?.delete(sourceKey);
-            addDebugLog(`🧹 Recording source removed (track ended): ${sourceKey}`);
-          };
-        } catch {}
+      // ✅ Reconnection Fix: Agar same source pehle se mixer mein hai, toh replace karein
+      if (window.recordingAudioSources.has(sourceKey)) {
+        const oldObj = window.recordingAudioSources.get(sourceKey);
+        try { oldObj?.source?.disconnect(); } catch (e) {}
+        try { oldObj?.gainNode?.disconnect(); } catch (e) {}
+        window.recordingAudioSources.delete(sourceKey);
+        addDebugLog(`🔁 Replacing mixer source for ${sourceKey}`);
       }
+
+      // Recording AudioContext se source create karein
+      const newSource = recordingAudioContextRef.current.createMediaStreamSource(audioStream);
+      const gainNode = recordingAudioContextRef.current.createGain();
+
+      // Volume settings: Mic thoda loud, Screen audio thoda kam (taki clarity rahe)
+      gainNode.gain.value = normalizedSourceType === "viewer-mic" ? 0.8 : 0.6;
+
+      // 🔥 Connect to the Recorder's Destination
+      newSource.connect(gainNode).connect(recordingDestinationRef.current);
+
+      // Store for cleanup during stopRecording
+      window.recordingAudioSources.set(sourceKey, {
+        source: newSource,
+        gainNode,
+        userId,
+        type: normalizedSourceType
+      });
+
+      addDebugLog(`🎙️ Dynamic Mix Success: ${normalizedSourceType} of ${userName} added to Recorder`);
+
+      // Track khatam hone par cleanup
+      audioTrack.onended = () => {
+        const obj = window.recordingAudioSources?.get(sourceKey);
+        try { obj?.source?.disconnect(); } catch (e) {}
+        try { obj?.gainNode?.disconnect(); } catch (e) {}
+        window.recordingAudioSources?.delete(sourceKey);
+        addDebugLog(`🧹 Recorder source removed (ended): ${sourceKey}`);
+      };
+
     } catch (err) {
-      console.warn(`Failed to add ${normalizedSourceType} to recording:`, err);
-      addDebugLog(`⚠️ Failed to add ${normalizedSourceType} to recording: ${err.message}`);
+      console.error("Recording mix failed:", err);
+      addDebugLog(`❌ Mixer Error: ${err.message}`);
     }
   } else {
-    // Helpful debug to confirm the gate
+    // Gate blocking debug log
     addDebugLog(
-      `🧱 recordGate blocked: isRecordingRef=${!!isRecordingRef.current}, ctx=${!!recordingAudioContextRef.current}, dest=${!!recordingDestinationRef.current}, type=${normalizedSourceType}`
+      `🧱 Mixer skip: isRecording=${isRecordingRef.current}, MixerCtx=${!!recordingAudioContextRef.current}`
     );
   }
 };
-
-
-
 const handleEndSession = async () => {
 
   // 👉 Agar recording chal rahi hai
