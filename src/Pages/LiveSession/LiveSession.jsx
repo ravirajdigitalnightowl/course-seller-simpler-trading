@@ -2021,21 +2021,31 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
   // ✅ RECORDING: Add to shared mixer (late join support)
   // =========================
   // 🔥 FIX: use isRecordingRef.current (avoids stale socket listener closures)
-  if (isRecordingRef.current && recordingAudioContextRef.current && recordingDestinationRef.current) {
+  if (
+    isRecordingRef.current &&
+    recordingAudioContextRef.current &&
+    recordingDestinationRef.current
+  ) {
     try {
       if (normalizedSourceType === "viewer-mic" || normalizedSourceType === "viewer-screen-audio") {
         if (!window.recordingAudioSources) window.recordingAudioSources = new Map();
 
         const sourceKey = `recording-${audioKey}`;
 
-        // prevent duplicates
+        // ✅ IMPORTANT FIX:
+        // Viewer mic often refreshes/reconnects. If key exists, REPLACE (don't return).
         if (window.recordingAudioSources.has(sourceKey)) {
-          addDebugLog(`⏩ ${normalizedSourceType} from ${userId} already in recording`);
-          return;
+          const old = window.recordingAudioSources.get(sourceKey);
+          try { old?.source?.disconnect?.(); } catch {}
+          try { old?.gainNode?.disconnect?.(); } catch {}
+          window.recordingAudioSources.delete(sourceKey);
+
+          addDebugLog(`🔁 Replacing recording source for ${normalizedSourceType} (${userId})`);
         }
 
         // ✅ Use RECORDING context/destination
-        const newSource = recordingAudioContextRef.current.createMediaStreamSource(audioStream);
+        const newSource =
+          recordingAudioContextRef.current.createMediaStreamSource(audioStream);
         const gainNode = recordingAudioContextRef.current.createGain();
 
         // Gain tuning
@@ -2053,7 +2063,18 @@ const handleAudioConsumer = (audioTrack, producerInfo, sourceType) => {
           timestamp: Date.now(),
         });
 
-        addDebugLog(`✅ ${normalizedSourceType} added to recording mix for ${userId}`);
+        addDebugLog(`✅ ${normalizedSourceType} connected to recording mix for ${userId}`);
+
+        // ✅ Auto cleanup when track ends (optional but helpful)
+        try {
+          audioTrack.onended = () => {
+            const obj = window.recordingAudioSources?.get(sourceKey);
+            try { obj?.source?.disconnect?.(); } catch {}
+            try { obj?.gainNode?.disconnect?.(); } catch {}
+            window.recordingAudioSources?.delete(sourceKey);
+            addDebugLog(`🧹 Recording source removed (track ended): ${sourceKey}`);
+          };
+        } catch {}
       }
     } catch (err) {
       console.warn(`Failed to add ${normalizedSourceType} to recording:`, err);
