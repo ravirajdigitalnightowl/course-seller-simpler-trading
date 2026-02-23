@@ -3363,7 +3363,7 @@ try {
   try {
     if (videoTrack && videoTrack.readyState === "live") {
       await videoTrack.applyConstraints({
-        frameRate: { ideal: 24, max: 30 },   // ✅ smooth + stable
+        frameRate: { ideal: 30, max: 30 },   // ✅ smooth + stable
         width: { ideal: 1280, max: 1280 },   // ✅ 720p
         height: { ideal: 720, max: 720 },
       });
@@ -3373,6 +3373,13 @@ try {
     addDebugLog(`⚠️ Camera constraints failed: ${err?.message || err}`);
   }
 
+
+  
+  // ✅ STEP 2: ADD contentHint HERE (IMPORTANT)
+  if (videoTrack && "contentHint" in videoTrack) {
+    videoTrack.contentHint = "motion";   // smooth motion encoding
+    addDebugLog("🎬 Camera contentHint set to motion");
+  }
   // ✅ 2) Produce CAMERA VIDEO (Simulcast OFF)
   const videoProducer = await transport.produce({
     track: videoTrack,
