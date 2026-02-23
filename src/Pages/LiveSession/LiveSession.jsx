@@ -1101,7 +1101,7 @@ const startMediaRecorder = (recordingStream, screenStream, micStream_UNUSED) => 
     if (videoTrack) {
       try {
         videoTrack.applyConstraints({
-          frameRate: { ideal: 40, max: 60 }, // 60fps causes lag, use 30
+          frameRate: { ideal: 24, max: 30 }, // 60fps causes lag, use 30
           width: { ideal: 1280, max: 1920 }, // 720p is efficient
           height: { ideal: 720, max: 1080 },
           resizeMode: "crop-and-scale"
@@ -3357,73 +3357,83 @@ transport.on('produce', async ({ kind, rtpParameters, appData }, callback, errba
 
 try {
   setMediaError(null);
-  addDebugLog('✅ Using existing camera/microphone stream');
+  addDebugLog("✅ Using existing camera/microphone stream");
 
-const videoProducer = await transport.produce({
-  track: videoTrack,
-  appData: { source: "camera", userId: user?.id },
-  
-  // ✅ 2-Layer Simulcast ADD करें (screen share जैसा)
-  encodings: [
-    // Layer 0: Mobile/weak network
-    { 
-      maxBitrate: 250_000,
-      scaleResolutionDownBy: 2,
-      scalabilityMode: "L1T2"
-    },
-    // Layer 1: Desktop/good network  
-    { 
-      maxBitrate: 600_000,
-      scaleResolutionDownBy: 1,
-      scalabilityMode: "L1T3"
+  // ✅ 1) Lock camera constraints BEFORE producing (prevents lag during recording)
+  try {
+    if (videoTrack && videoTrack.readyState === "live") {
+      await videoTrack.applyConstraints({
+        frameRate: { ideal: 24, max: 30 },   // ✅ smooth + stable
+        width: { ideal: 1280, max: 1280 },   // ✅ 720p
+        height: { ideal: 720, max: 720 },
+      });
+      addDebugLog("📷 Camera constraints applied: 720p @ 24–30fps (simulcast OFF)");
     }
-  ],
-  
-  codecOptions: {
-    videoGoogleStartBitrate: 400,    // कम करें 600 से 400
-    videoGoogleMinBitrate: 150,
-    videoGoogleMaxBitrate: 700,
-    videoCodingMode: "realtime"
+  } catch (err) {
+    addDebugLog(`⚠️ Camera constraints failed: ${err?.message || err}`);
   }
-});
+
+  // ✅ 2) Produce CAMERA VIDEO (Simulcast OFF)
+  const videoProducer = await transport.produce({
+    track: videoTrack,
+
+    stopTracks: false, // ✅ important: producer close se local track stop na ho
+
+    appData: { source: "camera", userId: user?.id },
+
+    // ✅ Simulcast REMOVED: NO encodings
+
+    codecOptions: {
+      videoGoogleStartBitrate: 400,
+      videoGoogleMinBitrate: 150,
+      videoGoogleMaxBitrate: 700,
+      videoCodingMode: "realtime",
+    },
+  });
 
   producers.current.set(videoProducer.id, videoProducer);
-  setProducersState(prev => new Map(prev).set(videoProducer.id, {
-    id: videoProducer.id,
-    kind: 'video',
-    paused: false,
-    source: 'camera'
-  }));
-  addDebugLog(`✅ Video producer created: ${videoProducer.id}`);
-  
+  setProducersState((prev) =>
+    new Map(prev).set(videoProducer.id, {
+      id: videoProducer.id,
+      kind: "video",
+      paused: false,
+      source: "camera",
+    })
+  );
+  addDebugLog(`✅ Video producer created (NO simulcast): ${videoProducer.id}`);
+
+  // ✅ 3) Produce MIC AUDIO (as-is, but add stopTracks false for safety)
   const audioProducer = await transport.produce({
-  track: audioTrack,
-  appData: { source: 'mic', userId: user?.id }      // 🔥 add userId
-});
+    track: audioTrack,
+    stopTracks: false, // ✅ safe
+    appData: { source: "mic", userId: user?.id },
+  });
 
   producers.current.set(audioProducer.id, audioProducer);
-  setProducersState(prev => new Map(prev).set(audioProducer.id, {
-    id: audioProducer.id,
-    kind: 'audio',
-    paused: false,
-    source: 'mic'
-  }));
+  setProducersState((prev) =>
+    new Map(prev).set(audioProducer.id, {
+      id: audioProducer.id,
+      kind: "audio",
+      paused: false,
+      source: "mic",
+    })
+  );
   addDebugLog(`✅ Audio producer created: ${audioProducer.id}`);
 
   setRoomState((prev) => ({ ...prev, isStreaming: true, isPaused: false }));
   setIsInitializing(false);
   setIsLoading(false);
-  
+
   setTimeout(() => {
     if (videoRef.current && videoRef.current.paused && !roomState.isPaused) {
-      videoRef.current.play().catch(error => {
-        console.log('Post-producer autoplay prevented:', error);
+      videoRef.current.play().catch((error) => {
+        console.log("Post-producer autoplay prevented:", error);
         setShowPlayButton(true);
       });
     }
   }, 500);
-  
-} catch (error) {
+
+}  catch (error) {
   console.error('Error creating producers:', error);
   addDebugLog(`❌ Producer creation error: ${error.message}`);
   setIsInitializing(false);
