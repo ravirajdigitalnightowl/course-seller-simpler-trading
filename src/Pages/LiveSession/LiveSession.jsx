@@ -490,7 +490,7 @@ const startSpeakingDetection = () => {
       } catch (error) {
         console.error("Speaking detection error:", error);
       }
-    }, 300);
+    }, 500);
 
     addDebugLog("🎤 Automatic speaking detection started for streamer");
   } catch (error) {
