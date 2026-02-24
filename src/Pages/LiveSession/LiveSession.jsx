@@ -1168,18 +1168,18 @@ const startMediaRecorder = (recordingStream, screenStream, micStream_UNUSED) => 
     };
 
     // ✅ 3. Lock Resolution & FPS (Crucial for performance)
-    if (videoTrack) {
-      try {
-        videoTrack.applyConstraints({
-          frameRate: { ideal: 24, max: 30 }, // 60fps causes lag, use 30
-          width: { ideal: 1280, max: 1280 }, // 720p is efficient
-          height: { ideal: 720, max: 720 },
-          resizeMode: "crop-and-scale"
-        });
-      } catch (e) {
-        console.warn('Constraint error:', e);
-      }
-    }
+    // if (videoTrack) {
+    //   try {
+    //     videoTrack.applyConstraints({
+    //       frameRate: { ideal: 24, max: 30 }, // 60fps causes lag, use 30
+    //       width: { ideal: 1280, max: 1280 }, // 720p is efficient
+    //       height: { ideal: 720, max: 720 },
+    //       resizeMode: "crop-and-scale"
+    //     });
+    //   } catch (e) {
+    //     console.warn('Constraint error:', e);
+    //   }
+    // }
 
     const mediaRecorder = new MediaRecorder(recordingStream, options);
     const chunks = [];
