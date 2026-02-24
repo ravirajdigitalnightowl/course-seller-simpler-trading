@@ -1093,7 +1093,7 @@ const startMediaRecorder = (recordingStream, screenStream, micStream_UNUSED) => 
     // ✅ 2. Optimized Bitrate (2.5 Mbps is enough for 720p)
     const options = {
       mimeType: selectedMimeType || 'video/webm',
-      videoBitsPerSecond: 2500000, 
+      videoBitsPerSecond: 1000000, 
       audioBitsPerSecond: 128000,
     };
 
