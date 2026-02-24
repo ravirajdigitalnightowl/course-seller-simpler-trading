@@ -644,6 +644,69 @@ useEffect(() => {
 }, [userInteracted]);
 
 useEffect(() => {
+  const handleDeviceChange = async () => {
+    try {
+      addDebugLog("🎧 Media device change detected");
+
+      const devices = await navigator.mediaDevices.enumerateDevices();
+
+      const audioInput = devices.find(d => d.kind === "audioinput");
+
+      if (!audioInput) return;
+
+      addDebugLog(`🎤 Switching to new mic: ${audioInput.label}`);
+
+      // Get new mic stream
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: audioInput.deviceId
+        }
+      });
+
+      const newTrack = newStream.getAudioTracks()[0];
+
+      // Find existing mic producer
+      let micProducer = null;
+
+      producers.current.forEach((producer) => {
+        if (producer.appData?.source === "mic") {
+          micProducer = producer;
+        }
+      });
+
+      if (micProducer) {
+        await micProducer.replaceTrack({ track: newTrack });
+
+        addDebugLog("✅ Mic track replaced successfully");
+      }
+
+      // Update local mediaStream also
+      if (mediaStream) {
+        mediaStream.getAudioTracks().forEach(t => t.stop());
+        mediaStream.addTrack(newTrack);
+      }
+
+    } catch (err) {
+      console.error(err);
+      addDebugLog(`❌ Device switch failed: ${err.message}`);
+    }
+  };
+
+  navigator.mediaDevices.addEventListener(
+    "devicechange",
+    handleDeviceChange
+  );
+
+  return () => {
+    navigator.mediaDevices.removeEventListener(
+      "devicechange",
+      handleDeviceChange
+    );
+  };
+
+}, []);
+
+useEffect(() => {
   if (mediaStream && socket && isConnected && audioEnabled) {
     // Small delay to ensure everything is ready
     const timer = setTimeout(() => {
