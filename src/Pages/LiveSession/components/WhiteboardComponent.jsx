@@ -1,280 +1,451 @@
-import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
-import * as Y from 'yjs';
-import { WebsocketProvider } from 'y-websocket';
-import { IndexeddbPersistence } from 'y-indexeddb';
+import React, { useState, useEffect, useRef, useCallback, memo } from "react";
+import * as Y from "yjs";
+import { WebsocketProvider } from "y-websocket";
+import { IndexeddbPersistence } from "y-indexeddb";
 
-// Drawing tools
-import { 
-  FiPenTool, 
-  FiSquare, 
-  FiCircle, 
-  FiMinus, 
-  FiType, 
-  FiDelete,
+import {
+  FiSquare,
+  FiCircle,
+  FiMinus,
   FiDownload,
   FiRefreshCcw,
   FiTrash2,
-  FiMousePointer,
   FiMove,
   FiPlus,
   FiMinusCircle,
-  FiX
-} from 'react-icons/fi';
-import { FaEraser, FaPaintBrush } from 'react-icons/fa';
-import { toast } from 'react-toastify';
+  FiX,
+} from "react-icons/fi";
+import { FaEraser, FaPaintBrush } from "react-icons/fa";
+import { toast } from "react-toastify";
 
 // ✅ Memoized StreamerWhiteboard component with custom comparison
-const StreamerWhiteboard = memo(({
-  sessionId,
-  roomCode,
-  wsToken,
-  sessionInfo,
-  isActive,
-  onClose,
-  allowViewersToDraw = true,
-  mainScreenMode = false,
-  compact = false
-}) => {
-  // Canvas refs
-  const canvasRef = useRef(null);
-  const backgroundCanvasRef = useRef(null);
-  const ctxRef = useRef(null);
-  const bgCtxRef = useRef(null);
-  const containerRef = useRef(null);
-  
-  // Yjs refs
-  const yDocRef = useRef(null);
-  const yProviderRef = useRef(null);
-  const yWhiteboardRef = useRef(null);
-  const ySettingsRef = useRef(null);
-  const yUndoManagerRef = useRef(null);
-  
-  // State
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [tool, setTool] = useState('pen');
-  const [color, setColor] = useState('#000000');
-  const [strokeWidth, setStrokeWidth] = useState(2);
-  const [opacity, setOpacity] = useState(1);
-  const [currentZoom, setCurrentZoom] = useState(1);
-  const [isConnected, setIsConnected] = useState(false);
-  const [participants, setParticipants] = useState([]);
-  const [isLocalDrawing, setIsLocalDrawing] = useState(false);
-  const [backgroundColor, setBackgroundColor] = useState('#ffffff');
-  const [isGridVisible, setIsGridVisible] = useState(false);
-  const [isPanning, setIsPanning] = useState(false);
-  const [showControls, setShowControls] = useState(!compact);
-  
-  // Canvas state
-  const lastPointRef = useRef({ x: 0, y: 0 });
-  const canvasOffsetRef = useRef({ x: 0, y: 0 });
-  const lastPanPointRef = useRef({ x: 0, y: 0 });
-  
-  // Draw grid (memoized)
-  const drawGrid = useCallback((ctx, width, height) => {
-    ctx.save();
-    ctx.strokeStyle = '#e0e0e0';
-    ctx.lineWidth = 0.5;
-    ctx.globalAlpha = 0.3;
-    
-    const gridSize = 20;
-    
-    // Vertical lines
-    for (let x = 0; x <= width; x += gridSize) {
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, height);
-      ctx.stroke();
-    }
-    
-    // Horizontal lines
-    for (let y = 0; y <= height; y += gridSize) {
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(width, y);
-      ctx.stroke();
-    }
-    
-    ctx.restore();
-  }, []);
-  
-  // Draw individual object (memoized)
-  const drawObject = useCallback((ctx, obj) => {
-    ctx.save();
-    ctx.strokeStyle = obj.color || '#000000';
-    ctx.fillStyle = obj.fillColor || 'transparent';
-    ctx.lineWidth = (obj.strokeWidth || 2) / currentZoom;
-    ctx.globalAlpha = obj.opacity || 1;
-    
-    switch (obj.type) {
-      case 'pen':
-      case 'pencil':
+const StreamerWhiteboard = memo(
+  ({
+    sessionId,
+    roomCode,
+    wsToken,
+    sessionInfo,
+    isActive,
+    onClose,
+    allowViewersToDraw = true,
+    mainScreenMode = false,
+    compact = false,
+  }) => {
+    // Canvas refs
+    const canvasRef = useRef(null);
+    const backgroundCanvasRef = useRef(null);
+    const ctxRef = useRef(null);
+    const bgCtxRef = useRef(null);
+    const containerRef = useRef(null);
+
+    // Yjs refs
+    const yDocRef = useRef(null);
+    const yProviderRef = useRef(null);
+    const yWhiteboardRef = useRef(null);
+    const ySettingsRef = useRef(null);
+    const yUndoManagerRef = useRef(null);
+
+    // ✅ observer cleanup refs
+    const yWhiteboardObserverCleanupRef = useRef(null);
+
+    // ✅ raf redraw scheduler refs (for fast remote updates)
+    const rafIdRef = useRef(null);
+    const pendingObjectsRef = useRef(null);
+
+    // State
+    const [isDrawing, setIsDrawing] = useState(false);
+    const [tool, setTool] = useState("pen");
+    const [color, setColor] = useState("#000000");
+    const [strokeWidth, setStrokeWidth] = useState(2);
+    const [opacity, setOpacity] = useState(1);
+    const [currentZoom, setCurrentZoom] = useState(1);
+    const [isConnected, setIsConnected] = useState(false);
+    const [participants, setParticipants] = useState([]);
+    const [isLocalDrawing, setIsLocalDrawing] = useState(false);
+    const [backgroundColor, setBackgroundColor] = useState("#ffffff");
+    const [isGridVisible, setIsGridVisible] = useState(false);
+    const [isPanning, setIsPanning] = useState(false);
+    const [showControls, setShowControls] = useState(!compact); // (kept for compatibility)
+
+    // Canvas state refs
+    const lastPointRef = useRef({ x: 0, y: 0 });
+    const canvasOffsetRef = useRef({ x: 0, y: 0 });
+    const lastPanPointRef = useRef({ x: 0, y: 0 });
+
+    // =========================
+    // ✅ Performance refs (smooth drawing during recording)
+    // =========================
+    const currentStrokeIdRef = useRef(null); // active pen/eraser stroke id
+    const strokeBufferRef = useRef([]); // buffered points for Yjs sync
+    const flushTimerRef = useRef(null); // throttle timer
+
+    const lastLocalPointRef = useRef(null); // last point drawn locally
+    const lastLocalMidRef = useRef(null); // last midpoint for smoothing
+    const pointerIdRef = useRef(null); // pointer capture id
+
+    // =========================
+    // Helpers
+    // =========================
+    const getTransformedPoint = useCallback(
+      (evt) => {
+        if (!canvasRef.current) return { x: 0, y: 0 };
+
+        const rect = canvasRef.current.getBoundingClientRect();
+        const scaleX = canvasRef.current.width / rect.width;
+        const scaleY = canvasRef.current.height / rect.height;
+
+        const x = (evt.clientX - rect.left) * scaleX;
+        const y = (evt.clientY - rect.top) * scaleY;
+
+        return {
+          x: (x - canvasOffsetRef.current.x) / currentZoom,
+          y: (y - canvasOffsetRef.current.y) / currentZoom,
+        };
+      },
+      [currentZoom]
+    );
+
+    // Draw grid (memoized)
+    const drawGrid = useCallback((ctx, width, height) => {
+      ctx.save();
+      ctx.strokeStyle = "#e0e0e0";
+      ctx.lineWidth = 0.5;
+      ctx.globalAlpha = 0.3;
+
+      const gridSize = 20;
+
+      for (let x = 0; x <= width; x += gridSize) {
         ctx.beginPath();
-        ctx.moveTo(obj.points[0].x, obj.points[0].y);
-        obj.points.forEach(point => {
-          ctx.lineTo(point.x, point.y);
-        });
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, height);
         ctx.stroke();
-        break;
-        
-      case 'line':
+      }
+
+      for (let y = 0; y <= height; y += gridSize) {
         ctx.beginPath();
-        ctx.moveTo(obj.x1, obj.y1);
-        ctx.lineTo(obj.x2, obj.y2);
+        ctx.moveTo(0, y);
+        ctx.lineTo(width, y);
         ctx.stroke();
-        break;
-        
-      case 'rectangle':
-        if (obj.fillColor) {
-          ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
-        }
-        ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
-        break;
-        
-      case 'circle':
-        ctx.beginPath();
-        ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
-        if (obj.fillColor) {
-          ctx.fill();
-        }
-        ctx.stroke();
-        break;
-        
-      case 'text':
-        ctx.font = `${obj.fontSize || 16}px Arial`;
-        ctx.fillStyle = obj.color;
-        ctx.fillText(obj.text, obj.x, obj.y);
-        break;
-        
-      case 'eraser':
+      }
+
+      ctx.restore();
+    }, []);
+
+    // Draw individual object (memoized)
+    const drawObject = useCallback(
+      (ctx, obj) => {
+        if (!obj) return;
+
         ctx.save();
-        ctx.globalCompositeOperation = 'destination-out';
-        ctx.beginPath();
-        ctx.moveTo(obj.points[0].x, obj.points[0].y);
-        obj.points.forEach(point => {
-          ctx.lineTo(point.x, point.y);
-        });
-        ctx.stroke();
+        ctx.strokeStyle = obj.color || "#000000";
+        ctx.fillStyle = obj.fillColor || "transparent";
+        ctx.lineWidth = (obj.strokeWidth || 2) / currentZoom;
+        ctx.globalAlpha = obj.opacity ?? 1;
+
+        switch (obj.type) {
+          case "pen":
+          case "pencil": {
+            if (!obj.points || obj.points.length < 1) break;
+            ctx.beginPath();
+            ctx.moveTo(obj.points[0].x, obj.points[0].y);
+            obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
+            ctx.stroke();
+            break;
+          }
+
+          case "line": {
+            ctx.beginPath();
+            ctx.moveTo(obj.x1, obj.y1);
+            ctx.lineTo(obj.x2, obj.y2);
+            ctx.stroke();
+            break;
+          }
+
+          case "rectangle": {
+            if (obj.fillColor) ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
+            ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
+            break;
+          }
+
+          case "circle": {
+            ctx.beginPath();
+            ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
+            if (obj.fillColor) ctx.fill();
+            ctx.stroke();
+            break;
+          }
+
+          case "text": {
+            ctx.font = `${obj.fontSize || 16}px Arial`;
+            ctx.fillStyle = obj.color || "#000";
+            ctx.fillText(obj.text || "", obj.x, obj.y);
+            break;
+          }
+
+          case "eraser": {
+            if (!obj.points || obj.points.length < 1) break;
+            ctx.save();
+            ctx.globalCompositeOperation = "destination-out";
+            ctx.beginPath();
+            ctx.moveTo(obj.points[0].x, obj.points[0].y);
+            obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
+            ctx.stroke();
+            ctx.restore();
+            break;
+          }
+
+          default:
+            break;
+        }
+
         ctx.restore();
-        break;
-    }
-    
-    ctx.restore();
-  }, [currentZoom]);
-  
-  // Redraw canvas from objects (memoized)
-  const redrawCanvas = useCallback((objects) => {
-    if (!ctxRef.current || !bgCtxRef.current) return;
-    
-    const ctx = ctxRef.current;
-    const bgCtx = bgCtxRef.current;
-    const canvas = canvasRef.current;
-    
-    // Clear canvases
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    bgCtx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    // Draw background
-    bgCtx.fillStyle = backgroundColor;
-    bgCtx.fillRect(0, 0, canvas.width, canvas.height);
-    
-    // Draw grid if visible
-    if (isGridVisible) {
-      drawGrid(bgCtx, canvas.width, canvas.height);
-    }
-    
-    // Apply zoom and pan
-    ctx.save();
-    ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
-    ctx.scale(currentZoom, currentZoom);
-    
-    // Draw all objects
-    objects.forEach(obj => {
-      drawObject(ctx, obj);
-    });
-    
-    ctx.restore();
-  }, [backgroundColor, isGridVisible, currentZoom, drawGrid, drawObject]);
-  
-  // Load whiteboard state from Yjs (memoized)
-  const loadWhiteboardState = useCallback(() => {
-    if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return;
-    
-    try {
-      const state = yWhiteboardRef.current.toArray()[0] || {};
-      
-      // Set background color
-      if (state.background) {
-        setBackgroundColor(state.background);
-      }
-      
-      // Load drawings
-      if (state.objects && Array.isArray(state.objects)) {
-        redrawCanvas(state.objects);
-      }
-      
-    } catch (error) {
-      console.error('Error loading whiteboard state:', error);
-    }
-  }, [redrawCanvas]);
-  
-  // Add object to Yjs document (memoized)
-const addObject = useCallback((obj) => {
-  if (!yWhiteboardRef.current || !yDocRef.current) return;
+      },
+      [currentZoom]
+    );
 
-  setIsLocalDrawing(true);
-  
-  try {
-    // ✅ Use transaction for atomic updates
-    yDocRef.current.transact(() => {
-      const currentState = yWhiteboardRef.current.toArray()[0] || {
-        version: '1.0.0',
-        objects: [],
-        background: backgroundColor,
-        createdAt: new Date().toISOString()
-      };
-      
-      const updatedState = {
-        ...currentState,
-        objects: [...(currentState.objects || []), obj],
-        updatedBy: sessionInfo?.streamerId,
-        updatedAt: new Date().toISOString()
-      };
-      
-      if (yWhiteboardRef.current.length === 0) {
-        yWhiteboardRef.current.insert(0, [updatedState]);
-      } else {
-        yWhiteboardRef.current.delete(0, 1);
-        yWhiteboardRef.current.insert(0, [updatedState]);
-      }
-    });
-  } catch (error) {
-    console.error('Error adding object:', error);
-  } finally {
-    setIsLocalDrawing(false);
-  }
-}, [backgroundColor, sessionInfo]);
-  // Initialize Yjs document and WebSocket provider
-  useEffect(() => {
-    if (!sessionId || !wsToken) return;
-    
-    const initYjs = async () => {
+    // Redraw canvas from objects (memoized)
+    const redrawCanvas = useCallback(
+      (objects) => {
+        if (!ctxRef.current || !bgCtxRef.current || !canvasRef.current) return;
+
+        const ctx = ctxRef.current;
+        const bgCtx = bgCtxRef.current;
+        const canvas = canvasRef.current;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        bgCtx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Background
+        bgCtx.fillStyle = backgroundColor;
+        bgCtx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Grid
+        if (isGridVisible) {
+          drawGrid(bgCtx, canvas.width, canvas.height);
+        }
+
+        // Apply zoom/pan and draw
+        ctx.save();
+        ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+        ctx.scale(currentZoom, currentZoom);
+
+        (objects || []).forEach((obj) => drawObject(ctx, obj));
+
+        ctx.restore();
+      },
+      [backgroundColor, isGridVisible, currentZoom, drawGrid, drawObject]
+    );
+
+    // ✅ schedule redraw on next animation frame (fast remote updates, avoids spamming)
+    const scheduleRedraw = useCallback(
+      (objects) => {
+        pendingObjectsRef.current = objects || [];
+        if (rafIdRef.current) return;
+
+        rafIdRef.current = requestAnimationFrame(() => {
+          rafIdRef.current = null;
+          const objs = pendingObjectsRef.current || [];
+          pendingObjectsRef.current = null;
+          redrawCanvas(objs);
+        });
+      },
+      [redrawCanvas]
+    );
+
+    // Load whiteboard state from Yjs (memoized)
+    const loadWhiteboardState = useCallback(() => {
+      if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return;
+
       try {
-        // Create Yjs document
-        const ydoc = new Y.Doc();
-        yDocRef.current = ydoc;
-        
-        // WebSocket URL for Yjs
-        const baseWs = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
+        const state = yWhiteboardRef.current.toArray()[0] || {};
+        if (state.background) setBackgroundColor(state.background);
 
-        // ✅ url me sirf /yjs
-        const url = `${baseWs}/yjs`;
+        if (Array.isArray(state.objects)) {
+          // ✅ use scheduler for quick UI update
+          scheduleRedraw(state.objects);
+        }
+      } catch (error) {
+        console.error("Error loading whiteboard state:", error);
+      }
+    }, [scheduleRedraw]);
 
-        // ✅ roomName = sessionId
-        const provider = new WebsocketProvider(
-          url,
-          sessionId,
-          ydoc,
-          {
+    // Add object to Yjs document (memoized)
+    const addObject = useCallback(
+      (obj) => {
+        if (!yWhiteboardRef.current || !yDocRef.current) return;
+
+        setIsLocalDrawing(true);
+
+        try {
+          yDocRef.current.transact(() => {
+            const currentState = yWhiteboardRef.current.toArray()[0] || {
+              version: "1.0.0",
+              objects: [],
+              background: backgroundColor,
+              createdAt: new Date().toISOString(),
+            };
+
+            const updatedState = {
+              ...currentState,
+              objects: [...(currentState.objects || []), obj],
+              updatedBy: sessionInfo?.streamerId,
+              updatedAt: new Date().toISOString(),
+            };
+
+            if (yWhiteboardRef.current.length === 0) {
+              yWhiteboardRef.current.insert(0, [updatedState]);
+            } else {
+              yWhiteboardRef.current.delete(0, 1);
+              yWhiteboardRef.current.insert(0, [updatedState]);
+            }
+          }, "drawing");
+        } catch (error) {
+          console.error("Error adding object:", error);
+        } finally {
+          setIsLocalDrawing(false);
+        }
+      },
+      [backgroundColor, sessionInfo]
+    );
+
+    // =========================
+    // ✅ Incremental local draw (SMOOTH CURVE)
+    // =========================
+    const drawSmoothStroke = useCallback(
+      (prev, next, strokeType) => {
+        if (!ctxRef.current) return;
+        const ctx = ctxRef.current;
+
+        ctx.save();
+        ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+        ctx.scale(currentZoom, currentZoom);
+
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.globalAlpha = opacity ?? 1;
+        ctx.lineWidth = (strokeWidth || 2) / currentZoom;
+
+        const isEraser = strokeType === "eraser";
+        if (isEraser) {
+          ctx.globalCompositeOperation = "destination-out";
+          ctx.strokeStyle = "rgba(0,0,0,1)";
+        } else {
+          ctx.globalCompositeOperation = "source-over";
+          ctx.strokeStyle = color || "#000000";
+        }
+
+        const mid = { x: (prev.x + next.x) / 2, y: (prev.y + next.y) / 2 };
+
+        if (!lastLocalMidRef.current) {
+          lastLocalMidRef.current = { x: prev.x, y: prev.y };
+        }
+
+        ctx.beginPath();
+        ctx.moveTo(lastLocalMidRef.current.x, lastLocalMidRef.current.y);
+        ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
+        ctx.stroke();
+
+        lastLocalMidRef.current = mid;
+
+        ctx.restore();
+      },
+      [currentZoom, color, strokeWidth, opacity]
+    );
+
+    // =========================
+    // ✅ Throttled Yjs sync (batch points)
+    // =========================
+    const flushStrokeToYjs = useCallback(
+      (force = false) => {
+        if (!yWhiteboardRef.current || !yDocRef.current) return;
+
+        const strokeId = currentStrokeIdRef.current;
+        if (!strokeId) return;
+
+        const buffered = strokeBufferRef.current;
+        if (!force && buffered.length === 0) return;
+        if (buffered.length === 0) return;
+
+        const pointsToAdd = buffered.slice();
+        strokeBufferRef.current = [];
+
+        try {
+          yDocRef.current.transact(() => {
+            const currentState = yWhiteboardRef.current.toArray()[0] || {
+              version: "1.0.0",
+              objects: [],
+              background: backgroundColor,
+              createdAt: new Date().toISOString(),
+            };
+
+            const objects = [...(currentState.objects || [])];
+
+            let idx = objects.length - 1;
+            const found = objects.findIndex((o) => o && o.id === strokeId);
+            if (found !== -1) idx = found;
+
+            const target = objects[idx];
+            if (!target || (target.type !== "pen" && target.type !== "eraser")) return;
+
+            target.points = [...(target.points || []), ...pointsToAdd];
+
+            const updatedState = {
+              ...currentState,
+              objects,
+              updatedBy: sessionInfo?.streamerId,
+              updatedAt: new Date().toISOString(),
+            };
+
+            if (yWhiteboardRef.current.length === 0) {
+              yWhiteboardRef.current.insert(0, [updatedState]);
+            } else {
+              yWhiteboardRef.current.delete(0, 1);
+              yWhiteboardRef.current.insert(0, [updatedState]);
+            }
+          }, "drawing");
+        } catch (error) {
+          console.error("Error flushing stroke points:", error);
+        }
+      },
+      [backgroundColor, sessionInfo]
+    );
+
+    const scheduleFlush = useCallback(() => {
+      if (flushTimerRef.current) return;
+      flushTimerRef.current = setTimeout(() => {
+        flushTimerRef.current = null;
+        flushStrokeToYjs(false);
+      }, 50);
+    }, [flushStrokeToYjs]);
+
+    useEffect(() => {
+      return () => {
+        if (flushTimerRef.current) {
+          clearTimeout(flushTimerRef.current);
+          flushTimerRef.current = null;
+        }
+        if (rafIdRef.current) {
+          cancelAnimationFrame(rafIdRef.current);
+          rafIdRef.current = null;
+        }
+      };
+    }, []);
+
+    // =========================
+    // ✅ Initialize Yjs document and WebSocket provider
+    // =========================
+    useEffect(() => {
+      if (!sessionId || !wsToken) return;
+
+      const initYjs = async () => {
+        try {
+          const ydoc = new Y.Doc();
+          yDocRef.current = ydoc;
+
+          const baseWs = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
+          const url = `${baseWs}/yjs`;
+
+          const provider = new WebsocketProvider(url, sessionId, ydoc, {
             WebSocketPolyfill: WebSocket,
             params: {
               token: wsToken,
@@ -283,657 +454,3888 @@ const addObject = useCallback((obj) => {
               roomCode,
               userId: sessionInfo?.streamerId,
               userName: sessionInfo?.streamerName,
-            }
-          }
-        );
+            },
+          });
 
-        yProviderRef.current = provider;
-        
-        // Get or create shared whiteboard array
-        const yWhiteboard = ydoc.getArray('whiteboard');
-        yWhiteboardRef.current = yWhiteboard;
-        
-        // Get or create settings map
-        const ySettings = ydoc.getMap('room_settings');
-        ySettingsRef.current = ySettings;
-        
-        // Setup awareness
+          yProviderRef.current = provider;
+
+          const yWhiteboard = ydoc.getArray("whiteboard");
+          yWhiteboardRef.current = yWhiteboard;
+
+          const ySettings = ydoc.getMap("room_settings");
+          ySettingsRef.current = ySettings;
+
+          provider.awareness.setLocalState({
+            userId: sessionInfo?.streamerId || "streamer",
+            userName: sessionInfo?.streamerName || "Streamer",
+            role: "STREAMER",
+            isStreamer: true,
+            color,
+            tool,
+            cursor: null,
+          });
+
+          provider.awareness.on("change", () => {
+            const states = Array.from(provider.awareness.getStates().entries());
+            const participantsList = states
+              .map(([clientId, state]) => ({ clientId, ...state }))
+              .filter((p) => p.userId);
+
+            setParticipants(participantsList);
+          });
+
+          provider.on("sync", (synced) => {
+            setIsConnected(!!synced);
+            if (synced) loadWhiteboardState();
+          });
+
+          // ✅ Undo manager tracks our transact origin ("drawing")
+          yUndoManagerRef.current = new Y.UndoManager(yWhiteboard, {
+            captureTimeout: 150,
+            trackedOrigins: new Set(["drawing"]),
+          });
+
+          // ✅ Local persistence
+          new IndexeddbPersistence(`whiteboard-${sessionId}`, ydoc);
+
+          // =========================================================
+          // ✅ IMPORTANT FIX:
+          // Streamer should listen remote changes & redraw quickly
+          // =========================================================
+          const observer = (event) => {
+            try {
+              const origin = event?.transaction?.origin;
+
+              // If it's our own drawing updates and we're actively drawing,
+              // skip full redraw (we already draw incrementally).
+              if (origin === "drawing" && (isDrawing || currentStrokeIdRef.current)) return;
+
+              // Otherwise (viewer draw / remote update), load & redraw ASAP
+              loadWhiteboardState();
+            } catch (e) {
+              // fallback
+              loadWhiteboardState();
+            }
+          };
+
+          yWhiteboard.observe(observer);
+
+          // store cleanup
+          yWhiteboardObserverCleanupRef.current = () => {
+            try {
+              yWhiteboard.unobserve(observer);
+            } catch {}
+          };
+        } catch (error) {
+          console.error("Failed to initialize Yjs:", error);
+          toast.error("Failed to connect to whiteboard server");
+        }
+      };
+
+      initYjs();
+
+      return () => {
+        // flush pending stroke safely before teardown
+        try {
+          flushStrokeToYjs(true);
+        } catch {}
+
+        // ✅ detach observer
+        if (yWhiteboardObserverCleanupRef.current) {
+          try {
+            yWhiteboardObserverCleanupRef.current();
+          } catch {}
+          yWhiteboardObserverCleanupRef.current = null;
+        }
+
+        if (yProviderRef.current) {
+          try {
+            yProviderRef.current.disconnect();
+            yProviderRef.current.destroy();
+          } catch {}
+        }
+        if (yDocRef.current) {
+          try {
+            yDocRef.current.destroy();
+          } catch {}
+        }
+        yProviderRef.current = null;
+        yDocRef.current = null;
+        yWhiteboardRef.current = null;
+        ySettingsRef.current = null;
+        yUndoManagerRef.current = null;
+      };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [sessionId, roomCode, wsToken, allowViewersToDraw, sessionInfo, loadWhiteboardState]);
+
+    // ✅ Keep awareness updated without reconnecting
+    useEffect(() => {
+      const provider = yProviderRef.current;
+      if (!provider) return;
+
+      try {
+        const prevState = provider.awareness.getLocalState() || {};
         provider.awareness.setLocalState({
-          userId: sessionInfo?.streamerId || 'streamer',
-          userName: sessionInfo?.streamerName || 'Streamer',
-          role: 'STREAMER',
+          ...prevState,
+          userId: sessionInfo?.streamerId || "streamer",
+          userName: sessionInfo?.streamerName || "Streamer",
+          role: "STREAMER",
           isStreamer: true,
-          color: color,
-          tool: tool,
-          cursor: null
+          color,
+          tool,
         });
-        
-        // Listen for awareness updates
-        provider.awareness.on('change', () => {
-          const states = Array.from(provider.awareness.getStates().entries());
-          const participantsList = states
-            .map(([clientId, state]) => ({
-              clientId,
-              ...state
-            }))
-            .filter(p => p.userId);
-          
-          setParticipants(participantsList);
-        });
-        
-        // Listen for Yjs sync status
-        provider.on('sync', (isSynced) => {
-          setIsConnected(isSynced);
-          if (isSynced) {
-            loadWhiteboardState();
+      } catch {}
+    }, [color, tool, sessionInfo]);
+
+    // =========================
+    // ✅ Initialize canvas
+    // =========================
+    useEffect(() => {
+      if (!canvasRef.current || !backgroundCanvasRef.current || !containerRef.current) return;
+
+      const canvas = canvasRef.current;
+      const bgCanvas = backgroundCanvasRef.current;
+      const container = containerRef.current;
+
+      const resizeCanvas = () => {
+        const containerWidth = container.clientWidth;
+        const containerHeight = container.clientHeight;
+
+        canvas.width = containerWidth;
+        canvas.height = containerHeight;
+        bgCanvas.width = containerWidth;
+        bgCanvas.height = containerHeight;
+
+        const ctx = canvas.getContext("2d");
+        const bgCtx = bgCanvas.getContext("2d");
+
+        ctxRef.current = ctx;
+        bgCtxRef.current = bgCtx;
+
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+
+        if (yWhiteboardRef.current) {
+          const state = yWhiteboardRef.current.toArray()[0] || {};
+          scheduleRedraw(state.objects || []);
+        }
+      };
+
+      resizeCanvas();
+
+      const resizeObserver = new ResizeObserver(() => resizeCanvas());
+      resizeObserver.observe(container);
+
+      return () => resizeObserver.disconnect();
+    }, [scheduleRedraw]);
+
+    // =========================
+    // ✅ Pointer Events + coalesced events
+    // =========================
+    const handlePointerDown = useCallback(
+      (e) => {
+        e.preventDefault();
+        if (!canvasRef.current) return;
+
+        if (e.button === 2) return;
+
+        try {
+          canvasRef.current.setPointerCapture(e.pointerId);
+          pointerIdRef.current = e.pointerId;
+        } catch {}
+
+        if (tool === "pan" || e.altKey || e.button === 1) {
+          setIsPanning(true);
+          lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+          canvasRef.current.style.cursor = "grabbing";
+          return;
+        }
+
+        setIsDrawing(true);
+
+        const p = getTransformedPoint(e);
+        lastPointRef.current = p;
+        lastLocalPointRef.current = p;
+        lastLocalMidRef.current = null;
+
+        if (tool === "pen" || tool === "eraser") {
+          const strokeId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          currentStrokeIdRef.current = strokeId;
+          strokeBufferRef.current = [];
+
+          addObject({
+            id: strokeId,
+            type: tool,
+            points: [{ x: p.x, y: p.y }],
+            color: tool === "eraser" ? backgroundColor : color,
+            strokeWidth,
+            opacity,
+            timestamp: Date.now(),
+          });
+
+          // dot for click-without-move
+          drawSmoothStroke(p, { x: p.x + 0.01, y: p.y + 0.01 }, tool);
+        }
+      },
+      [tool, getTransformedPoint, addObject, backgroundColor, color, strokeWidth, opacity, drawSmoothStroke]
+    );
+
+    const handlePointerMove = useCallback(
+      (e) => {
+        if (!canvasRef.current) return;
+
+        if (isPanning) {
+          const dx = e.clientX - lastPanPointRef.current.x;
+          const dy = e.clientY - lastPanPointRef.current.y;
+          canvasOffsetRef.current.x += dx;
+          canvasOffsetRef.current.y += dy;
+          lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+
+          if (yWhiteboardRef.current) {
+            const state = yWhiteboardRef.current.toArray()[0] || {};
+            scheduleRedraw(state.objects || []);
           }
-        });
-        
-        // Setup undo manager
-        yUndoManagerRef.current = new Y.UndoManager(yWhiteboard, {
-          captureTimeout: 100,
-          trackedOrigins: new Set([ydoc.clientID])
-        });
-        
-        // Persist to IndexedDB for offline support
-        const indexeddbProvider = new IndexeddbPersistence(
-          `whiteboard-${sessionId}`,
-          ydoc
-        );
-        
-      } catch (error) {
-        console.error('Failed to initialize Yjs:', error);
-        toast.error('Failed to connect to whiteboard server');
+          return;
+        }
+
+        if (!isDrawing) return;
+        if (tool !== "pen" && tool !== "eraser") return;
+
+        const events =
+          typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
+
+        for (const evt of events) {
+          const next = getTransformedPoint(evt);
+          const prev = lastLocalPointRef.current || lastPointRef.current;
+
+          const dist = prev ? Math.hypot(next.x - prev.x, next.y - prev.y) : 999;
+
+          const minDist = 0.6;
+          if (dist < minDist) continue;
+
+          if (prev) drawSmoothStroke(prev, next, tool);
+
+          strokeBufferRef.current.push(next);
+          scheduleFlush();
+
+          lastLocalPointRef.current = next;
+          lastPointRef.current = next;
+        }
+      },
+      [isDrawing, isPanning, tool, getTransformedPoint, drawSmoothStroke, scheduleFlush, scheduleRedraw]
+    );
+
+    const endStrokeCleanup = useCallback(() => {
+      flushStrokeToYjs(true);
+
+      currentStrokeIdRef.current = null;
+      strokeBufferRef.current = [];
+      lastLocalPointRef.current = null;
+      lastLocalMidRef.current = null;
+
+      if (canvasRef.current && pointerIdRef.current != null) {
+        try {
+          canvasRef.current.releasePointerCapture(pointerIdRef.current);
+        } catch {}
       }
-    };
-    
-    initYjs();
-    
-    return () => {
-      // Cleanup Yjs resources
-      if (yProviderRef.current) {
-        yProviderRef.current.disconnect();
-        yProviderRef.current.destroy();
+      pointerIdRef.current = null;
+    }, [flushStrokeToYjs]);
+
+    const handlePointerUp = useCallback(() => {
+      setIsDrawing(false);
+      setIsPanning(false);
+
+      endStrokeCleanup();
+
+      if (canvasRef.current) {
+        canvasRef.current.style.cursor = tool === "pan" ? "grab" : "crosshair";
       }
-      if (yDocRef.current) {
-        yDocRef.current.destroy();
-      }
-    };
-  }, [sessionId, roomCode, wsToken, allowViewersToDraw, sessionInfo, color, tool, loadWhiteboardState]);
-  
-  // Initialize canvas
-  useEffect(() => {
-    if (!canvasRef.current || !backgroundCanvasRef.current || !containerRef.current) return;
-    
-    const canvas = canvasRef.current;
-    const bgCanvas = backgroundCanvasRef.current;
-    const container = containerRef.current;
-    
-    const resizeCanvas = () => {
-      const containerWidth = container.clientWidth;
-      const containerHeight = container.clientHeight;
-      
-      canvas.width = containerWidth;
-      canvas.height = containerHeight;
-      bgCanvas.width = containerWidth;
-      bgCanvas.height = containerHeight;
-      
-      // Set contexts
-      const ctx = canvas.getContext('2d');
-      const bgCtx = bgCanvas.getContext('2d');
-      
-      ctxRef.current = ctx;
-      bgCtxRef.current = bgCtx;
-      
-      // Apply initial styles
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      
-      // Redraw after resize
+    }, [tool, endStrokeCleanup]);
+
+    const handlePointerLeave = useCallback(() => {
+      setIsDrawing(false);
+      setIsPanning(false);
+      endStrokeCleanup();
+    }, [endStrokeCleanup]);
+
+    // =========================
+    // Wheel Zoom
+    // =========================
+    const handleWheel = useCallback(
+      (e) => {
+        e.preventDefault();
+        if (!canvasRef.current) return;
+
+        const rect = canvasRef.current.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        const scaleFactor = e.deltaY > 0 ? 0.9 : 1.1;
+        const newZoom = Math.max(0.5, Math.min(3, currentZoom * scaleFactor));
+
+        const zoomChange = newZoom / currentZoom;
+
+        canvasOffsetRef.current.x =
+          mouseX - (mouseX - canvasOffsetRef.current.x) * zoomChange;
+        canvasOffsetRef.current.y =
+          mouseY - (mouseY - canvasOffsetRef.current.y) * zoomChange;
+
+        setCurrentZoom(newZoom);
+
+        if (yWhiteboardRef.current) {
+          const state = yWhiteboardRef.current.toArray()[0] || {};
+          scheduleRedraw(state.objects || []);
+        }
+      },
+      [currentZoom, scheduleRedraw]
+    );
+
+    // Zoom controls (memoized)
+    const handleZoomIn = useCallback(() => {
+      setCurrentZoom((prev) => Math.min(prev + 0.1, 3));
       if (yWhiteboardRef.current) {
         const state = yWhiteboardRef.current.toArray()[0] || {};
-        redrawCanvas(state.objects || []);
+        scheduleRedraw(state.objects || []);
       }
-    };
-    
-    resizeCanvas();
-    
-    const resizeObserver = new ResizeObserver(() => {
-      resizeCanvas();
-    });
-    
-    resizeObserver.observe(container);
-    
-    return () => {
-      resizeObserver.disconnect();
-    };
-  }, [redrawCanvas]);
-  
-  // Handle mouse events for drawing (memoized)
-  const handleMouseDown = useCallback((e) => {
-    e.preventDefault();
-    
-    const rect = canvasRef.current.getBoundingClientRect();
-    const scaleX = canvasRef.current.width / rect.width;
-    const scaleY = canvasRef.current.height / rect.height;
-    
-    const x = (e.clientX - rect.left) * scaleX;
-    const y = (e.clientY - rect.top) * scaleY;
-    
-    // Pan tool (Alt key or middle mouse)
-    if (tool === 'pan' || e.altKey || e.button === 1) {
-      setIsPanning(true);
-      lastPanPointRef.current = { x: e.clientX, y: e.clientY };
-      canvasRef.current.style.cursor = 'grabbing';
-      return;
-    }
-    
-    setIsDrawing(true);
-    
-    const transformedX = (x - canvasOffsetRef.current.x) / currentZoom;
-    const transformedY = (y - canvasOffsetRef.current.y) / currentZoom;
-    
-    lastPointRef.current = { x: transformedX, y: transformedY };
-    
-    // Start drawing based on tool
-    if (tool === 'pen' || tool === 'eraser') {
-      const points = [{ x: transformedX, y: transformedY }];
-      
-      addObject({
-        type: tool,
-        points,
-        color: tool === 'eraser' ? backgroundColor : color,
-        strokeWidth,
-        opacity,
-        timestamp: Date.now()
-      });
-    }
-  }, [tool, color, strokeWidth, opacity, currentZoom, addObject, backgroundColor]);
-  
-const handleMouseMove = useCallback((e) => {
-  if (isPanning) {
-    const dx = e.clientX - lastPanPointRef.current.x;
-    const dy = e.clientY - lastPanPointRef.current.y;
-    canvasOffsetRef.current.x += dx;
-    canvasOffsetRef.current.y += dy;
-    lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+    }, [scheduleRedraw]);
 
-    if (yWhiteboardRef.current) {
-      const state = yWhiteboardRef.current.toArray()[0] || {};
-      redrawCanvas(state.objects || []);
-    }
-    return;
-  }
+    const handleZoomOut = useCallback(() => {
+      setCurrentZoom((prev) => Math.max(prev - 0.1, 0.5));
+      if (yWhiteboardRef.current) {
+        const state = yWhiteboardRef.current.toArray()[0] || {};
+        scheduleRedraw(state.objects || []);
+      }
+    }, [scheduleRedraw]);
 
-  if (!isDrawing || !yWhiteboardRef.current) return;
+    const handleZoomReset = useCallback(() => {
+      setCurrentZoom(1);
+      canvasOffsetRef.current = { x: 0, y: 0 };
 
-  // ✅ Use requestAnimationFrame for smoother performance during recording
-  window.requestAnimationFrame(() => {
-    const rect = canvasRef.current.getBoundingClientRect();
-    const scaleX = canvasRef.current.width / rect.width;
-    const scaleY = canvasRef.current.height / rect.height;
+      if (yWhiteboardRef.current) {
+        const state = yWhiteboardRef.current.toArray()[0] || {};
+        scheduleRedraw(state.objects || []);
+      }
+    }, [scheduleRedraw]);
 
-    const x = (e.clientX - rect.left) * scaleX;
-    const y = (e.clientY - rect.top) * scaleY;
+    // Clear whiteboard (memoized)
+    const handleClearWhiteboard = useCallback(() => {
+      if (!yWhiteboardRef.current || !yDocRef.current) return;
 
-    const transformedX = (x - canvasOffsetRef.current.x) / currentZoom;
-    const transformedY = (y - canvasOffsetRef.current.y) / currentZoom;
+      if (window.confirm("Clear entire whiteboard?")) {
+        const emptyState = {
+          version: "1.0.0",
+          objects: [],
+          background: backgroundColor,
+          clearedAt: new Date().toISOString(),
+          clearedBy: sessionInfo?.streamerId,
+        };
 
-    const currentState = yWhiteboardRef.current.toArray()[0] || {};
-    const objects = [...(currentState.objects || [])];
-    const lastObject = objects[objects.length - 1];
+        yDocRef.current.transact(() => {
+          yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
+          yWhiteboardRef.current.insert(0, [emptyState]);
+        }, "drawing");
 
-    if (lastObject && (lastObject.type === 'pen' || lastObject.type === 'eraser')) {
-      // ✅ Sirf tab point add karein jab mouse actually move hua ho
-      const lastPoint = lastObject.points[lastObject.points.length - 1];
-      const dist = Math.hypot(transformedX - lastPoint.x, transformedY - lastPoint.y);
-      
-      if (dist < 2) return; // Bahut chote movement ko skip karein (CPU bachega)
+        scheduleRedraw([]);
+        toast.success("Whiteboard cleared");
+      }
+    }, [backgroundColor, sessionInfo, scheduleRedraw]);
 
-      lastObject.points.push({ x: transformedX, y: transformedY });
+    // Export as image (memoized)
+    const handleExport = useCallback(() => {
+      if (!canvasRef.current || !backgroundCanvasRef.current) return;
 
-      const updatedState = {
-        ...currentState,
-        objects,
-        updatedAt: new Date().toISOString()
-      };
+      const canvas = canvasRef.current;
+      const bgCanvas = backgroundCanvasRef.current;
 
-      // ✅ Yjs Transact: Isse networking aur sync background mein efficient ho jata hai
-      yDocRef.current.transact(() => {
-        yWhiteboardRef.current.delete(0, 1);
-        yWhiteboardRef.current.insert(0, [updatedState]);
-      }, 'drawing'); 
+      const exportCanvas = document.createElement("canvas");
+      exportCanvas.width = canvas.width;
+      exportCanvas.height = canvas.height;
 
-      redrawCanvas(objects);
-    }
-  });
-}, [isDrawing, isPanning, redrawCanvas, currentZoom]);
-  const handleMouseUp = useCallback(() => {
-    setIsDrawing(false);
-    setIsPanning(false);
-    canvasRef.current.style.cursor = tool === 'pan' ? 'grab' : 'crosshair';
-  }, [tool]);
-  
-  const handleMouseLeave = useCallback(() => {
-    setIsDrawing(false);
-    setIsPanning(false);
-  }, []);
-  
-  // Handle wheel for zoom (memoized)
-  const handleWheel = useCallback((e) => {
-    e.preventDefault();
-    
-    const rect = canvasRef.current.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-    
-    const scaleFactor = e.deltaY > 0 ? 0.9 : 1.1;
-    const newZoom = Math.max(0.5, Math.min(3, currentZoom * scaleFactor));
-    
-    // Adjust offset to zoom towards mouse position
-    const zoomChange = newZoom / currentZoom;
-    
-    canvasOffsetRef.current.x = mouseX - (mouseX - canvasOffsetRef.current.x) * zoomChange;
-    canvasOffsetRef.current.y = mouseY - (mouseY - canvasOffsetRef.current.y) * zoomChange;
-    
-    setCurrentZoom(newZoom);
-    
-    // Redraw with new zoom
-    if (yWhiteboardRef.current) {
-      const state = yWhiteboardRef.current.toArray()[0] || {};
-      redrawCanvas(state.objects || []);
-    }
-  }, [currentZoom, redrawCanvas]);
-  
-  // Zoom controls (memoized)
-  const handleZoomIn = useCallback(() => {
-    setCurrentZoom(prev => Math.min(prev + 0.1, 3));
-    if (yWhiteboardRef.current) {
-      const state = yWhiteboardRef.current.toArray()[0] || {};
-      redrawCanvas(state.objects || []);
-    }
-  }, [redrawCanvas]);
-  
-  const handleZoomOut = useCallback(() => {
-    setCurrentZoom(prev => Math.max(prev - 0.1, 0.5));
-    if (yWhiteboardRef.current) {
-      const state = yWhiteboardRef.current.toArray()[0] || {};
-      redrawCanvas(state.objects || []);
-    }
-  }, [redrawCanvas]);
-  
-  const handleZoomReset = useCallback(() => {
-    setCurrentZoom(1);
-    canvasOffsetRef.current = { x: 0, y: 0 };
-    
-    if (yWhiteboardRef.current) {
-      const state = yWhiteboardRef.current.toArray()[0] || {};
-      redrawCanvas(state.objects || []);
-    }
-  }, [redrawCanvas]);
-  
-  // Clear whiteboard (memoized)
-  const handleClearWhiteboard = useCallback(() => {
-    if (window.confirm('Clear entire whiteboard?')) {
-      const emptyState = {
-        version: '1.0.0',
-        objects: [],
-        background: backgroundColor,
-        clearedAt: new Date().toISOString(),
-        clearedBy: sessionInfo?.streamerId
-      };
-      
-      yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
-      yWhiteboardRef.current.insert(0, [emptyState]);
-      
-      redrawCanvas([]);
-      toast.success('Whiteboard cleared');
-    }
-  }, [backgroundColor, sessionInfo, redrawCanvas]);
-  
-  // Export as image (memoized)
-  const handleExport = useCallback(() => {
-    const canvas = canvasRef.current;
-    const bgCanvas = backgroundCanvasRef.current;
-    
-    // Create a combined canvas
-    const exportCanvas = document.createElement('canvas');
-    exportCanvas.width = canvas.width;
-    exportCanvas.height = canvas.height;
-    
-    const exportCtx = exportCanvas.getContext('2d');
-    
-    // Draw background
-    exportCtx.drawImage(bgCanvas, 0, 0);
-    
-    // Draw drawings
-    exportCtx.drawImage(canvas, 0, 0);
-    
-    // Download
-    const link = document.createElement('a');
-    link.download = `whiteboard-${sessionId}-${Date.now()}.png`;
-    link.href = exportCanvas.toDataURL('image/png');
-    link.click();
-    
-    toast.success('Whiteboard exported');
-  }, [sessionId]);
-  
-  // Undo/Redo (memoized)
-  const handleUndo = useCallback(() => {
-    if (yUndoManagerRef.current) {
-      yUndoManagerRef.current.undo();
-    }
-  }, []);
-  
-  const handleRedo = useCallback(() => {
-    if (yUndoManagerRef.current) {
-      yUndoManagerRef.current.redo();
-    }
-  }, []);
-  
-  return (
-    <div 
-      ref={containerRef}
-      className={`absolute inset-0 z-20 w-full h-full bg-gray-900 overflow-hidden ${
-        isActive ? "block" : "hidden"
-      }`}
-      onWheel={handleWheel}
-    >
-      {/* Background canvas */}
-      <canvas
-        ref={backgroundCanvasRef}
-        className="absolute top-0 left-0 w-full h-full"
-        style={{ pointerEvents: 'none' }}
-      />
-      
-      {/* Main drawing canvas */}
-      <canvas
-        ref={canvasRef}
-        className={`absolute top-0 left-0 w-full h-full ${
-          tool === 'pan' ? 'cursor-grab' : 'cursor-crosshair'
+      const exportCtx = exportCanvas.getContext("2d");
+      exportCtx.drawImage(bgCanvas, 0, 0);
+      exportCtx.drawImage(canvas, 0, 0);
+
+      const link = document.createElement("a");
+      link.download = `whiteboard-${sessionId}-${Date.now()}.png`;
+      link.href = exportCanvas.toDataURL("image/png");
+      link.click();
+
+      toast.success("Whiteboard exported");
+    }, [sessionId]);
+
+    // Undo/Redo (memoized)
+    const handleUndo = useCallback(() => {
+      if (yUndoManagerRef.current) yUndoManagerRef.current.undo();
+    }, []);
+
+    const handleRedo = useCallback(() => {
+      if (yUndoManagerRef.current) yUndoManagerRef.current.redo();
+    }, []);
+
+    return (
+      <div
+        ref={containerRef}
+        className={`absolute inset-0 z-20 w-full h-full bg-gray-900 overflow-hidden ${
+          isActive ? "block" : "hidden"
         }`}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseLeave}
-        onContextMenu={(e) => e.preventDefault()}
-      />
-      
-      {/* Floating Controls - Always Visible */}
-      <div className="absolute top-2 left-1/2 transform -translate-x-1/2 z-10">
-        <div className="bg-gray-800/95 backdrop-blur-sm rounded-lg shadow-lg border border-gray-700 p-2 flex items-center space-x-2">
-          {/* Connection status */}
-          <div className={`w-2 h-2 rounded-full ${
-            isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'
-          }`} />
-          <span className="text-white text-xs mr-2">
-            {isConnected ? 'Connected' : 'Disconnected'}
-          </span>
-          
-          {/* Divider */}
-          <div className="w-px h-6 bg-gray-600"></div>
-          
-          {/* Drawing tools */}
-          <div className="flex items-center space-x-1">
-            <button
-              onClick={() => setTool('pen')}
-              className={`p-1.5 rounded-lg transition-colors ${
-                tool === 'pen' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+        onWheel={handleWheel}
+      >
+        {/* Background canvas */}
+        <canvas
+          ref={backgroundCanvasRef}
+          className="absolute top-0 left-0 w-full h-full"
+          style={{ pointerEvents: "none" }}
+        />
+
+        {/* Main drawing canvas */}
+        <canvas
+          ref={canvasRef}
+          className={`absolute top-0 left-0 w-full h-full ${
+            tool === "pan" ? "cursor-grab" : "cursor-crosshair"
+          }`}
+          style={{ touchAction: "none" }}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={handlePointerLeave}
+          onContextMenu={(e) => e.preventDefault()}
+        />
+
+        {/* Floating Controls - Always Visible */}
+        <div className="absolute top-2 left-1/2 transform -translate-x-1/2 z-10">
+          <div className="bg-gray-800/95 backdrop-blur-sm rounded-lg shadow-lg border border-gray-700 p-2 flex items-center space-x-2">
+            {/* Connection status */}
+            <div
+              className={`w-2 h-2 rounded-full ${
+                isConnected ? "bg-green-500 animate-pulse" : "bg-red-500"
               }`}
-              title="Pen"
+            />
+            <span className="text-white text-xs mr-2">
+              {isConnected ? "Connected" : "Disconnected"}
+            </span>
+
+            <div className="w-px h-6 bg-gray-600"></div>
+
+            {/* Drawing tools */}
+            <div className="flex items-center space-x-1">
+              <button
+                onClick={() => setTool("pen")}
+                className={`p-1.5 rounded-lg transition-colors ${
+                  tool === "pen"
+                    ? "bg-blue-600 text-white"
+                    : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+                }`}
+                title="Pen"
+              >
+                <FaPaintBrush className="w-4 h-4" />
+              </button>
+
+              <button
+                onClick={() => setTool("eraser")}
+                className={`p-1.5 rounded-lg transition-colors ${
+                  tool === "eraser"
+                    ? "bg-blue-600 text-white"
+                    : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+                }`}
+                title="Eraser"
+              >
+                <FaEraser className="w-4 h-4" />
+              </button>
+
+              <button
+                onClick={() => setTool("line")}
+                className={`p-1.5 rounded-lg transition-colors ${
+                  tool === "line"
+                    ? "bg-blue-600 text-white"
+                    : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+                }`}
+                title="Line"
+              >
+                <FiMinus className="w-4 h-4" />
+              </button>
+
+              <button
+                onClick={() => setTool("rectangle")}
+                className={`p-1.5 rounded-lg transition-colors ${
+                  tool === "rectangle"
+                    ? "bg-blue-600 text-white"
+                    : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+                }`}
+                title="Rectangle"
+              >
+                <FiSquare className="w-4 h-4" />
+              </button>
+
+              <button
+                onClick={() => setTool("circle")}
+                className={`p-1.5 rounded-lg transition-colors ${
+                  tool === "circle"
+                    ? "bg-blue-600 text-white"
+                    : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+                }`}
+                title="Circle"
+              >
+                <FiCircle className="w-4 h-4" />
+              </button>
+
+              <button
+                onClick={() => setTool("pan")}
+                className={`p-1.5 rounded-lg transition-colors ${
+                  tool === "pan"
+                    ? "bg-blue-600 text-white"
+                    : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+                }`}
+                title="Pan (Alt + Drag)"
+              >
+                <FiMove className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="w-px h-6 bg-gray-600"></div>
+
+            {/* Color picker */}
+            <input
+              type="color"
+              value={color}
+              onChange={(e) => setColor(e.target.value)}
+              className="w-7 h-7 rounded cursor-pointer border border-gray-600"
+              title="Color"
+            />
+
+            <select
+              value={strokeWidth}
+              onChange={(e) => setStrokeWidth(Number(e.target.value))}
+              className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
+              title="Stroke Width"
             >
-              <FaPaintBrush className="w-4 h-4" />
-            </button>
-            
-            <button
-              onClick={() => setTool('eraser')}
-              className={`p-1.5 rounded-lg transition-colors ${
-                tool === 'eraser' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
-              }`}
-              title="Eraser"
+              <option value="1">1px</option>
+              <option value="2">2px</option>
+              <option value="3">3px</option>
+              <option value="5">5px</option>
+              <option value="8">8px</option>
+            </select>
+
+            <select
+              value={opacity}
+              onChange={(e) => setOpacity(Number(e.target.value))}
+              className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
+              title="Opacity"
             >
-              <FaEraser className="w-4 h-4" />
-            </button>
-            
+              <option value="1">100%</option>
+              <option value="0.8">80%</option>
+              <option value="0.6">60%</option>
+              <option value="0.4">40%</option>
+            </select>
+
+            <div className="w-px h-6 bg-gray-600"></div>
+
+            {/* Zoom controls */}
             <button
-              onClick={() => setTool('line')}
-              className={`p-1.5 rounded-lg transition-colors ${
-                tool === 'line' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
-              }`}
-              title="Line"
+              onClick={handleZoomOut}
+              className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+              title="Zoom Out"
             >
-              <FiMinus className="w-4 h-4" />
+              <FiMinusCircle className="w-4 h-4 text-white" />
             </button>
-            
+            <span className="text-white text-sm min-w-[50px] text-center font-medium">
+              {Math.round(currentZoom * 100)}%
+            </span>
             <button
-              onClick={() => setTool('rectangle')}
+              onClick={handleZoomIn}
+              className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+              title="Zoom In"
+            >
+              <FiPlus className="w-4 h-4 text-white" />
+            </button>
+            <button
+              onClick={handleZoomReset}
+              className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+              title="Reset Zoom"
+            >
+              <FiRefreshCcw className="w-4 h-4 text-white" />
+            </button>
+
+            <div className="w-px h-6 bg-gray-600"></div>
+
+            {/* Undo/Redo */}
+            <button
+              onClick={handleUndo}
+              className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+              title="Undo"
+            >
+              <FiRefreshCcw className="w-4 h-4 text-white" />
+            </button>
+            <button
+              onClick={handleRedo}
+              className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+              title="Redo"
+            >
+              <FiRefreshCcw className="w-4 h-4 text-white transform scale-x-[-1]" />
+            </button>
+
+            {/* Clear/Export */}
+            <button
+              onClick={handleClearWhiteboard}
+              className="p-1.5 bg-red-900 hover:bg-red-800 rounded-lg transition-colors"
+              title="Clear Whiteboard"
+            >
+              <FiTrash2 className="w-4 h-4 text-white" />
+            </button>
+            <button
+              onClick={handleExport}
+              className="p-1.5 bg-blue-900 hover:bg-blue-800 rounded-lg transition-colors"
+              title="Export as PNG"
+            >
+              <FiDownload className="w-4 h-4 text-white" />
+            </button>
+
+            {/* Grid toggle */}
+            <button
+              onClick={() => setIsGridVisible(!isGridVisible)}
               className={`p-1.5 rounded-lg transition-colors ${
-                tool === 'rectangle' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+                isGridVisible
+                  ? "bg-blue-600 text-white"
+                  : "bg-gray-700 text-gray-300 hover:bg-gray-600"
               }`}
-              title="Rectangle"
+              title="Toggle Grid"
             >
               <FiSquare className="w-4 h-4" />
             </button>
-            
-            <button
-              onClick={() => setTool('circle')}
-              className={`p-1.5 rounded-lg transition-colors ${
-                tool === 'circle' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
-              }`}
-              title="Circle"
-            >
-              <FiCircle className="w-4 h-4" />
-            </button>
-            
-            <button
-              onClick={() => setTool('pan')}
-              className={`p-1.5 rounded-lg transition-colors ${
-                tool === 'pan' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
-              }`}
-              title="Pan (Alt + Drag)"
-            >
-              <FiMove className="w-4 h-4" />
-            </button>
-          </div>
-          
-          {/* Divider */}
-          <div className="w-px h-6 bg-gray-600"></div>
-          
-          {/* Color picker */}
-          <input
-            type="color"
-            value={color}
-            onChange={(e) => setColor(e.target.value)}
-            className="w-7 h-7 rounded cursor-pointer border border-gray-600"
-            title="Color"
-          />
-          
-          <select
-            value={strokeWidth}
-            onChange={(e) => setStrokeWidth(Number(e.target.value))}
-            className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
-            title="Stroke Width"
-          >
-            <option value="1">1px</option>
-            <option value="2">2px</option>
-            <option value="3">3px</option>
-            <option value="5">5px</option>
-            <option value="8">8px</option>
-          </select>
-          
-          <select
-            value={opacity}
-            onChange={(e) => setOpacity(Number(e.target.value))}
-            className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
-            title="Opacity"
-          >
-            <option value="1">100%</option>
-            <option value="0.8">80%</option>
-            <option value="0.6">60%</option>
-            <option value="0.4">40%</option>
-          </select>
-          
-          {/* Divider */}
-          <div className="w-px h-6 bg-gray-600"></div>
-          
-          {/* Zoom controls */}
-          <button
-            onClick={handleZoomOut}
-            className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
-            title="Zoom Out"
-          >
-            <FiMinusCircle className="w-4 h-4 text-white" />
-          </button>
-          <span className="text-white text-sm min-w-[50px] text-center font-medium">
-            {Math.round(currentZoom * 100)}%
-          </span>
-          <button
-            onClick={handleZoomIn}
-            className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
-            title="Zoom In"
-          >
-            <FiPlus className="w-4 h-4 text-white" />
-          </button>
-          <button
-            onClick={handleZoomReset}
-            className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
-            title="Reset Zoom"
-          >
-            <FiRefreshCcw className="w-4 h-4 text-white" />
-          </button>
-          
-          {/* Divider */}
-          <div className="w-px h-6 bg-gray-600"></div>
-          
-          {/* Undo/Redo */}
-          <button
-            onClick={handleUndo}
-            className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
-            title="Undo"
-          >
-            <FiRefreshCcw className="w-4 h-4 text-white" />
-          </button>
-          <button
-            onClick={handleRedo}
-            className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
-            title="Redo"
-          >
-            <FiRefreshCcw className="w-4 h-4 text-white transform scale-x-[-1]" />
-          </button>
-          
-          {/* Clear/Export */}
-          <button
-            onClick={handleClearWhiteboard}
-            className="p-1.5 bg-red-900 hover:bg-red-800 rounded-lg transition-colors"
-            title="Clear Whiteboard"
-          >
-            <FiTrash2 className="w-4 h-4 text-white" />
-          </button>
-          <button
-            onClick={handleExport}
-            className="p-1.5 bg-blue-900 hover:bg-blue-800 rounded-lg transition-colors"
-            title="Export as PNG"
-          >
-            <FiDownload className="w-4 h-4 text-white" />
-          </button>
-          
-          {/* Grid toggle */}
-          <button
-            onClick={() => setIsGridVisible(!isGridVisible)}
-            className={`p-1.5 rounded-lg transition-colors ${
-              isGridVisible ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-            }`}
-            title="Toggle Grid"
-          >
-            <FiSquare className="w-4 h-4" />
-          </button>
-          
-          {/* Divider */}
-          <div className="w-px h-6 bg-gray-600"></div>
-          
-          {/* Close button */}
-          <button
-            onClick={onClose}
-            className="p-1.5 bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
-            title="Close Whiteboard"
-          >
-            <FiX className="w-4 h-4 text-white" />
-          </button>
-        </div>
-      </div>
-      
-      {/* Bottom Info Bar */}
-      <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
-        <div className="flex items-center space-x-3">
-          <span>Tool: <span className="font-bold capitalize">{tool}</span></span>
-          <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
-          <span>Zoom: <span className="font-bold">{Math.round(currentZoom * 100)}%</span></span>
-          <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
-          <span>Viewers: <span className="font-bold">{participants.length}</span></span>
-          <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
-          <span>Alt+Click to pan</span>
-        </div>
-      </div>
-      
-      {/* Viewers count in top right */}
-      <div className="absolute top-2 right-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
-        <div className="flex items-center space-x-2">
-          <span>{participants.length} active {participants.length === 1 ? 'viewer' : 'viewers'}</span>
-          {participants.map((p, i) => (
-            <div
-              key={p.clientId}
-              className="w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-medium"
-              title={`${p.userName || 'User'}`}
-            >
-              {p.userName?.charAt(0) || 'U'}
-            </div>
-          ))}
-        </div>
-      </div>
-      
-      {/* Panning indicator */}
-      {isPanning && (
-        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/70 text-white px-4 py-2 rounded-lg backdrop-blur-sm border border-gray-600">
-          <div className="flex items-center space-x-2">
-            <FiMove className="w-4 h-4" />
-            <span>Panning...</span>
-          </div>
-        </div>
-      )}
-      
-      {/* Drawing disabled overlay */}
-      {!allowViewersToDraw && (
-        <div className="absolute bottom-2 right-2 bg-yellow-900/70 text-yellow-200 px-3 py-1.5 rounded-lg text-xs backdrop-blur-sm border border-yellow-600/30">
-          Viewers cannot draw
-        </div>
-      )}
-    </div>
-  );
-}, (prevProps, nextProps) => {
-  // ✅ Custom comparison function for React.memo
-  // Return true if props are equal (skip re-render), false if they've changed (re-render)
-  
-  // Always re-render if these critical props change
-  if (prevProps.sessionId !== nextProps.sessionId) return false;
-  if (prevProps.roomCode !== nextProps.roomCode) return false;
-  if (prevProps.wsToken !== nextProps.wsToken) return false;
-  if (prevProps.isActive !== nextProps.isActive) return false;
-  if (prevProps.allowViewersToDraw !== nextProps.allowViewersToDraw) return false;
-  if (prevProps.mainScreenMode !== nextProps.mainScreenMode) return false;
-  if (prevProps.compact !== nextProps.compact) return false;
-  
-  // Check sessionInfo deeply (only specific fields)
-  if (prevProps.sessionInfo?.streamerId !== nextProps.sessionInfo?.streamerId) return false;
-  if (prevProps.sessionInfo?.streamerName !== nextProps.sessionInfo?.streamerName) return false;
-  
-  // If all checks pass, props are equal - skip re-render
-  return true;
-});
 
-// ✅ Set display name for better debugging
-StreamerWhiteboard.displayName = 'StreamerWhiteboard';
+            <div className="w-px h-6 bg-gray-600"></div>
+
+            {/* Close button */}
+            <button
+              onClick={onClose}
+              className="p-1.5 bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+              title="Close Whiteboard"
+            >
+              <FiX className="w-4 h-4 text-white" />
+            </button>
+          </div>
+        </div>
+
+        {/* Bottom Info Bar */}
+        <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
+          <div className="flex items-center space-x-3">
+            <span>
+              Tool: <span className="font-bold capitalize">{tool}</span>
+            </span>
+            <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+            <span>
+              Zoom:{" "}
+              <span className="font-bold">{Math.round(currentZoom * 100)}%</span>
+            </span>
+            <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+            <span>
+              Viewers: <span className="font-bold">{participants.length}</span>
+            </span>
+            <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+            <span>Alt+Click to pan</span>
+          </div>
+        </div>
+
+        {/* Viewers count in top right */}
+        <div className="absolute top-2 right-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
+          <div className="flex items-center space-x-2">
+            <span>
+              {participants.length} active{" "}
+              {participants.length === 1 ? "viewer" : "viewers"}
+            </span>
+            {participants.map((p) => (
+              <div
+                key={p.clientId}
+                className="w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-medium"
+                title={`${p.userName || "User"}`}
+              >
+                {p.userName?.charAt(0) || "U"}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Panning indicator */}
+        {isPanning && (
+          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/70 text-white px-4 py-2 rounded-lg backdrop-blur-sm border border-gray-600">
+            <div className="flex items-center space-x-2">
+              <FiMove className="w-4 h-4" />
+              <span>Panning...</span>
+            </div>
+          </div>
+        )}
+
+        {/* Drawing disabled overlay */}
+        {!allowViewersToDraw && (
+          <div className="absolute bottom-2 right-2 bg-yellow-900/70 text-yellow-200 px-3 py-1.5 rounded-lg text-xs backdrop-blur-sm border border-yellow-600/30">
+            Viewers cannot draw
+          </div>
+        )}
+      </div>
+    );
+  },
+  (prevProps, nextProps) => {
+    if (prevProps.sessionId !== nextProps.sessionId) return false;
+    if (prevProps.roomCode !== nextProps.roomCode) return false;
+    if (prevProps.wsToken !== nextProps.wsToken) return false;
+    if (prevProps.isActive !== nextProps.isActive) return false;
+    if (prevProps.allowViewersToDraw !== nextProps.allowViewersToDraw) return false;
+    if (prevProps.mainScreenMode !== nextProps.mainScreenMode) return false;
+    if (prevProps.compact !== nextProps.compact) return false;
+
+    if (prevProps.sessionInfo?.streamerId !== nextProps.sessionInfo?.streamerId) return false;
+    if (prevProps.sessionInfo?.streamerName !== nextProps.sessionInfo?.streamerName) return false;
+
+    return true;
+  }
+);
+
+StreamerWhiteboard.displayName = "StreamerWhiteboard";
 
 export default StreamerWhiteboard;
+
+
+
+
+
+
+// import React, { useState, useEffect, useRef, useCallback, memo } from "react";
+// import * as Y from "yjs";
+// import { WebsocketProvider } from "y-websocket";
+// import { IndexeddbPersistence } from "y-indexeddb";
+
+// import {
+//   FiSquare,
+//   FiCircle,
+//   FiMinus,
+//   FiDownload,
+//   FiRefreshCcw,
+//   FiTrash2,
+//   FiMove,
+//   FiPlus,
+//   FiMinusCircle,
+//   FiX,
+// } from "react-icons/fi";
+// import { FaEraser, FaPaintBrush } from "react-icons/fa";
+// import { toast } from "react-toastify";
+
+// // ✅ Memoized StreamerWhiteboard component with custom comparison
+// const StreamerWhiteboard = memo(
+//   ({
+//     sessionId,
+//     roomCode,
+//     wsToken,
+//     sessionInfo,
+//     isActive,
+//     onClose,
+//     allowViewersToDraw = true,
+//     mainScreenMode = false,
+//     compact = false,
+//   }) => {
+//     // Canvas refs
+//     const canvasRef = useRef(null);
+//     const backgroundCanvasRef = useRef(null);
+//     const ctxRef = useRef(null);
+//     const bgCtxRef = useRef(null);
+//     const containerRef = useRef(null);
+
+//     // Yjs refs
+//     const yDocRef = useRef(null);
+//     const yProviderRef = useRef(null);
+//     const yWhiteboardRef = useRef(null);
+//     const ySettingsRef = useRef(null);
+//     const yUndoManagerRef = useRef(null);
+
+//     // State
+//     const [isDrawing, setIsDrawing] = useState(false);
+//     const [tool, setTool] = useState("pen");
+//     const [color, setColor] = useState("#000000");
+//     const [strokeWidth, setStrokeWidth] = useState(2);
+//     const [opacity, setOpacity] = useState(1);
+//     const [currentZoom, setCurrentZoom] = useState(1);
+//     const [isConnected, setIsConnected] = useState(false);
+//     const [participants, setParticipants] = useState([]);
+//     const [isLocalDrawing, setIsLocalDrawing] = useState(false);
+//     const [backgroundColor, setBackgroundColor] = useState("#ffffff");
+//     const [isGridVisible, setIsGridVisible] = useState(false);
+//     const [isPanning, setIsPanning] = useState(false);
+//     const [showControls, setShowControls] = useState(!compact); // (kept for compatibility)
+
+//     // Canvas state refs
+//     const lastPointRef = useRef({ x: 0, y: 0 });
+//     const canvasOffsetRef = useRef({ x: 0, y: 0 });
+//     const lastPanPointRef = useRef({ x: 0, y: 0 });
+
+//     // =========================
+//     // ✅ Performance refs (smooth drawing during recording)
+//     // =========================
+//     const currentStrokeIdRef = useRef(null); // active pen/eraser stroke id
+//     const strokeBufferRef = useRef([]); // buffered points for Yjs sync
+//     const flushTimerRef = useRef(null); // throttle timer
+
+//     const lastLocalPointRef = useRef(null); // last point drawn locally
+//     const lastLocalMidRef = useRef(null); // last midpoint for smoothing
+//     const pointerIdRef = useRef(null); // pointer capture id
+
+//     // =========================
+//     // Helpers
+//     // =========================
+//     const getTransformedPoint = useCallback(
+//       (evt) => {
+//         if (!canvasRef.current) return { x: 0, y: 0 };
+
+//         const rect = canvasRef.current.getBoundingClientRect();
+//         const scaleX = canvasRef.current.width / rect.width;
+//         const scaleY = canvasRef.current.height / rect.height;
+
+//         const x = (evt.clientX - rect.left) * scaleX;
+//         const y = (evt.clientY - rect.top) * scaleY;
+
+//         return {
+//           x: (x - canvasOffsetRef.current.x) / currentZoom,
+//           y: (y - canvasOffsetRef.current.y) / currentZoom,
+//         };
+//       },
+//       [currentZoom]
+//     );
+
+//     // Draw grid (memoized)
+//     const drawGrid = useCallback((ctx, width, height) => {
+//       ctx.save();
+//       ctx.strokeStyle = "#e0e0e0";
+//       ctx.lineWidth = 0.5;
+//       ctx.globalAlpha = 0.3;
+
+//       const gridSize = 20;
+
+//       for (let x = 0; x <= width; x += gridSize) {
+//         ctx.beginPath();
+//         ctx.moveTo(x, 0);
+//         ctx.lineTo(x, height);
+//         ctx.stroke();
+//       }
+
+//       for (let y = 0; y <= height; y += gridSize) {
+//         ctx.beginPath();
+//         ctx.moveTo(0, y);
+//         ctx.lineTo(width, y);
+//         ctx.stroke();
+//       }
+
+//       ctx.restore();
+//     }, []);
+
+//     // Draw individual object (memoized)
+//     const drawObject = useCallback(
+//       (ctx, obj) => {
+//         if (!obj) return;
+
+//         ctx.save();
+//         ctx.strokeStyle = obj.color || "#000000";
+//         ctx.fillStyle = obj.fillColor || "transparent";
+//         ctx.lineWidth = (obj.strokeWidth || 2) / currentZoom;
+//         ctx.globalAlpha = obj.opacity ?? 1;
+
+//         switch (obj.type) {
+//           case "pen":
+//           case "pencil": {
+//             if (!obj.points || obj.points.length < 1) break;
+//             ctx.beginPath();
+//             ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//             obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
+//             ctx.stroke();
+//             break;
+//           }
+
+//           case "line": {
+//             ctx.beginPath();
+//             ctx.moveTo(obj.x1, obj.y1);
+//             ctx.lineTo(obj.x2, obj.y2);
+//             ctx.stroke();
+//             break;
+//           }
+
+//           case "rectangle": {
+//             if (obj.fillColor) ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
+//             ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
+//             break;
+//           }
+
+//           case "circle": {
+//             ctx.beginPath();
+//             ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
+//             if (obj.fillColor) ctx.fill();
+//             ctx.stroke();
+//             break;
+//           }
+
+//           case "text": {
+//             ctx.font = `${obj.fontSize || 16}px Arial`;
+//             ctx.fillStyle = obj.color || "#000";
+//             ctx.fillText(obj.text || "", obj.x, obj.y);
+//             break;
+//           }
+
+//           case "eraser": {
+//             if (!obj.points || obj.points.length < 1) break;
+//             ctx.save();
+//             ctx.globalCompositeOperation = "destination-out";
+//             ctx.beginPath();
+//             ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//             obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
+//             ctx.stroke();
+//             ctx.restore();
+//             break;
+//           }
+
+//           default:
+//             break;
+//         }
+
+//         ctx.restore();
+//       },
+//       [currentZoom]
+//     );
+
+//     // Redraw canvas from objects (memoized)
+//     const redrawCanvas = useCallback(
+//       (objects) => {
+//         if (!ctxRef.current || !bgCtxRef.current || !canvasRef.current) return;
+
+//         const ctx = ctxRef.current;
+//         const bgCtx = bgCtxRef.current;
+//         const canvas = canvasRef.current;
+
+//         ctx.clearRect(0, 0, canvas.width, canvas.height);
+//         bgCtx.clearRect(0, 0, canvas.width, canvas.height);
+
+//         // Background
+//         bgCtx.fillStyle = backgroundColor;
+//         bgCtx.fillRect(0, 0, canvas.width, canvas.height);
+
+//         // Grid
+//         if (isGridVisible) {
+//           drawGrid(bgCtx, canvas.width, canvas.height);
+//         }
+
+//         // Apply zoom/pan and draw
+//         ctx.save();
+//         ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//         ctx.scale(currentZoom, currentZoom);
+
+//         (objects || []).forEach((obj) => drawObject(ctx, obj));
+
+//         ctx.restore();
+//       },
+//       [backgroundColor, isGridVisible, currentZoom, drawGrid, drawObject]
+//     );
+
+//     // Load whiteboard state from Yjs (memoized)
+//     const loadWhiteboardState = useCallback(() => {
+//       if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return;
+
+//       try {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+
+//         if (state.background) setBackgroundColor(state.background);
+
+//         if (Array.isArray(state.objects)) {
+//           redrawCanvas(state.objects);
+//         }
+//       } catch (error) {
+//         console.error("Error loading whiteboard state:", error);
+//       }
+//     }, [redrawCanvas]);
+
+//     // Add object to Yjs document (memoized)
+//     const addObject = useCallback(
+//       (obj) => {
+//         if (!yWhiteboardRef.current || !yDocRef.current) return;
+
+//         setIsLocalDrawing(true);
+
+//         try {
+//           yDocRef.current.transact(() => {
+//             const currentState = yWhiteboardRef.current.toArray()[0] || {
+//               version: "1.0.0",
+//               objects: [],
+//               background: backgroundColor,
+//               createdAt: new Date().toISOString(),
+//             };
+
+//             const updatedState = {
+//               ...currentState,
+//               objects: [...(currentState.objects || []), obj],
+//               updatedBy: sessionInfo?.streamerId,
+//               updatedAt: new Date().toISOString(),
+//             };
+
+//             if (yWhiteboardRef.current.length === 0) {
+//               yWhiteboardRef.current.insert(0, [updatedState]);
+//             } else {
+//               yWhiteboardRef.current.delete(0, 1);
+//               yWhiteboardRef.current.insert(0, [updatedState]);
+//             }
+//           }, "drawing");
+//         } catch (error) {
+//           console.error("Error adding object:", error);
+//         } finally {
+//           setIsLocalDrawing(false);
+//         }
+//       },
+//       [backgroundColor, sessionInfo]
+//     );
+
+//     // =========================
+//     // ✅ Incremental local draw (SMOOTH CURVE)
+//     // - quadratic midpoint smoothing
+//     // - also supports eraser via destination-out
+//     // =========================
+//     const drawSmoothStroke = useCallback(
+//       (prev, next, strokeType) => {
+//         if (!ctxRef.current) return;
+//         const ctx = ctxRef.current;
+
+//         ctx.save();
+//         ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//         ctx.scale(currentZoom, currentZoom);
+
+//         ctx.lineCap = "round";
+//         ctx.lineJoin = "round";
+//         ctx.globalAlpha = opacity ?? 1;
+//         ctx.lineWidth = (strokeWidth || 2) / currentZoom;
+
+//         const isEraser = strokeType === "eraser";
+//         if (isEraser) {
+//           ctx.globalCompositeOperation = "destination-out";
+//           ctx.strokeStyle = "rgba(0,0,0,1)";
+//         } else {
+//           ctx.globalCompositeOperation = "source-over";
+//           ctx.strokeStyle = color || "#000000";
+//         }
+
+//         const mid = { x: (prev.x + next.x) / 2, y: (prev.y + next.y) / 2 };
+
+//         // If this is the first segment, init last midpoint
+//         if (!lastLocalMidRef.current) {
+//           lastLocalMidRef.current = { x: prev.x, y: prev.y };
+//         }
+
+//         // Quadratic curve from lastMid -> mid, control point at prev
+//         ctx.beginPath();
+//         ctx.moveTo(lastLocalMidRef.current.x, lastLocalMidRef.current.y);
+//         ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
+//         ctx.stroke();
+
+//         lastLocalMidRef.current = mid;
+
+//         ctx.restore();
+//       },
+//       [currentZoom, color, strokeWidth, opacity]
+//     );
+
+//     // =========================
+//     // ✅ Throttled Yjs sync (batch points)
+//     // =========================
+//     const flushStrokeToYjs = useCallback(
+//       (force = false) => {
+//         if (!yWhiteboardRef.current || !yDocRef.current) return;
+
+//         const strokeId = currentStrokeIdRef.current;
+//         if (!strokeId) return;
+
+//         const buffered = strokeBufferRef.current;
+//         if (!force && buffered.length === 0) return;
+//         if (buffered.length === 0) return;
+
+//         const pointsToAdd = buffered.slice();
+//         strokeBufferRef.current = [];
+
+//         try {
+//           yDocRef.current.transact(() => {
+//             const currentState = yWhiteboardRef.current.toArray()[0] || {
+//               version: "1.0.0",
+//               objects: [],
+//               background: backgroundColor,
+//               createdAt: new Date().toISOString(),
+//             };
+
+//             const objects = [...(currentState.objects || [])];
+
+//             // find by id, fallback to last
+//             let idx = objects.length - 1;
+//             const found = objects.findIndex((o) => o && o.id === strokeId);
+//             if (found !== -1) idx = found;
+
+//             const target = objects[idx];
+//             if (!target || (target.type !== "pen" && target.type !== "eraser")) return;
+
+//             target.points = [...(target.points || []), ...pointsToAdd];
+
+//             const updatedState = {
+//               ...currentState,
+//               objects,
+//               updatedBy: sessionInfo?.streamerId,
+//               updatedAt: new Date().toISOString(),
+//             };
+
+//             if (yWhiteboardRef.current.length === 0) {
+//               yWhiteboardRef.current.insert(0, [updatedState]);
+//             } else {
+//               yWhiteboardRef.current.delete(0, 1);
+//               yWhiteboardRef.current.insert(0, [updatedState]);
+//             }
+//           }, "drawing");
+//         } catch (error) {
+//           console.error("Error flushing stroke points:", error);
+//         }
+//       },
+//       [backgroundColor, sessionInfo]
+//     );
+
+//     const scheduleFlush = useCallback(() => {
+//       if (flushTimerRef.current) return;
+//       flushTimerRef.current = setTimeout(() => {
+//         flushTimerRef.current = null;
+//         flushStrokeToYjs(false);
+//       }, 50);
+//     }, [flushStrokeToYjs]);
+
+//     useEffect(() => {
+//       return () => {
+//         if (flushTimerRef.current) {
+//           clearTimeout(flushTimerRef.current);
+//           flushTimerRef.current = null;
+//         }
+//       };
+//     }, []);
+
+//     // =========================
+//     // ✅ Initialize Yjs document and WebSocket provider
+//     // (Important: DO NOT re-init on color/tool changes)
+//     // =========================
+//     useEffect(() => {
+//       if (!sessionId || !wsToken) return;
+
+//       const initYjs = async () => {
+//         try {
+//           const ydoc = new Y.Doc();
+//           yDocRef.current = ydoc;
+
+//           const baseWs = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
+//           const url = `${baseWs}/yjs`;
+
+//           const provider = new WebsocketProvider(url, sessionId, ydoc, {
+//             WebSocketPolyfill: WebSocket,
+//             params: {
+//               token: wsToken,
+//               isStreamer: true,
+//               allowViewersToDraw,
+//               roomCode,
+//               userId: sessionInfo?.streamerId,
+//               userName: sessionInfo?.streamerName,
+//             },
+//           });
+
+//           yProviderRef.current = provider;
+
+//           const yWhiteboard = ydoc.getArray("whiteboard");
+//           yWhiteboardRef.current = yWhiteboard;
+
+//           const ySettings = ydoc.getMap("room_settings");
+//           ySettingsRef.current = ySettings;
+
+//           // Awareness initial state
+//           provider.awareness.setLocalState({
+//             userId: sessionInfo?.streamerId || "streamer",
+//             userName: sessionInfo?.streamerName || "Streamer",
+//             role: "STREAMER",
+//             isStreamer: true,
+//             color,
+//             tool,
+//             cursor: null,
+//           });
+
+//           provider.awareness.on("change", () => {
+//             const states = Array.from(provider.awareness.getStates().entries());
+//             const participantsList = states
+//               .map(([clientId, state]) => ({
+//                 clientId,
+//                 ...state,
+//               }))
+//               .filter((p) => p.userId);
+
+//             setParticipants(participantsList);
+//           });
+
+//           provider.on("sync", (synced) => {
+//             setIsConnected(!!synced);
+//             if (synced) loadWhiteboardState();
+//           });
+
+//           // ✅ Undo manager should track our transact origin ("drawing")
+//           yUndoManagerRef.current = new Y.UndoManager(yWhiteboard, {
+//             captureTimeout: 150,
+//             trackedOrigins: new Set(["drawing"]),
+//           });
+
+//           // Local persistence
+//           new IndexeddbPersistence(`whiteboard-${sessionId}`, ydoc);
+//         } catch (error) {
+//           console.error("Failed to initialize Yjs:", error);
+//           toast.error("Failed to connect to whiteboard server");
+//         }
+//       };
+
+//       initYjs();
+
+//       return () => {
+//         // flush pending stroke safely before teardown
+//         try {
+//           flushStrokeToYjs(true);
+//         } catch {}
+
+//         if (yProviderRef.current) {
+//           try {
+//             yProviderRef.current.disconnect();
+//             yProviderRef.current.destroy();
+//           } catch {}
+//         }
+//         if (yDocRef.current) {
+//           try {
+//             yDocRef.current.destroy();
+//           } catch {}
+//         }
+//         yProviderRef.current = null;
+//         yDocRef.current = null;
+//         yWhiteboardRef.current = null;
+//         ySettingsRef.current = null;
+//         yUndoManagerRef.current = null;
+//       };
+//       // eslint-disable-next-line react-hooks/exhaustive-deps
+//     }, [sessionId, roomCode, wsToken, allowViewersToDraw, sessionInfo, loadWhiteboardState]);
+
+//     // ✅ Keep awareness updated without reconnecting
+//     useEffect(() => {
+//       const provider = yProviderRef.current;
+//       if (!provider) return;
+
+//       try {
+//         const prevState = provider.awareness.getLocalState() || {};
+//         provider.awareness.setLocalState({
+//           ...prevState,
+//           userId: sessionInfo?.streamerId || "streamer",
+//           userName: sessionInfo?.streamerName || "Streamer",
+//           role: "STREAMER",
+//           isStreamer: true,
+//           color,
+//           tool,
+//         });
+//       } catch {}
+//     }, [color, tool, sessionInfo]);
+
+//     // =========================
+//     // ✅ Initialize canvas
+//     // =========================
+//     useEffect(() => {
+//       if (!canvasRef.current || !backgroundCanvasRef.current || !containerRef.current) return;
+
+//       const canvas = canvasRef.current;
+//       const bgCanvas = backgroundCanvasRef.current;
+//       const container = containerRef.current;
+
+//       const resizeCanvas = () => {
+//         const containerWidth = container.clientWidth;
+//         const containerHeight = container.clientHeight;
+
+//         canvas.width = containerWidth;
+//         canvas.height = containerHeight;
+//         bgCanvas.width = containerWidth;
+//         bgCanvas.height = containerHeight;
+
+//         const ctx = canvas.getContext("2d");
+//         const bgCtx = bgCanvas.getContext("2d");
+
+//         ctxRef.current = ctx;
+//         bgCtxRef.current = bgCtx;
+
+//         ctx.lineCap = "round";
+//         ctx.lineJoin = "round";
+
+//         if (yWhiteboardRef.current) {
+//           const state = yWhiteboardRef.current.toArray()[0] || {};
+//           redrawCanvas(state.objects || []);
+//         }
+//       };
+
+//       resizeCanvas();
+
+//       const resizeObserver = new ResizeObserver(() => resizeCanvas());
+//       resizeObserver.observe(container);
+
+//       return () => resizeObserver.disconnect();
+//     }, [redrawCanvas]);
+
+//     // =========================
+//     // ✅ Pointer Events (better than mouse) + coalesced events
+//     // =========================
+//     const handlePointerDown = useCallback(
+//       (e) => {
+//         e.preventDefault();
+//         if (!canvasRef.current) return;
+
+//         // right click ignore
+//         if (e.button === 2) return;
+
+//         // capture pointer so we keep receiving move/up events
+//         try {
+//           canvasRef.current.setPointerCapture(e.pointerId);
+//           pointerIdRef.current = e.pointerId;
+//         } catch {}
+
+//         // Pan tool (Alt key or middle mouse)
+//         if (tool === "pan" || e.altKey || e.button === 1) {
+//           setIsPanning(true);
+//           lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+//           canvasRef.current.style.cursor = "grabbing";
+//           return;
+//         }
+
+//         setIsDrawing(true);
+
+//         const p = getTransformedPoint(e);
+//         lastPointRef.current = p;
+//         lastLocalPointRef.current = p;
+//         lastLocalMidRef.current = null;
+
+//         if (tool === "pen" || tool === "eraser") {
+//           const strokeId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+//           currentStrokeIdRef.current = strokeId;
+//           strokeBufferRef.current = [];
+
+//           addObject({
+//             id: strokeId,
+//             type: tool,
+//             points: [{ x: p.x, y: p.y }],
+//             color: tool === "eraser" ? backgroundColor : color,
+//             strokeWidth,
+//             opacity,
+//             timestamp: Date.now(),
+//           });
+
+//           // dot for click-without-move
+//           drawSmoothStroke(p, { x: p.x + 0.01, y: p.y + 0.01 }, tool);
+//         }
+//       },
+//       [tool, getTransformedPoint, addObject, backgroundColor, color, strokeWidth, opacity, drawSmoothStroke]
+//     );
+
+//     const handlePointerMove = useCallback(
+//       (e) => {
+//         if (!canvasRef.current) return;
+
+//         if (isPanning) {
+//           const dx = e.clientX - lastPanPointRef.current.x;
+//           const dy = e.clientY - lastPanPointRef.current.y;
+//           canvasOffsetRef.current.x += dx;
+//           canvasOffsetRef.current.y += dy;
+//           lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+
+//           if (yWhiteboardRef.current) {
+//             const state = yWhiteboardRef.current.toArray()[0] || {};
+//             redrawCanvas(state.objects || []);
+//           }
+//           return;
+//         }
+
+//         if (!isDrawing) return;
+//         if (tool !== "pen" && tool !== "eraser") return;
+
+//         // ✅ Use coalesced events (more points under CPU load/recording)
+//         const events =
+//           typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
+
+//         for (const evt of events) {
+//           const next = getTransformedPoint(evt);
+//           const prev = lastLocalPointRef.current || lastPointRef.current;
+
+//           const dist = prev ? Math.hypot(next.x - prev.x, next.y - prev.y) : 999;
+
+//           // ✅ Lower threshold => more points => curve stays curve (recording ON)
+//           const minDist = 0.6; // was 2
+//           if (dist < minDist) continue;
+
+//           // ✅ smooth local draw
+//           if (prev) drawSmoothStroke(prev, next, tool);
+
+//           // ✅ buffer points (throttled Yjs)
+//           strokeBufferRef.current.push(next);
+//           scheduleFlush();
+
+//           lastLocalPointRef.current = next;
+//           lastPointRef.current = next;
+//         }
+//       },
+//       [isDrawing, isPanning, tool, getTransformedPoint, redrawCanvas, drawSmoothStroke, scheduleFlush]
+//     );
+
+//     const endStrokeCleanup = useCallback(() => {
+//       // flush final buffered points
+//       flushStrokeToYjs(true);
+
+//       currentStrokeIdRef.current = null;
+//       strokeBufferRef.current = [];
+//       lastLocalPointRef.current = null;
+//       lastLocalMidRef.current = null;
+
+//       // release pointer capture
+//       if (canvasRef.current && pointerIdRef.current != null) {
+//         try {
+//           canvasRef.current.releasePointerCapture(pointerIdRef.current);
+//         } catch {}
+//       }
+//       pointerIdRef.current = null;
+//     }, [flushStrokeToYjs]);
+
+//     const handlePointerUp = useCallback(() => {
+//       setIsDrawing(false);
+//       setIsPanning(false);
+
+//       endStrokeCleanup();
+
+//       if (canvasRef.current) {
+//         canvasRef.current.style.cursor = tool === "pan" ? "grab" : "crosshair";
+//       }
+//     }, [tool, endStrokeCleanup]);
+
+//     const handlePointerLeave = useCallback(() => {
+//       setIsDrawing(false);
+//       setIsPanning(false);
+//       endStrokeCleanup();
+//     }, [endStrokeCleanup]);
+
+//     // =========================
+//     // Wheel Zoom
+//     // =========================
+//     const handleWheel = useCallback(
+//       (e) => {
+//         e.preventDefault();
+//         if (!canvasRef.current) return;
+
+//         const rect = canvasRef.current.getBoundingClientRect();
+//         const mouseX = e.clientX - rect.left;
+//         const mouseY = e.clientY - rect.top;
+
+//         const scaleFactor = e.deltaY > 0 ? 0.9 : 1.1;
+//         const newZoom = Math.max(0.5, Math.min(3, currentZoom * scaleFactor));
+
+//         const zoomChange = newZoom / currentZoom;
+
+//         canvasOffsetRef.current.x = mouseX - (mouseX - canvasOffsetRef.current.x) * zoomChange;
+//         canvasOffsetRef.current.y = mouseY - (mouseY - canvasOffsetRef.current.y) * zoomChange;
+
+//         setCurrentZoom(newZoom);
+
+//         if (yWhiteboardRef.current) {
+//           const state = yWhiteboardRef.current.toArray()[0] || {};
+//           redrawCanvas(state.objects || []);
+//         }
+//       },
+//       [currentZoom, redrawCanvas]
+//     );
+
+//     // Zoom controls (memoized)
+//     const handleZoomIn = useCallback(() => {
+//       setCurrentZoom((prev) => Math.min(prev + 0.1, 3));
+//       if (yWhiteboardRef.current) {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         redrawCanvas(state.objects || []);
+//       }
+//     }, [redrawCanvas]);
+
+//     const handleZoomOut = useCallback(() => {
+//       setCurrentZoom((prev) => Math.max(prev - 0.1, 0.5));
+//       if (yWhiteboardRef.current) {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         redrawCanvas(state.objects || []);
+//       }
+//     }, [redrawCanvas]);
+
+//     const handleZoomReset = useCallback(() => {
+//       setCurrentZoom(1);
+//       canvasOffsetRef.current = { x: 0, y: 0 };
+
+//       if (yWhiteboardRef.current) {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         redrawCanvas(state.objects || []);
+//       }
+//     }, [redrawCanvas]);
+
+//     // Clear whiteboard (memoized)
+//     const handleClearWhiteboard = useCallback(() => {
+//       if (!yWhiteboardRef.current || !yDocRef.current) return;
+
+//       if (window.confirm("Clear entire whiteboard?")) {
+//         const emptyState = {
+//           version: "1.0.0",
+//           objects: [],
+//           background: backgroundColor,
+//           clearedAt: new Date().toISOString(),
+//           clearedBy: sessionInfo?.streamerId,
+//         };
+
+//         yDocRef.current.transact(() => {
+//           yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
+//           yWhiteboardRef.current.insert(0, [emptyState]);
+//         }, "drawing");
+
+//         redrawCanvas([]);
+//         toast.success("Whiteboard cleared");
+//       }
+//     }, [backgroundColor, sessionInfo, redrawCanvas]);
+
+//     // Export as image (memoized)
+//     const handleExport = useCallback(() => {
+//       if (!canvasRef.current || !backgroundCanvasRef.current) return;
+
+//       const canvas = canvasRef.current;
+//       const bgCanvas = backgroundCanvasRef.current;
+
+//       const exportCanvas = document.createElement("canvas");
+//       exportCanvas.width = canvas.width;
+//       exportCanvas.height = canvas.height;
+
+//       const exportCtx = exportCanvas.getContext("2d");
+//       exportCtx.drawImage(bgCanvas, 0, 0);
+//       exportCtx.drawImage(canvas, 0, 0);
+
+//       const link = document.createElement("a");
+//       link.download = `whiteboard-${sessionId}-${Date.now()}.png`;
+//       link.href = exportCanvas.toDataURL("image/png");
+//       link.click();
+
+//       toast.success("Whiteboard exported");
+//     }, [sessionId]);
+
+//     // Undo/Redo (memoized)
+//     const handleUndo = useCallback(() => {
+//       if (yUndoManagerRef.current) yUndoManagerRef.current.undo();
+//     }, []);
+
+//     const handleRedo = useCallback(() => {
+//       if (yUndoManagerRef.current) yUndoManagerRef.current.redo();
+//     }, []);
+
+//     return (
+//       <div
+//         ref={containerRef}
+//         className={`absolute inset-0 z-20 w-full h-full bg-gray-900 overflow-hidden ${
+//           isActive ? "block" : "hidden"
+//         }`}
+//         onWheel={handleWheel}
+//       >
+//         {/* Background canvas */}
+//         <canvas
+//           ref={backgroundCanvasRef}
+//           className="absolute top-0 left-0 w-full h-full"
+//           style={{ pointerEvents: "none" }}
+//         />
+
+//         {/* Main drawing canvas */}
+//         <canvas
+//           ref={canvasRef}
+//           className={`absolute top-0 left-0 w-full h-full ${
+//             tool === "pan" ? "cursor-grab" : "cursor-crosshair"
+//           }`}
+//           style={{ touchAction: "none" }} // ✅ important for pointer events
+//           onPointerDown={handlePointerDown}
+//           onPointerMove={handlePointerMove}
+//           onPointerUp={handlePointerUp}
+//           onPointerLeave={handlePointerLeave}
+//           onContextMenu={(e) => e.preventDefault()}
+//         />
+
+//         {/* Floating Controls - Always Visible */}
+//         <div className="absolute top-2 left-1/2 transform -translate-x-1/2 z-10">
+//           <div className="bg-gray-800/95 backdrop-blur-sm rounded-lg shadow-lg border border-gray-700 p-2 flex items-center space-x-2">
+//             {/* Connection status */}
+//             <div
+//               className={`w-2 h-2 rounded-full ${
+//                 isConnected ? "bg-green-500 animate-pulse" : "bg-red-500"
+//               }`}
+//             />
+//             <span className="text-white text-xs mr-2">
+//               {isConnected ? "Connected" : "Disconnected"}
+//             </span>
+
+//             {/* Divider */}
+//             <div className="w-px h-6 bg-gray-600"></div>
+
+//             {/* Drawing tools */}
+//             <div className="flex items-center space-x-1">
+//               <button
+//                 onClick={() => setTool("pen")}
+//                 className={`p-1.5 rounded-lg transition-colors ${
+//                   tool === "pen"
+//                     ? "bg-blue-600 text-white"
+//                     : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+//                 }`}
+//                 title="Pen"
+//               >
+//                 <FaPaintBrush className="w-4 h-4" />
+//               </button>
+
+//               <button
+//                 onClick={() => setTool("eraser")}
+//                 className={`p-1.5 rounded-lg transition-colors ${
+//                   tool === "eraser"
+//                     ? "bg-blue-600 text-white"
+//                     : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+//                 }`}
+//                 title="Eraser"
+//               >
+//                 <FaEraser className="w-4 h-4" />
+//               </button>
+
+//               <button
+//                 onClick={() => setTool("line")}
+//                 className={`p-1.5 rounded-lg transition-colors ${
+//                   tool === "line"
+//                     ? "bg-blue-600 text-white"
+//                     : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+//                 }`}
+//                 title="Line"
+//               >
+//                 <FiMinus className="w-4 h-4" />
+//               </button>
+
+//               <button
+//                 onClick={() => setTool("rectangle")}
+//                 className={`p-1.5 rounded-lg transition-colors ${
+//                   tool === "rectangle"
+//                     ? "bg-blue-600 text-white"
+//                     : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+//                 }`}
+//                 title="Rectangle"
+//               >
+//                 <FiSquare className="w-4 h-4" />
+//               </button>
+
+//               <button
+//                 onClick={() => setTool("circle")}
+//                 className={`p-1.5 rounded-lg transition-colors ${
+//                   tool === "circle"
+//                     ? "bg-blue-600 text-white"
+//                     : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+//                 }`}
+//                 title="Circle"
+//               >
+//                 <FiCircle className="w-4 h-4" />
+//               </button>
+
+//               <button
+//                 onClick={() => setTool("pan")}
+//                 className={`p-1.5 rounded-lg transition-colors ${
+//                   tool === "pan"
+//                     ? "bg-blue-600 text-white"
+//                     : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+//                 }`}
+//                 title="Pan (Alt + Drag)"
+//               >
+//                 <FiMove className="w-4 h-4" />
+//               </button>
+//             </div>
+
+//             {/* Divider */}
+//             <div className="w-px h-6 bg-gray-600"></div>
+
+//             {/* Color picker */}
+//             <input
+//               type="color"
+//               value={color}
+//               onChange={(e) => setColor(e.target.value)}
+//               className="w-7 h-7 rounded cursor-pointer border border-gray-600"
+//               title="Color"
+//             />
+
+//             <select
+//               value={strokeWidth}
+//               onChange={(e) => setStrokeWidth(Number(e.target.value))}
+//               className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
+//               title="Stroke Width"
+//             >
+//               <option value="1">1px</option>
+//               <option value="2">2px</option>
+//               <option value="3">3px</option>
+//               <option value="5">5px</option>
+//               <option value="8">8px</option>
+//             </select>
+
+//             <select
+//               value={opacity}
+//               onChange={(e) => setOpacity(Number(e.target.value))}
+//               className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
+//               title="Opacity"
+//             >
+//               <option value="1">100%</option>
+//               <option value="0.8">80%</option>
+//               <option value="0.6">60%</option>
+//               <option value="0.4">40%</option>
+//             </select>
+
+//             {/* Divider */}
+//             <div className="w-px h-6 bg-gray-600"></div>
+
+//             {/* Zoom controls */}
+//             <button
+//               onClick={handleZoomOut}
+//               className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//               title="Zoom Out"
+//             >
+//               <FiMinusCircle className="w-4 h-4 text-white" />
+//             </button>
+//             <span className="text-white text-sm min-w-[50px] text-center font-medium">
+//               {Math.round(currentZoom * 100)}%
+//             </span>
+//             <button
+//               onClick={handleZoomIn}
+//               className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//               title="Zoom In"
+//             >
+//               <FiPlus className="w-4 h-4 text-white" />
+//             </button>
+//             <button
+//               onClick={handleZoomReset}
+//               className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//               title="Reset Zoom"
+//             >
+//               <FiRefreshCcw className="w-4 h-4 text-white" />
+//             </button>
+
+//             {/* Divider */}
+//             <div className="w-px h-6 bg-gray-600"></div>
+
+//             {/* Undo/Redo */}
+//             <button
+//               onClick={handleUndo}
+//               className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//               title="Undo"
+//             >
+//               <FiRefreshCcw className="w-4 h-4 text-white" />
+//             </button>
+//             <button
+//               onClick={handleRedo}
+//               className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//               title="Redo"
+//             >
+//               <FiRefreshCcw className="w-4 h-4 text-white transform scale-x-[-1]" />
+//             </button>
+
+//             {/* Clear/Export */}
+//             <button
+//               onClick={handleClearWhiteboard}
+//               className="p-1.5 bg-red-900 hover:bg-red-800 rounded-lg transition-colors"
+//               title="Clear Whiteboard"
+//             >
+//               <FiTrash2 className="w-4 h-4 text-white" />
+//             </button>
+//             <button
+//               onClick={handleExport}
+//               className="p-1.5 bg-blue-900 hover:bg-blue-800 rounded-lg transition-colors"
+//               title="Export as PNG"
+//             >
+//               <FiDownload className="w-4 h-4 text-white" />
+//             </button>
+
+//             {/* Grid toggle */}
+//             <button
+//               onClick={() => setIsGridVisible(!isGridVisible)}
+//               className={`p-1.5 rounded-lg transition-colors ${
+//                 isGridVisible
+//                   ? "bg-blue-600 text-white"
+//                   : "bg-gray-700 text-gray-300 hover:bg-gray-600"
+//               }`}
+//               title="Toggle Grid"
+//             >
+//               <FiSquare className="w-4 h-4" />
+//             </button>
+
+//             {/* Divider */}
+//             <div className="w-px h-6 bg-gray-600"></div>
+
+//             {/* Close button */}
+//             <button
+//               onClick={onClose}
+//               className="p-1.5 bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+//               title="Close Whiteboard"
+//             >
+//               <FiX className="w-4 h-4 text-white" />
+//             </button>
+//           </div>
+//         </div>
+
+//         {/* Bottom Info Bar */}
+//         <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
+//           <div className="flex items-center space-x-3">
+//             <span>
+//               Tool: <span className="font-bold capitalize">{tool}</span>
+//             </span>
+//             <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+//             <span>
+//               Zoom: <span className="font-bold">{Math.round(currentZoom * 100)}%</span>
+//             </span>
+//             <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+//             <span>
+//               Viewers: <span className="font-bold">{participants.length}</span>
+//             </span>
+//             <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+//             <span>Alt+Click to pan</span>
+//           </div>
+//         </div>
+
+//         {/* Viewers count in top right */}
+//         <div className="absolute top-2 right-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
+//           <div className="flex items-center space-x-2">
+//             <span>
+//               {participants.length} active {participants.length === 1 ? "viewer" : "viewers"}
+//             </span>
+//             {participants.map((p) => (
+//               <div
+//                 key={p.clientId}
+//                 className="w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-medium"
+//                 title={`${p.userName || "User"}`}
+//               >
+//                 {p.userName?.charAt(0) || "U"}
+//               </div>
+//             ))}
+//           </div>
+//         </div>
+
+//         {/* Panning indicator */}
+//         {isPanning && (
+//           <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/70 text-white px-4 py-2 rounded-lg backdrop-blur-sm border border-gray-600">
+//             <div className="flex items-center space-x-2">
+//               <FiMove className="w-4 h-4" />
+//               <span>Panning...</span>
+//             </div>
+//           </div>
+//         )}
+
+//         {/* Drawing disabled overlay */}
+//         {!allowViewersToDraw && (
+//           <div className="absolute bottom-2 right-2 bg-yellow-900/70 text-yellow-200 px-3 py-1.5 rounded-lg text-xs backdrop-blur-sm border border-yellow-600/30">
+//             Viewers cannot draw
+//           </div>
+//         )}
+//       </div>
+//     );
+//   },
+//   (prevProps, nextProps) => {
+//     if (prevProps.sessionId !== nextProps.sessionId) return false;
+//     if (prevProps.roomCode !== nextProps.roomCode) return false;
+//     if (prevProps.wsToken !== nextProps.wsToken) return false;
+//     if (prevProps.isActive !== nextProps.isActive) return false;
+//     if (prevProps.allowViewersToDraw !== nextProps.allowViewersToDraw) return false;
+//     if (prevProps.mainScreenMode !== nextProps.mainScreenMode) return false;
+//     if (prevProps.compact !== nextProps.compact) return false;
+
+//     if (prevProps.sessionInfo?.streamerId !== nextProps.sessionInfo?.streamerId) return false;
+//     if (prevProps.sessionInfo?.streamerName !== nextProps.sessionInfo?.streamerName) return false;
+
+//     return true;
+//   }
+// );
+
+// StreamerWhiteboard.displayName = "StreamerWhiteboard";
+
+// export default StreamerWhiteboard;
+
+
+
+
+
+
+
+
+
+
+
+// import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
+// import * as Y from 'yjs';
+// import { WebsocketProvider } from 'y-websocket';
+// import { IndexeddbPersistence } from 'y-indexeddb';
+
+// // Drawing tools
+// import {
+//   FiPenTool,
+//   FiSquare,
+//   FiCircle,
+//   FiMinus,
+//   FiType,
+//   FiDelete,
+//   FiDownload,
+//   FiRefreshCcw,
+//   FiTrash2,
+//   FiMousePointer,
+//   FiMove,
+//   FiPlus,
+//   FiMinusCircle,
+//   FiX
+// } from 'react-icons/fi';
+// import { FaEraser, FaPaintBrush } from 'react-icons/fa';
+// import { toast } from 'react-toastify';
+
+// // ✅ Memoized StreamerWhiteboard component with custom comparison
+// const StreamerWhiteboard = memo(({
+//   sessionId,
+//   roomCode,
+//   wsToken,
+//   sessionInfo,
+//   isActive,
+//   onClose,
+//   allowViewersToDraw = true,
+//   mainScreenMode = false,
+//   compact = false
+// }) => {
+//   // Canvas refs
+//   const canvasRef = useRef(null);
+//   const backgroundCanvasRef = useRef(null);
+//   const ctxRef = useRef(null);
+//   const bgCtxRef = useRef(null);
+//   const containerRef = useRef(null);
+
+//   // Yjs refs
+//   const yDocRef = useRef(null);
+//   const yProviderRef = useRef(null);
+//   const yWhiteboardRef = useRef(null);
+//   const ySettingsRef = useRef(null);
+//   const yUndoManagerRef = useRef(null);
+
+//   // State
+//   const [isDrawing, setIsDrawing] = useState(false);
+//   const [tool, setTool] = useState('pen');
+//   const [color, setColor] = useState('#000000');
+//   const [strokeWidth, setStrokeWidth] = useState(2);
+//   const [opacity, setOpacity] = useState(1);
+//   const [currentZoom, setCurrentZoom] = useState(1);
+//   const [isConnected, setIsConnected] = useState(false);
+//   const [participants, setParticipants] = useState([]);
+//   const [isLocalDrawing, setIsLocalDrawing] = useState(false);
+//   const [backgroundColor, setBackgroundColor] = useState('#ffffff');
+//   const [isGridVisible, setIsGridVisible] = useState(false);
+//   const [isPanning, setIsPanning] = useState(false);
+//   const [showControls, setShowControls] = useState(!compact);
+
+//   // Canvas state
+//   const lastPointRef = useRef({ x: 0, y: 0 });
+//   const canvasOffsetRef = useRef({ x: 0, y: 0 });
+//   const lastPanPointRef = useRef({ x: 0, y: 0 });
+
+//   // =========================
+//   // ✅ Performance refs (smooth drawing during recording)
+//   // =========================
+//   const currentStrokeIdRef = useRef(null); // active pen/eraser stroke id
+//   const strokeBufferRef = useRef([]);      // buffered points for Yjs sync
+//   const flushTimerRef = useRef(null);      // throttle timer
+//   const lastLocalPointRef = useRef(null);  // last point drawn locally
+
+//   // Draw grid (memoized)
+//   const drawGrid = useCallback((ctx, width, height) => {
+//     ctx.save();
+//     ctx.strokeStyle = '#e0e0e0';
+//     ctx.lineWidth = 0.5;
+//     ctx.globalAlpha = 0.3;
+
+//     const gridSize = 20;
+
+//     for (let x = 0; x <= width; x += gridSize) {
+//       ctx.beginPath();
+//       ctx.moveTo(x, 0);
+//       ctx.lineTo(x, height);
+//       ctx.stroke();
+//     }
+
+//     for (let y = 0; y <= height; y += gridSize) {
+//       ctx.beginPath();
+//       ctx.moveTo(0, y);
+//       ctx.lineTo(width, y);
+//       ctx.stroke();
+//     }
+
+//     ctx.restore();
+//   }, []);
+
+//   // Draw individual object (memoized)
+//   const drawObject = useCallback((ctx, obj) => {
+//     if (!obj) return;
+
+//     ctx.save();
+//     ctx.strokeStyle = obj.color || '#000000';
+//     ctx.fillStyle = obj.fillColor || 'transparent';
+//     ctx.lineWidth = (obj.strokeWidth || 2) / currentZoom;
+//     ctx.globalAlpha = obj.opacity ?? 1;
+
+//     switch (obj.type) {
+//       case 'pen':
+//       case 'pencil': {
+//         if (!obj.points || obj.points.length < 1) break;
+//         ctx.beginPath();
+//         ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//         obj.points.forEach(p => ctx.lineTo(p.x, p.y));
+//         ctx.stroke();
+//         break;
+//       }
+
+//       case 'line': {
+//         ctx.beginPath();
+//         ctx.moveTo(obj.x1, obj.y1);
+//         ctx.lineTo(obj.x2, obj.y2);
+//         ctx.stroke();
+//         break;
+//       }
+
+//       case 'rectangle': {
+//         if (obj.fillColor) ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
+//         ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
+//         break;
+//       }
+
+//       case 'circle': {
+//         ctx.beginPath();
+//         ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
+//         if (obj.fillColor) ctx.fill();
+//         ctx.stroke();
+//         break;
+//       }
+
+//       case 'text': {
+//         ctx.font = `${obj.fontSize || 16}px Arial`;
+//         ctx.fillStyle = obj.color || '#000';
+//         ctx.fillText(obj.text || '', obj.x, obj.y);
+//         break;
+//       }
+
+//       case 'eraser': {
+//         if (!obj.points || obj.points.length < 1) break;
+//         ctx.save();
+//         ctx.globalCompositeOperation = 'destination-out';
+//         ctx.beginPath();
+//         ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//         obj.points.forEach(p => ctx.lineTo(p.x, p.y));
+//         ctx.stroke();
+//         ctx.restore();
+//         break;
+//       }
+
+//       default:
+//         break;
+//     }
+
+//     ctx.restore();
+//   }, [currentZoom]);
+
+//   // Redraw canvas from objects (memoized)
+//   const redrawCanvas = useCallback((objects) => {
+//     if (!ctxRef.current || !bgCtxRef.current || !canvasRef.current) return;
+
+//     const ctx = ctxRef.current;
+//     const bgCtx = bgCtxRef.current;
+//     const canvas = canvasRef.current;
+
+//     ctx.clearRect(0, 0, canvas.width, canvas.height);
+//     bgCtx.clearRect(0, 0, canvas.width, canvas.height);
+
+//     // Background
+//     bgCtx.fillStyle = backgroundColor;
+//     bgCtx.fillRect(0, 0, canvas.width, canvas.height);
+
+//     // Grid
+//     if (isGridVisible) {
+//       drawGrid(bgCtx, canvas.width, canvas.height);
+//     }
+
+//     // Apply zoom/pan and draw
+//     ctx.save();
+//     ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//     ctx.scale(currentZoom, currentZoom);
+
+//     (objects || []).forEach(obj => drawObject(ctx, obj));
+
+//     ctx.restore();
+//   }, [backgroundColor, isGridVisible, currentZoom, drawGrid, drawObject]);
+
+//   // Load whiteboard state from Yjs (memoized)
+//   const loadWhiteboardState = useCallback(() => {
+//     if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return;
+
+//     try {
+//       const state = yWhiteboardRef.current.toArray()[0] || {};
+
+//       if (state.background) setBackgroundColor(state.background);
+
+//       if (Array.isArray(state.objects)) {
+//         redrawCanvas(state.objects);
+//       }
+//     } catch (error) {
+//       console.error('Error loading whiteboard state:', error);
+//     }
+//   }, [redrawCanvas]);
+
+//   // Add object to Yjs document (memoized)
+//   const addObject = useCallback((obj) => {
+//     if (!yWhiteboardRef.current || !yDocRef.current) return;
+
+//     setIsLocalDrawing(true);
+
+//     try {
+//       yDocRef.current.transact(() => {
+//         const currentState = yWhiteboardRef.current.toArray()[0] || {
+//           version: '1.0.0',
+//           objects: [],
+//           background: backgroundColor,
+//           createdAt: new Date().toISOString()
+//         };
+
+//         const updatedState = {
+//           ...currentState,
+//           objects: [...(currentState.objects || []), obj],
+//           updatedBy: sessionInfo?.streamerId,
+//           updatedAt: new Date().toISOString()
+//         };
+
+//         if (yWhiteboardRef.current.length === 0) {
+//           yWhiteboardRef.current.insert(0, [updatedState]);
+//         } else {
+//           yWhiteboardRef.current.delete(0, 1);
+//           yWhiteboardRef.current.insert(0, [updatedState]);
+//         }
+//       }, 'drawing');
+//     } catch (error) {
+//       console.error('Error adding object:', error);
+//     } finally {
+//       setIsLocalDrawing(false);
+//     }
+//   }, [backgroundColor, sessionInfo]);
+
+//   // =========================
+//   // ✅ Incremental local draw (smooth)
+//   // =========================
+//   const drawStrokeSegment = useCallback((from, to, strokeType) => {
+//     if (!ctxRef.current) return;
+//     const ctx = ctxRef.current;
+
+//     ctx.save();
+//     ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//     ctx.scale(currentZoom, currentZoom);
+
+//     ctx.lineCap = 'round';
+//     ctx.lineJoin = 'round';
+//     ctx.globalAlpha = opacity ?? 1;
+//     ctx.lineWidth = (strokeWidth || 2) / currentZoom;
+
+//     const isEraser = strokeType === 'eraser';
+//     if (isEraser) {
+//       ctx.globalCompositeOperation = 'destination-out';
+//       ctx.strokeStyle = 'rgba(0,0,0,1)';
+//     } else {
+//       ctx.globalCompositeOperation = 'source-over';
+//       ctx.strokeStyle = color || '#000000';
+//     }
+
+//     ctx.beginPath();
+//     ctx.moveTo(from.x, from.y);
+//     ctx.lineTo(to.x, to.y);
+//     ctx.stroke();
+
+//     ctx.restore();
+//   }, [currentZoom, color, strokeWidth, opacity]);
+
+//   // =========================
+//   // ✅ Throttled Yjs sync (batch points)
+//   // =========================
+//   const flushStrokeToYjs = useCallback((force = false) => {
+//     if (!yWhiteboardRef.current || !yDocRef.current) return;
+
+//     const strokeId = currentStrokeIdRef.current;
+//     if (!strokeId) return;
+
+//     const buffered = strokeBufferRef.current;
+//     if (!force && buffered.length === 0) return;
+//     if (buffered.length === 0) return;
+
+//     const pointsToAdd = buffered.slice();
+//     strokeBufferRef.current = [];
+
+//     try {
+//       yDocRef.current.transact(() => {
+//         const currentState = yWhiteboardRef.current.toArray()[0] || {
+//           version: '1.0.0',
+//           objects: [],
+//           background: backgroundColor,
+//           createdAt: new Date().toISOString()
+//         };
+
+//         const objects = [...(currentState.objects || [])];
+
+//         // find by id, fallback to last
+//         let idx = objects.length - 1;
+//         const found = objects.findIndex(o => o && o.id === strokeId);
+//         if (found !== -1) idx = found;
+
+//         const target = objects[idx];
+//         if (!target || (target.type !== 'pen' && target.type !== 'eraser')) return;
+
+//         target.points = [...(target.points || []), ...pointsToAdd];
+
+//         const updatedState = {
+//           ...currentState,
+//           objects,
+//           updatedBy: sessionInfo?.streamerId,
+//           updatedAt: new Date().toISOString()
+//         };
+
+//         if (yWhiteboardRef.current.length === 0) {
+//           yWhiteboardRef.current.insert(0, [updatedState]);
+//         } else {
+//           yWhiteboardRef.current.delete(0, 1);
+//           yWhiteboardRef.current.insert(0, [updatedState]);
+//         }
+//       }, 'drawing');
+//     } catch (error) {
+//       console.error('Error flushing stroke points:', error);
+//     }
+//   }, [backgroundColor, sessionInfo]);
+
+//   const scheduleFlush = useCallback(() => {
+//     if (flushTimerRef.current) return;
+//     flushTimerRef.current = setTimeout(() => {
+//       flushTimerRef.current = null;
+//       flushStrokeToYjs(false);
+//     }, 50);
+//   }, [flushStrokeToYjs]);
+
+//   useEffect(() => {
+//     return () => {
+//       if (flushTimerRef.current) {
+//         clearTimeout(flushTimerRef.current);
+//         flushTimerRef.current = null;
+//       }
+//     };
+//   }, []);
+
+//   // Initialize Yjs document and WebSocket provider
+//   useEffect(() => {
+//     if (!sessionId || !wsToken) return;
+
+//     const initYjs = async () => {
+//       try {
+//         const ydoc = new Y.Doc();
+//         yDocRef.current = ydoc;
+
+//         const baseWs = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
+//         const url = `${baseWs}/yjs`;
+
+//         const provider = new WebsocketProvider(
+//           url,
+//           sessionId,
+//           ydoc,
+//           {
+//             WebSocketPolyfill: WebSocket,
+//             params: {
+//               token: wsToken,
+//               isStreamer: true,
+//               allowViewersToDraw,
+//               roomCode,
+//               userId: sessionInfo?.streamerId,
+//               userName: sessionInfo?.streamerName,
+//             }
+//           }
+//         );
+
+//         yProviderRef.current = provider;
+
+//         const yWhiteboard = ydoc.getArray('whiteboard');
+//         yWhiteboardRef.current = yWhiteboard;
+
+//         const ySettings = ydoc.getMap('room_settings');
+//         ySettingsRef.current = ySettings;
+
+//         provider.awareness.setLocalState({
+//           userId: sessionInfo?.streamerId || 'streamer',
+//           userName: sessionInfo?.streamerName || 'Streamer',
+//           role: 'STREAMER',
+//           isStreamer: true,
+//           color,
+//           tool,
+//           cursor: null
+//         });
+
+//         provider.awareness.on('change', () => {
+//           const states = Array.from(provider.awareness.getStates().entries());
+//           const participantsList = states
+//             .map(([clientId, state]) => ({
+//               clientId,
+//               ...state
+//             }))
+//             .filter(p => p.userId);
+
+//           setParticipants(participantsList);
+//         });
+
+//         provider.on('sync', (isSynced) => {
+//           setIsConnected(isSynced);
+//           if (isSynced) loadWhiteboardState();
+//         });
+
+//         yUndoManagerRef.current = new Y.UndoManager(yWhiteboard, {
+//           captureTimeout: 100,
+//           trackedOrigins: new Set([ydoc.clientID])
+//         });
+
+//         new IndexeddbPersistence(`whiteboard-${sessionId}`, ydoc);
+
+//       } catch (error) {
+//         console.error('Failed to initialize Yjs:', error);
+//         toast.error('Failed to connect to whiteboard server');
+//       }
+//     };
+
+//     initYjs();
+
+//     return () => {
+//       if (yProviderRef.current) {
+//         yProviderRef.current.disconnect();
+//         yProviderRef.current.destroy();
+//       }
+//       if (yDocRef.current) {
+//         yDocRef.current.destroy();
+//       }
+//       yProviderRef.current = null;
+//       yDocRef.current = null;
+//       yWhiteboardRef.current = null;
+//       ySettingsRef.current = null;
+//       yUndoManagerRef.current = null;
+//     };
+//   }, [sessionId, roomCode, wsToken, allowViewersToDraw, sessionInfo, color, tool, loadWhiteboardState]);
+
+//   // Initialize canvas
+//   useEffect(() => {
+//     if (!canvasRef.current || !backgroundCanvasRef.current || !containerRef.current) return;
+
+//     const canvas = canvasRef.current;
+//     const bgCanvas = backgroundCanvasRef.current;
+//     const container = containerRef.current;
+
+//     const resizeCanvas = () => {
+//       const containerWidth = container.clientWidth;
+//       const containerHeight = container.clientHeight;
+
+//       canvas.width = containerWidth;
+//       canvas.height = containerHeight;
+//       bgCanvas.width = containerWidth;
+//       bgCanvas.height = containerHeight;
+
+//       const ctx = canvas.getContext('2d');
+//       const bgCtx = bgCanvas.getContext('2d');
+
+//       ctxRef.current = ctx;
+//       bgCtxRef.current = bgCtx;
+
+//       ctx.lineCap = 'round';
+//       ctx.lineJoin = 'round';
+
+//       if (yWhiteboardRef.current) {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         redrawCanvas(state.objects || []);
+//       }
+//     };
+
+//     resizeCanvas();
+
+//     const resizeObserver = new ResizeObserver(() => resizeCanvas());
+//     resizeObserver.observe(container);
+
+//     return () => resizeObserver.disconnect();
+//   }, [redrawCanvas]);
+
+//   // =========================
+//   // ✅ Mouse Events (optimized)
+//   // =========================
+//   const handleMouseDown = useCallback((e) => {
+//     e.preventDefault();
+//     if (!canvasRef.current) return;
+
+//     const rect = canvasRef.current.getBoundingClientRect();
+//     const scaleX = canvasRef.current.width / rect.width;
+//     const scaleY = canvasRef.current.height / rect.height;
+
+//     const x = (e.clientX - rect.left) * scaleX;
+//     const y = (e.clientY - rect.top) * scaleY;
+
+//     // Pan tool (Alt key or middle mouse)
+//     if (tool === 'pan' || e.altKey || e.button === 1) {
+//       setIsPanning(true);
+//       lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+//       canvasRef.current.style.cursor = 'grabbing';
+//       return;
+//     }
+
+//     setIsDrawing(true);
+
+//     const transformedX = (x - canvasOffsetRef.current.x) / currentZoom;
+//     const transformedY = (y - canvasOffsetRef.current.y) / currentZoom;
+
+//     lastPointRef.current = { x: transformedX, y: transformedY };
+//     lastLocalPointRef.current = { x: transformedX, y: transformedY };
+
+//     if (tool === 'pen' || tool === 'eraser') {
+//       const strokeId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+//       currentStrokeIdRef.current = strokeId;
+//       strokeBufferRef.current = [];
+
+//       addObject({
+//         id: strokeId,
+//         type: tool,
+//         points: [{ x: transformedX, y: transformedY }],
+//         color: tool === 'eraser' ? backgroundColor : color,
+//         strokeWidth,
+//         opacity,
+//         timestamp: Date.now()
+//       });
+
+//       // dot for click-without-move
+//       drawStrokeSegment(
+//         { x: transformedX, y: transformedY },
+//         { x: transformedX + 0.01, y: transformedY + 0.01 },
+//         tool
+//       );
+//     }
+//   }, [tool, currentZoom, addObject, backgroundColor, color, strokeWidth, opacity, drawStrokeSegment]);
+
+//   const handleMouseMove = useCallback((e) => {
+//     if (!canvasRef.current) return;
+
+//     if (isPanning) {
+//       const dx = e.clientX - lastPanPointRef.current.x;
+//       const dy = e.clientY - lastPanPointRef.current.y;
+//       canvasOffsetRef.current.x += dx;
+//       canvasOffsetRef.current.y += dy;
+//       lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+
+//       if (yWhiteboardRef.current) {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         redrawCanvas(state.objects || []);
+//       }
+//       return;
+//     }
+
+//     if (!isDrawing) return;
+//     if (tool !== 'pen' && tool !== 'eraser') return;
+
+//     const rect = canvasRef.current.getBoundingClientRect();
+//     const scaleX = canvasRef.current.width / rect.width;
+//     const scaleY = canvasRef.current.height / rect.height;
+
+//     const x = (e.clientX - rect.left) * scaleX;
+//     const y = (e.clientY - rect.top) * scaleY;
+
+//     const transformedX = (x - canvasOffsetRef.current.x) / currentZoom;
+//     const transformedY = (y - canvasOffsetRef.current.y) / currentZoom;
+
+//     const prev = lastLocalPointRef.current || lastPointRef.current;
+//     const next = { x: transformedX, y: transformedY };
+
+//     // skip micro moves
+//     const dist = prev ? Math.hypot(next.x - prev.x, next.y - prev.y) : 999;
+//     if (dist < 2) return;
+
+//     // ✅ 1) smooth local draw
+//     if (prev) drawStrokeSegment(prev, next, tool);
+
+//     // ✅ 2) buffer points (throttled Yjs)
+//     strokeBufferRef.current.push(next);
+//     scheduleFlush();
+
+//     lastLocalPointRef.current = next;
+//     lastPointRef.current = next;
+//   }, [isDrawing, isPanning, tool, currentZoom, redrawCanvas, drawStrokeSegment, scheduleFlush]);
+
+//   const handleMouseUp = useCallback(() => {
+//     setIsDrawing(false);
+//     setIsPanning(false);
+
+//     // ✅ flush final buffered points
+//     flushStrokeToYjs(true);
+
+//     currentStrokeIdRef.current = null;
+//     strokeBufferRef.current = [];
+//     lastLocalPointRef.current = null;
+
+//     if (canvasRef.current) {
+//       canvasRef.current.style.cursor = tool === 'pan' ? 'grab' : 'crosshair';
+//     }
+//   }, [tool, flushStrokeToYjs]);
+
+//   const handleMouseLeave = useCallback(() => {
+//     setIsDrawing(false);
+//     setIsPanning(false);
+
+//     flushStrokeToYjs(true);
+//     currentStrokeIdRef.current = null;
+//     strokeBufferRef.current = [];
+//     lastLocalPointRef.current = null;
+//   }, [flushStrokeToYjs]);
+
+//   // Handle wheel for zoom (memoized)
+//   const handleWheel = useCallback((e) => {
+//     e.preventDefault();
+//     if (!canvasRef.current) return;
+
+//     const rect = canvasRef.current.getBoundingClientRect();
+//     const mouseX = e.clientX - rect.left;
+//     const mouseY = e.clientY - rect.top;
+
+//     const scaleFactor = e.deltaY > 0 ? 0.9 : 1.1;
+//     const newZoom = Math.max(0.5, Math.min(3, currentZoom * scaleFactor));
+
+//     const zoomChange = newZoom / currentZoom;
+
+//     canvasOffsetRef.current.x = mouseX - (mouseX - canvasOffsetRef.current.x) * zoomChange;
+//     canvasOffsetRef.current.y = mouseY - (mouseY - canvasOffsetRef.current.y) * zoomChange;
+
+//     setCurrentZoom(newZoom);
+
+//     if (yWhiteboardRef.current) {
+//       const state = yWhiteboardRef.current.toArray()[0] || {};
+//       redrawCanvas(state.objects || []);
+//     }
+//   }, [currentZoom, redrawCanvas]);
+
+//   // Zoom controls (memoized)
+//   const handleZoomIn = useCallback(() => {
+//     setCurrentZoom(prev => Math.min(prev + 0.1, 3));
+//     if (yWhiteboardRef.current) {
+//       const state = yWhiteboardRef.current.toArray()[0] || {};
+//       redrawCanvas(state.objects || []);
+//     }
+//   }, [redrawCanvas]);
+
+//   const handleZoomOut = useCallback(() => {
+//     setCurrentZoom(prev => Math.max(prev - 0.1, 0.5));
+//     if (yWhiteboardRef.current) {
+//       const state = yWhiteboardRef.current.toArray()[0] || {};
+//       redrawCanvas(state.objects || []);
+//     }
+//   }, [redrawCanvas]);
+
+//   const handleZoomReset = useCallback(() => {
+//     setCurrentZoom(1);
+//     canvasOffsetRef.current = { x: 0, y: 0 };
+
+//     if (yWhiteboardRef.current) {
+//       const state = yWhiteboardRef.current.toArray()[0] || {};
+//       redrawCanvas(state.objects || []);
+//     }
+//   }, [redrawCanvas]);
+
+//   // Clear whiteboard (memoized)
+//   const handleClearWhiteboard = useCallback(() => {
+//     if (!yWhiteboardRef.current || !yDocRef.current) return;
+
+//     if (window.confirm('Clear entire whiteboard?')) {
+//       const emptyState = {
+//         version: '1.0.0',
+//         objects: [],
+//         background: backgroundColor,
+//         clearedAt: new Date().toISOString(),
+//         clearedBy: sessionInfo?.streamerId
+//       };
+
+//       yDocRef.current.transact(() => {
+//         yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
+//         yWhiteboardRef.current.insert(0, [emptyState]);
+//       }, 'drawing');
+
+//       redrawCanvas([]);
+//       toast.success('Whiteboard cleared');
+//     }
+//   }, [backgroundColor, sessionInfo, redrawCanvas]);
+
+//   // Export as image (memoized)
+//   const handleExport = useCallback(() => {
+//     if (!canvasRef.current || !backgroundCanvasRef.current) return;
+
+//     const canvas = canvasRef.current;
+//     const bgCanvas = backgroundCanvasRef.current;
+
+//     const exportCanvas = document.createElement('canvas');
+//     exportCanvas.width = canvas.width;
+//     exportCanvas.height = canvas.height;
+
+//     const exportCtx = exportCanvas.getContext('2d');
+
+//     exportCtx.drawImage(bgCanvas, 0, 0);
+//     exportCtx.drawImage(canvas, 0, 0);
+
+//     const link = document.createElement('a');
+//     link.download = `whiteboard-${sessionId}-${Date.now()}.png`;
+//     link.href = exportCanvas.toDataURL('image/png');
+//     link.click();
+
+//     toast.success('Whiteboard exported');
+//   }, [sessionId]);
+
+//   // Undo/Redo (memoized)
+//   const handleUndo = useCallback(() => {
+//     if (yUndoManagerRef.current) {
+//       yUndoManagerRef.current.undo();
+//       // state change will sync; optional: loadWhiteboardState();
+//     }
+//   }, []);
+
+//   const handleRedo = useCallback(() => {
+//     if (yUndoManagerRef.current) {
+//       yUndoManagerRef.current.redo();
+//       // optional: loadWhiteboardState();
+//     }
+//   }, []);
+
+//   return (
+//     <div
+//       ref={containerRef}
+//       className={`absolute inset-0 z-20 w-full h-full bg-gray-900 overflow-hidden ${
+//         isActive ? "block" : "hidden"
+//       }`}
+//       onWheel={handleWheel}
+//     >
+//       {/* Background canvas */}
+//       <canvas
+//         ref={backgroundCanvasRef}
+//         className="absolute top-0 left-0 w-full h-full"
+//         style={{ pointerEvents: 'none' }}
+//       />
+
+//       {/* Main drawing canvas */}
+//       <canvas
+//         ref={canvasRef}
+//         className={`absolute top-0 left-0 w-full h-full ${
+//           tool === 'pan' ? 'cursor-grab' : 'cursor-crosshair'
+//         }`}
+//         onMouseDown={handleMouseDown}
+//         onMouseMove={handleMouseMove}
+//         onMouseUp={handleMouseUp}
+//         onMouseLeave={handleMouseLeave}
+//         onContextMenu={(e) => e.preventDefault()}
+//       />
+
+//       {/* Floating Controls - Always Visible */}
+//       <div className="absolute top-2 left-1/2 transform -translate-x-1/2 z-10">
+//         <div className="bg-gray-800/95 backdrop-blur-sm rounded-lg shadow-lg border border-gray-700 p-2 flex items-center space-x-2">
+//           {/* Connection status */}
+//           <div className={`w-2 h-2 rounded-full ${
+//             isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'
+//           }`} />
+//           <span className="text-white text-xs mr-2">
+//             {isConnected ? 'Connected' : 'Disconnected'}
+//           </span>
+
+//           {/* Divider */}
+//           <div className="w-px h-6 bg-gray-600"></div>
+
+//           {/* Drawing tools */}
+//           <div className="flex items-center space-x-1">
+//             <button
+//               onClick={() => setTool('pen')}
+//               className={`p-1.5 rounded-lg transition-colors ${
+//                 tool === 'pen' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+//               }`}
+//               title="Pen"
+//             >
+//               <FaPaintBrush className="w-4 h-4" />
+//             </button>
+
+//             <button
+//               onClick={() => setTool('eraser')}
+//               className={`p-1.5 rounded-lg transition-colors ${
+//                 tool === 'eraser' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+//               }`}
+//               title="Eraser"
+//             >
+//               <FaEraser className="w-4 h-4" />
+//             </button>
+
+//             <button
+//               onClick={() => setTool('line')}
+//               className={`p-1.5 rounded-lg transition-colors ${
+//                 tool === 'line' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+//               }`}
+//               title="Line"
+//             >
+//               <FiMinus className="w-4 h-4" />
+//             </button>
+
+//             <button
+//               onClick={() => setTool('rectangle')}
+//               className={`p-1.5 rounded-lg transition-colors ${
+//                 tool === 'rectangle' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+//               }`}
+//               title="Rectangle"
+//             >
+//               <FiSquare className="w-4 h-4" />
+//             </button>
+
+//             <button
+//               onClick={() => setTool('circle')}
+//               className={`p-1.5 rounded-lg transition-colors ${
+//                 tool === 'circle' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+//               }`}
+//               title="Circle"
+//             >
+//               <FiCircle className="w-4 h-4" />
+//             </button>
+
+//             <button
+//               onClick={() => setTool('pan')}
+//               className={`p-1.5 rounded-lg transition-colors ${
+//                 tool === 'pan' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+//               }`}
+//               title="Pan (Alt + Drag)"
+//             >
+//               <FiMove className="w-4 h-4" />
+//             </button>
+//           </div>
+
+//           {/* Divider */}
+//           <div className="w-px h-6 bg-gray-600"></div>
+
+//           {/* Color picker */}
+//           <input
+//             type="color"
+//             value={color}
+//             onChange={(e) => setColor(e.target.value)}
+//             className="w-7 h-7 rounded cursor-pointer border border-gray-600"
+//             title="Color"
+//           />
+
+//           <select
+//             value={strokeWidth}
+//             onChange={(e) => setStrokeWidth(Number(e.target.value))}
+//             className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
+//             title="Stroke Width"
+//           >
+//             <option value="1">1px</option>
+//             <option value="2">2px</option>
+//             <option value="3">3px</option>
+//             <option value="5">5px</option>
+//             <option value="8">8px</option>
+//           </select>
+
+//           <select
+//             value={opacity}
+//             onChange={(e) => setOpacity(Number(e.target.value))}
+//             className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
+//             title="Opacity"
+//           >
+//             <option value="1">100%</option>
+//             <option value="0.8">80%</option>
+//             <option value="0.6">60%</option>
+//             <option value="0.4">40%</option>
+//           </select>
+
+//           {/* Divider */}
+//           <div className="w-px h-6 bg-gray-600"></div>
+
+//           {/* Zoom controls */}
+//           <button
+//             onClick={handleZoomOut}
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//             title="Zoom Out"
+//           >
+//             <FiMinusCircle className="w-4 h-4 text-white" />
+//           </button>
+//           <span className="text-white text-sm min-w-[50px] text-center font-medium">
+//             {Math.round(currentZoom * 100)}%
+//           </span>
+//           <button
+//             onClick={handleZoomIn}
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//             title="Zoom In"
+//           >
+//             <FiPlus className="w-4 h-4 text-white" />
+//           </button>
+//           <button
+//             onClick={handleZoomReset}
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//             title="Reset Zoom"
+//           >
+//             <FiRefreshCcw className="w-4 h-4 text-white" />
+//           </button>
+
+//           {/* Divider */}
+//           <div className="w-px h-6 bg-gray-600"></div>
+
+//           {/* Undo/Redo */}
+//           <button
+//             onClick={handleUndo}
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//             title="Undo"
+//           >
+//             <FiRefreshCcw className="w-4 h-4 text-white" />
+//           </button>
+//           <button
+//             onClick={handleRedo}
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//             title="Redo"
+//           >
+//             <FiRefreshCcw className="w-4 h-4 text-white transform scale-x-[-1]" />
+//           </button>
+
+//           {/* Clear/Export */}
+//           <button
+//             onClick={handleClearWhiteboard}
+//             className="p-1.5 bg-red-900 hover:bg-red-800 rounded-lg transition-colors"
+//             title="Clear Whiteboard"
+//           >
+//             <FiTrash2 className="w-4 h-4 text-white" />
+//           </button>
+//           <button
+//             onClick={handleExport}
+//             className="p-1.5 bg-blue-900 hover:bg-blue-800 rounded-lg transition-colors"
+//             title="Export as PNG"
+//           >
+//             <FiDownload className="w-4 h-4 text-white" />
+//           </button>
+
+//           {/* Grid toggle */}
+//           <button
+//             onClick={() => setIsGridVisible(!isGridVisible)}
+//             className={`p-1.5 rounded-lg transition-colors ${
+//               isGridVisible ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+//             }`}
+//             title="Toggle Grid"
+//           >
+//             <FiSquare className="w-4 h-4" />
+//           </button>
+
+//           {/* Divider */}
+//           <div className="w-px h-6 bg-gray-600"></div>
+
+//           {/* Close button */}
+//           <button
+//             onClick={onClose}
+//             className="p-1.5 bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+//             title="Close Whiteboard"
+//           >
+//             <FiX className="w-4 h-4 text-white" />
+//           </button>
+//         </div>
+//       </div>
+
+//       {/* Bottom Info Bar */}
+//       <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
+//         <div className="flex items-center space-x-3">
+//           <span>Tool: <span className="font-bold capitalize">{tool}</span></span>
+//           <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+//           <span>Zoom: <span className="font-bold">{Math.round(currentZoom * 100)}%</span></span>
+//           <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+//           <span>Viewers: <span className="font-bold">{participants.length}</span></span>
+//           <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+//           <span>Alt+Click to pan</span>
+//         </div>
+//       </div>
+
+//       {/* Viewers count in top right */}
+//       <div className="absolute top-2 right-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
+//         <div className="flex items-center space-x-2">
+//           <span>{participants.length} active {participants.length === 1 ? 'viewer' : 'viewers'}</span>
+//           {participants.map((p) => (
+//             <div
+//               key={p.clientId}
+//               className="w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-medium"
+//               title={`${p.userName || 'User'}`}
+//             >
+//               {p.userName?.charAt(0) || 'U'}
+//             </div>
+//           ))}
+//         </div>
+//       </div>
+
+//       {/* Panning indicator */}
+//       {isPanning && (
+//         <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/70 text-white px-4 py-2 rounded-lg backdrop-blur-sm border border-gray-600">
+//           <div className="flex items-center space-x-2">
+//             <FiMove className="w-4 h-4" />
+//             <span>Panning...</span>
+//           </div>
+//         </div>
+//       )}
+
+//       {/* Drawing disabled overlay */}
+//       {!allowViewersToDraw && (
+//         <div className="absolute bottom-2 right-2 bg-yellow-900/70 text-yellow-200 px-3 py-1.5 rounded-lg text-xs backdrop-blur-sm border border-yellow-600/30">
+//           Viewers cannot draw
+//         </div>
+//       )}
+//     </div>
+//   );
+// }, (prevProps, nextProps) => {
+//   if (prevProps.sessionId !== nextProps.sessionId) return false;
+//   if (prevProps.roomCode !== nextProps.roomCode) return false;
+//   if (prevProps.wsToken !== nextProps.wsToken) return false;
+//   if (prevProps.isActive !== nextProps.isActive) return false;
+//   if (prevProps.allowViewersToDraw !== nextProps.allowViewersToDraw) return false;
+//   if (prevProps.mainScreenMode !== nextProps.mainScreenMode) return false;
+//   if (prevProps.compact !== nextProps.compact) return false;
+
+//   if (prevProps.sessionInfo?.streamerId !== nextProps.sessionInfo?.streamerId) return false;
+//   if (prevProps.sessionInfo?.streamerName !== nextProps.sessionInfo?.streamerName) return false;
+
+//   return true;
+// });
+
+// StreamerWhiteboard.displayName = 'StreamerWhiteboard';
+
+// export default StreamerWhiteboard;
+
+
+
+
+//badhya chal rha hai
+// import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
+// import * as Y from 'yjs';
+// import { WebsocketProvider } from 'y-websocket';
+// import { IndexeddbPersistence } from 'y-indexeddb';
+
+// // Drawing tools
+// import { 
+//   FiPenTool, 
+//   FiSquare, 
+//   FiCircle, 
+//   FiMinus, 
+//   FiType, 
+//   FiDelete,
+//   FiDownload,
+//   FiRefreshCcw,
+//   FiTrash2,
+//   FiMousePointer,
+//   FiMove,
+//   FiPlus,
+//   FiMinusCircle,
+//   FiX
+// } from 'react-icons/fi';
+// import { FaEraser, FaPaintBrush } from 'react-icons/fa';
+// import { toast } from 'react-toastify';
+
+// // ✅ Memoized StreamerWhiteboard component with custom comparison
+// const StreamerWhiteboard = memo(({
+//   sessionId,
+//   roomCode,
+//   wsToken,
+//   sessionInfo,
+//   isActive,
+//   onClose,
+//   allowViewersToDraw = true,
+//   mainScreenMode = false,
+//   compact = false
+// }) => {
+//   // Canvas refs
+//   const canvasRef = useRef(null);
+//   const backgroundCanvasRef = useRef(null);
+//   const ctxRef = useRef(null);
+//   const bgCtxRef = useRef(null);
+//   const containerRef = useRef(null);
+  
+//   // Yjs refs
+//   const yDocRef = useRef(null);
+//   const yProviderRef = useRef(null);
+//   const yWhiteboardRef = useRef(null);
+//   const ySettingsRef = useRef(null);
+//   const yUndoManagerRef = useRef(null);
+  
+//   // State
+//   const [isDrawing, setIsDrawing] = useState(false);
+//   const [tool, setTool] = useState('pen');
+//   const [color, setColor] = useState('#000000');
+//   const [strokeWidth, setStrokeWidth] = useState(2);
+//   const [opacity, setOpacity] = useState(1);
+//   const [currentZoom, setCurrentZoom] = useState(1);
+//   const [isConnected, setIsConnected] = useState(false);
+//   const [participants, setParticipants] = useState([]);
+//   const [isLocalDrawing, setIsLocalDrawing] = useState(false);
+//   const [backgroundColor, setBackgroundColor] = useState('#ffffff');
+//   const [isGridVisible, setIsGridVisible] = useState(false);
+//   const [isPanning, setIsPanning] = useState(false);
+//   const [showControls, setShowControls] = useState(!compact);
+  
+//   // Canvas state
+//   const lastPointRef = useRef({ x: 0, y: 0 });
+//   const canvasOffsetRef = useRef({ x: 0, y: 0 });
+//   const lastPanPointRef = useRef({ x: 0, y: 0 });
+  
+//   // Draw grid (memoized)
+//   const drawGrid = useCallback((ctx, width, height) => {
+//     ctx.save();
+//     ctx.strokeStyle = '#e0e0e0';
+//     ctx.lineWidth = 0.5;
+//     ctx.globalAlpha = 0.3;
+    
+//     const gridSize = 20;
+    
+//     // Vertical lines
+//     for (let x = 0; x <= width; x += gridSize) {
+//       ctx.beginPath();
+//       ctx.moveTo(x, 0);
+//       ctx.lineTo(x, height);
+//       ctx.stroke();
+//     }
+    
+//     // Horizontal lines
+//     for (let y = 0; y <= height; y += gridSize) {
+//       ctx.beginPath();
+//       ctx.moveTo(0, y);
+//       ctx.lineTo(width, y);
+//       ctx.stroke();
+//     }
+    
+//     ctx.restore();
+//   }, []);
+  
+//   // Draw individual object (memoized)
+//   const drawObject = useCallback((ctx, obj) => {
+//     ctx.save();
+//     ctx.strokeStyle = obj.color || '#000000';
+//     ctx.fillStyle = obj.fillColor || 'transparent';
+//     ctx.lineWidth = (obj.strokeWidth || 2) / currentZoom;
+//     ctx.globalAlpha = obj.opacity || 1;
+    
+//     switch (obj.type) {
+//       case 'pen':
+//       case 'pencil':
+//         ctx.beginPath();
+//         ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//         obj.points.forEach(point => {
+//           ctx.lineTo(point.x, point.y);
+//         });
+//         ctx.stroke();
+//         break;
+        
+//       case 'line':
+//         ctx.beginPath();
+//         ctx.moveTo(obj.x1, obj.y1);
+//         ctx.lineTo(obj.x2, obj.y2);
+//         ctx.stroke();
+//         break;
+        
+//       case 'rectangle':
+//         if (obj.fillColor) {
+//           ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
+//         }
+//         ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
+//         break;
+        
+//       case 'circle':
+//         ctx.beginPath();
+//         ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
+//         if (obj.fillColor) {
+//           ctx.fill();
+//         }
+//         ctx.stroke();
+//         break;
+        
+//       case 'text':
+//         ctx.font = `${obj.fontSize || 16}px Arial`;
+//         ctx.fillStyle = obj.color;
+//         ctx.fillText(obj.text, obj.x, obj.y);
+//         break;
+        
+//       case 'eraser':
+//         ctx.save();
+//         ctx.globalCompositeOperation = 'destination-out';
+//         ctx.beginPath();
+//         ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//         obj.points.forEach(point => {
+//           ctx.lineTo(point.x, point.y);
+//         });
+//         ctx.stroke();
+//         ctx.restore();
+//         break;
+//     }
+    
+//     ctx.restore();
+//   }, [currentZoom]);
+  
+//   // Redraw canvas from objects (memoized)
+//   const redrawCanvas = useCallback((objects) => {
+//     if (!ctxRef.current || !bgCtxRef.current) return;
+    
+//     const ctx = ctxRef.current;
+//     const bgCtx = bgCtxRef.current;
+//     const canvas = canvasRef.current;
+    
+//     // Clear canvases
+//     ctx.clearRect(0, 0, canvas.width, canvas.height);
+//     bgCtx.clearRect(0, 0, canvas.width, canvas.height);
+    
+//     // Draw background
+//     bgCtx.fillStyle = backgroundColor;
+//     bgCtx.fillRect(0, 0, canvas.width, canvas.height);
+    
+//     // Draw grid if visible
+//     if (isGridVisible) {
+//       drawGrid(bgCtx, canvas.width, canvas.height);
+//     }
+    
+//     // Apply zoom and pan
+//     ctx.save();
+//     ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//     ctx.scale(currentZoom, currentZoom);
+    
+//     // Draw all objects
+//     objects.forEach(obj => {
+//       drawObject(ctx, obj);
+//     });
+    
+//     ctx.restore();
+//   }, [backgroundColor, isGridVisible, currentZoom, drawGrid, drawObject]);
+  
+//   // Load whiteboard state from Yjs (memoized)
+//   const loadWhiteboardState = useCallback(() => {
+//     if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return;
+    
+//     try {
+//       const state = yWhiteboardRef.current.toArray()[0] || {};
+      
+//       // Set background color
+//       if (state.background) {
+//         setBackgroundColor(state.background);
+//       }
+      
+//       // Load drawings
+//       if (state.objects && Array.isArray(state.objects)) {
+//         redrawCanvas(state.objects);
+//       }
+      
+//     } catch (error) {
+//       console.error('Error loading whiteboard state:', error);
+//     }
+//   }, [redrawCanvas]);
+  
+//   // Add object to Yjs document (memoized)
+// const addObject = useCallback((obj) => {
+//   if (!yWhiteboardRef.current || !yDocRef.current) return;
+
+//   setIsLocalDrawing(true);
+  
+//   try {
+//     // ✅ Use transaction for atomic updates
+//     yDocRef.current.transact(() => {
+//       const currentState = yWhiteboardRef.current.toArray()[0] || {
+//         version: '1.0.0',
+//         objects: [],
+//         background: backgroundColor,
+//         createdAt: new Date().toISOString()
+//       };
+      
+//       const updatedState = {
+//         ...currentState,
+//         objects: [...(currentState.objects || []), obj],
+//         updatedBy: sessionInfo?.streamerId,
+//         updatedAt: new Date().toISOString()
+//       };
+      
+//       if (yWhiteboardRef.current.length === 0) {
+//         yWhiteboardRef.current.insert(0, [updatedState]);
+//       } else {
+//         yWhiteboardRef.current.delete(0, 1);
+//         yWhiteboardRef.current.insert(0, [updatedState]);
+//       }
+//     });
+//   } catch (error) {
+//     console.error('Error adding object:', error);
+//   } finally {
+//     setIsLocalDrawing(false);
+//   }
+// }, [backgroundColor, sessionInfo]);
+//   // Initialize Yjs document and WebSocket provider
+//   useEffect(() => {
+//     if (!sessionId || !wsToken) return;
+    
+//     const initYjs = async () => {
+//       try {
+//         // Create Yjs document
+//         const ydoc = new Y.Doc();
+//         yDocRef.current = ydoc;
+        
+//         // WebSocket URL for Yjs
+//         const baseWs = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
+
+//         // ✅ url me sirf /yjs
+//         const url = `${baseWs}/yjs`;
+
+//         // ✅ roomName = sessionId
+//         const provider = new WebsocketProvider(
+//           url,
+//           sessionId,
+//           ydoc,
+//           {
+//             WebSocketPolyfill: WebSocket,
+//             params: {
+//               token: wsToken,
+//               isStreamer: true,
+//               allowViewersToDraw,
+//               roomCode,
+//               userId: sessionInfo?.streamerId,
+//               userName: sessionInfo?.streamerName,
+//             }
+//           }
+//         );
+
+//         yProviderRef.current = provider;
+        
+//         // Get or create shared whiteboard array
+//         const yWhiteboard = ydoc.getArray('whiteboard');
+//         yWhiteboardRef.current = yWhiteboard;
+        
+//         // Get or create settings map
+//         const ySettings = ydoc.getMap('room_settings');
+//         ySettingsRef.current = ySettings;
+        
+//         // Setup awareness
+//         provider.awareness.setLocalState({
+//           userId: sessionInfo?.streamerId || 'streamer',
+//           userName: sessionInfo?.streamerName || 'Streamer',
+//           role: 'STREAMER',
+//           isStreamer: true,
+//           color: color,
+//           tool: tool,
+//           cursor: null
+//         });
+        
+//         // Listen for awareness updates
+//         provider.awareness.on('change', () => {
+//           const states = Array.from(provider.awareness.getStates().entries());
+//           const participantsList = states
+//             .map(([clientId, state]) => ({
+//               clientId,
+//               ...state
+//             }))
+//             .filter(p => p.userId);
+          
+//           setParticipants(participantsList);
+//         });
+        
+//         // Listen for Yjs sync status
+//         provider.on('sync', (isSynced) => {
+//           setIsConnected(isSynced);
+//           if (isSynced) {
+//             loadWhiteboardState();
+//           }
+//         });
+        
+//         // Setup undo manager
+//         yUndoManagerRef.current = new Y.UndoManager(yWhiteboard, {
+//           captureTimeout: 100,
+//           trackedOrigins: new Set([ydoc.clientID])
+//         });
+        
+//         // Persist to IndexedDB for offline support
+//         const indexeddbProvider = new IndexeddbPersistence(
+//           `whiteboard-${sessionId}`,
+//           ydoc
+//         );
+        
+//       } catch (error) {
+//         console.error('Failed to initialize Yjs:', error);
+//         toast.error('Failed to connect to whiteboard server');
+//       }
+//     };
+    
+//     initYjs();
+    
+//     return () => {
+//       // Cleanup Yjs resources
+//       if (yProviderRef.current) {
+//         yProviderRef.current.disconnect();
+//         yProviderRef.current.destroy();
+//       }
+//       if (yDocRef.current) {
+//         yDocRef.current.destroy();
+//       }
+//     };
+//   }, [sessionId, roomCode, wsToken, allowViewersToDraw, sessionInfo, color, tool, loadWhiteboardState]);
+  
+//   // Initialize canvas
+//   useEffect(() => {
+//     if (!canvasRef.current || !backgroundCanvasRef.current || !containerRef.current) return;
+    
+//     const canvas = canvasRef.current;
+//     const bgCanvas = backgroundCanvasRef.current;
+//     const container = containerRef.current;
+    
+//     const resizeCanvas = () => {
+//       const containerWidth = container.clientWidth;
+//       const containerHeight = container.clientHeight;
+      
+//       canvas.width = containerWidth;
+//       canvas.height = containerHeight;
+//       bgCanvas.width = containerWidth;
+//       bgCanvas.height = containerHeight;
+      
+//       // Set contexts
+//       const ctx = canvas.getContext('2d');
+//       const bgCtx = bgCanvas.getContext('2d');
+      
+//       ctxRef.current = ctx;
+//       bgCtxRef.current = bgCtx;
+      
+//       // Apply initial styles
+//       ctx.lineCap = 'round';
+//       ctx.lineJoin = 'round';
+      
+//       // Redraw after resize
+//       if (yWhiteboardRef.current) {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         redrawCanvas(state.objects || []);
+//       }
+//     };
+    
+//     resizeCanvas();
+    
+//     const resizeObserver = new ResizeObserver(() => {
+//       resizeCanvas();
+//     });
+    
+//     resizeObserver.observe(container);
+    
+//     return () => {
+//       resizeObserver.disconnect();
+//     };
+//   }, [redrawCanvas]);
+  
+//   // Handle mouse events for drawing (memoized)
+//   const handleMouseDown = useCallback((e) => {
+//     e.preventDefault();
+    
+//     const rect = canvasRef.current.getBoundingClientRect();
+//     const scaleX = canvasRef.current.width / rect.width;
+//     const scaleY = canvasRef.current.height / rect.height;
+    
+//     const x = (e.clientX - rect.left) * scaleX;
+//     const y = (e.clientY - rect.top) * scaleY;
+    
+//     // Pan tool (Alt key or middle mouse)
+//     if (tool === 'pan' || e.altKey || e.button === 1) {
+//       setIsPanning(true);
+//       lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+//       canvasRef.current.style.cursor = 'grabbing';
+//       return;
+//     }
+    
+//     setIsDrawing(true);
+    
+//     const transformedX = (x - canvasOffsetRef.current.x) / currentZoom;
+//     const transformedY = (y - canvasOffsetRef.current.y) / currentZoom;
+    
+//     lastPointRef.current = { x: transformedX, y: transformedY };
+    
+//     // Start drawing based on tool
+//     if (tool === 'pen' || tool === 'eraser') {
+//       const points = [{ x: transformedX, y: transformedY }];
+      
+//       addObject({
+//         type: tool,
+//         points,
+//         color: tool === 'eraser' ? backgroundColor : color,
+//         strokeWidth,
+//         opacity,
+//         timestamp: Date.now()
+//       });
+//     }
+//   }, [tool, color, strokeWidth, opacity, currentZoom, addObject, backgroundColor]);
+  
+// const handleMouseMove = useCallback((e) => {
+//   if (isPanning) {
+//     const dx = e.clientX - lastPanPointRef.current.x;
+//     const dy = e.clientY - lastPanPointRef.current.y;
+//     canvasOffsetRef.current.x += dx;
+//     canvasOffsetRef.current.y += dy;
+//     lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+
+//     if (yWhiteboardRef.current) {
+//       const state = yWhiteboardRef.current.toArray()[0] || {};
+//       redrawCanvas(state.objects || []);
+//     }
+//     return;
+//   }
+
+//   if (!isDrawing || !yWhiteboardRef.current) return;
+
+//   // ✅ Use requestAnimationFrame for smoother performance during recording
+//   window.requestAnimationFrame(() => {
+//     const rect = canvasRef.current.getBoundingClientRect();
+//     const scaleX = canvasRef.current.width / rect.width;
+//     const scaleY = canvasRef.current.height / rect.height;
+
+//     const x = (e.clientX - rect.left) * scaleX;
+//     const y = (e.clientY - rect.top) * scaleY;
+
+//     const transformedX = (x - canvasOffsetRef.current.x) / currentZoom;
+//     const transformedY = (y - canvasOffsetRef.current.y) / currentZoom;
+
+//     const currentState = yWhiteboardRef.current.toArray()[0] || {};
+//     const objects = [...(currentState.objects || [])];
+//     const lastObject = objects[objects.length - 1];
+
+//     if (lastObject && (lastObject.type === 'pen' || lastObject.type === 'eraser')) {
+//       // ✅ Sirf tab point add karein jab mouse actually move hua ho
+//       const lastPoint = lastObject.points[lastObject.points.length - 1];
+//       const dist = Math.hypot(transformedX - lastPoint.x, transformedY - lastPoint.y);
+      
+//       if (dist < 2) return; // Bahut chote movement ko skip karein (CPU bachega)
+
+//       lastObject.points.push({ x: transformedX, y: transformedY });
+
+//       const updatedState = {
+//         ...currentState,
+//         objects,
+//         updatedAt: new Date().toISOString()
+//       };
+
+//       // ✅ Yjs Transact: Isse networking aur sync background mein efficient ho jata hai
+//       yDocRef.current.transact(() => {
+//         yWhiteboardRef.current.delete(0, 1);
+//         yWhiteboardRef.current.insert(0, [updatedState]);
+//       }, 'drawing'); 
+
+//       redrawCanvas(objects);
+//     }
+//   });
+// }, [isDrawing, isPanning, redrawCanvas, currentZoom]);
+//   const handleMouseUp = useCallback(() => {
+//     setIsDrawing(false);
+//     setIsPanning(false);
+//     canvasRef.current.style.cursor = tool === 'pan' ? 'grab' : 'crosshair';
+//   }, [tool]);
+  
+//   const handleMouseLeave = useCallback(() => {
+//     setIsDrawing(false);
+//     setIsPanning(false);
+//   }, []);
+  
+//   // Handle wheel for zoom (memoized)
+//   const handleWheel = useCallback((e) => {
+//     e.preventDefault();
+    
+//     const rect = canvasRef.current.getBoundingClientRect();
+//     const mouseX = e.clientX - rect.left;
+//     const mouseY = e.clientY - rect.top;
+    
+//     const scaleFactor = e.deltaY > 0 ? 0.9 : 1.1;
+//     const newZoom = Math.max(0.5, Math.min(3, currentZoom * scaleFactor));
+    
+//     // Adjust offset to zoom towards mouse position
+//     const zoomChange = newZoom / currentZoom;
+    
+//     canvasOffsetRef.current.x = mouseX - (mouseX - canvasOffsetRef.current.x) * zoomChange;
+//     canvasOffsetRef.current.y = mouseY - (mouseY - canvasOffsetRef.current.y) * zoomChange;
+    
+//     setCurrentZoom(newZoom);
+    
+//     // Redraw with new zoom
+//     if (yWhiteboardRef.current) {
+//       const state = yWhiteboardRef.current.toArray()[0] || {};
+//       redrawCanvas(state.objects || []);
+//     }
+//   }, [currentZoom, redrawCanvas]);
+  
+//   // Zoom controls (memoized)
+//   const handleZoomIn = useCallback(() => {
+//     setCurrentZoom(prev => Math.min(prev + 0.1, 3));
+//     if (yWhiteboardRef.current) {
+//       const state = yWhiteboardRef.current.toArray()[0] || {};
+//       redrawCanvas(state.objects || []);
+//     }
+//   }, [redrawCanvas]);
+  
+//   const handleZoomOut = useCallback(() => {
+//     setCurrentZoom(prev => Math.max(prev - 0.1, 0.5));
+//     if (yWhiteboardRef.current) {
+//       const state = yWhiteboardRef.current.toArray()[0] || {};
+//       redrawCanvas(state.objects || []);
+//     }
+//   }, [redrawCanvas]);
+  
+//   const handleZoomReset = useCallback(() => {
+//     setCurrentZoom(1);
+//     canvasOffsetRef.current = { x: 0, y: 0 };
+    
+//     if (yWhiteboardRef.current) {
+//       const state = yWhiteboardRef.current.toArray()[0] || {};
+//       redrawCanvas(state.objects || []);
+//     }
+//   }, [redrawCanvas]);
+  
+//   // Clear whiteboard (memoized)
+//   const handleClearWhiteboard = useCallback(() => {
+//     if (window.confirm('Clear entire whiteboard?')) {
+//       const emptyState = {
+//         version: '1.0.0',
+//         objects: [],
+//         background: backgroundColor,
+//         clearedAt: new Date().toISOString(),
+//         clearedBy: sessionInfo?.streamerId
+//       };
+      
+//       yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
+//       yWhiteboardRef.current.insert(0, [emptyState]);
+      
+//       redrawCanvas([]);
+//       toast.success('Whiteboard cleared');
+//     }
+//   }, [backgroundColor, sessionInfo, redrawCanvas]);
+  
+//   // Export as image (memoized)
+//   const handleExport = useCallback(() => {
+//     const canvas = canvasRef.current;
+//     const bgCanvas = backgroundCanvasRef.current;
+    
+//     // Create a combined canvas
+//     const exportCanvas = document.createElement('canvas');
+//     exportCanvas.width = canvas.width;
+//     exportCanvas.height = canvas.height;
+    
+//     const exportCtx = exportCanvas.getContext('2d');
+    
+//     // Draw background
+//     exportCtx.drawImage(bgCanvas, 0, 0);
+    
+//     // Draw drawings
+//     exportCtx.drawImage(canvas, 0, 0);
+    
+//     // Download
+//     const link = document.createElement('a');
+//     link.download = `whiteboard-${sessionId}-${Date.now()}.png`;
+//     link.href = exportCanvas.toDataURL('image/png');
+//     link.click();
+    
+//     toast.success('Whiteboard exported');
+//   }, [sessionId]);
+  
+//   // Undo/Redo (memoized)
+//   const handleUndo = useCallback(() => {
+//     if (yUndoManagerRef.current) {
+//       yUndoManagerRef.current.undo();
+//     }
+//   }, []);
+  
+//   const handleRedo = useCallback(() => {
+//     if (yUndoManagerRef.current) {
+//       yUndoManagerRef.current.redo();
+//     }
+//   }, []);
+  
+//   return (
+//     <div 
+//       ref={containerRef}
+//       className={`absolute inset-0 z-20 w-full h-full bg-gray-900 overflow-hidden ${
+//         isActive ? "block" : "hidden"
+//       }`}
+//       onWheel={handleWheel}
+//     >
+//       {/* Background canvas */}
+//       <canvas
+//         ref={backgroundCanvasRef}
+//         className="absolute top-0 left-0 w-full h-full"
+//         style={{ pointerEvents: 'none' }}
+//       />
+      
+//       {/* Main drawing canvas */}
+//       <canvas
+//         ref={canvasRef}
+//         className={`absolute top-0 left-0 w-full h-full ${
+//           tool === 'pan' ? 'cursor-grab' : 'cursor-crosshair'
+//         }`}
+//         onMouseDown={handleMouseDown}
+//         onMouseMove={handleMouseMove}
+//         onMouseUp={handleMouseUp}
+//         onMouseLeave={handleMouseLeave}
+//         onContextMenu={(e) => e.preventDefault()}
+//       />
+      
+//       {/* Floating Controls - Always Visible */}
+//       <div className="absolute top-2 left-1/2 transform -translate-x-1/2 z-10">
+//         <div className="bg-gray-800/95 backdrop-blur-sm rounded-lg shadow-lg border border-gray-700 p-2 flex items-center space-x-2">
+//           {/* Connection status */}
+//           <div className={`w-2 h-2 rounded-full ${
+//             isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'
+//           }`} />
+//           <span className="text-white text-xs mr-2">
+//             {isConnected ? 'Connected' : 'Disconnected'}
+//           </span>
+          
+//           {/* Divider */}
+//           <div className="w-px h-6 bg-gray-600"></div>
+          
+//           {/* Drawing tools */}
+//           <div className="flex items-center space-x-1">
+//             <button
+//               onClick={() => setTool('pen')}
+//               className={`p-1.5 rounded-lg transition-colors ${
+//                 tool === 'pen' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+//               }`}
+//               title="Pen"
+//             >
+//               <FaPaintBrush className="w-4 h-4" />
+//             </button>
+            
+//             <button
+//               onClick={() => setTool('eraser')}
+//               className={`p-1.5 rounded-lg transition-colors ${
+//                 tool === 'eraser' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+//               }`}
+//               title="Eraser"
+//             >
+//               <FaEraser className="w-4 h-4" />
+//             </button>
+            
+//             <button
+//               onClick={() => setTool('line')}
+//               className={`p-1.5 rounded-lg transition-colors ${
+//                 tool === 'line' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+//               }`}
+//               title="Line"
+//             >
+//               <FiMinus className="w-4 h-4" />
+//             </button>
+            
+//             <button
+//               onClick={() => setTool('rectangle')}
+//               className={`p-1.5 rounded-lg transition-colors ${
+//                 tool === 'rectangle' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+//               }`}
+//               title="Rectangle"
+//             >
+//               <FiSquare className="w-4 h-4" />
+//             </button>
+            
+//             <button
+//               onClick={() => setTool('circle')}
+//               className={`p-1.5 rounded-lg transition-colors ${
+//                 tool === 'circle' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+//               }`}
+//               title="Circle"
+//             >
+//               <FiCircle className="w-4 h-4" />
+//             </button>
+            
+//             <button
+//               onClick={() => setTool('pan')}
+//               className={`p-1.5 rounded-lg transition-colors ${
+//                 tool === 'pan' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+//               }`}
+//               title="Pan (Alt + Drag)"
+//             >
+//               <FiMove className="w-4 h-4" />
+//             </button>
+//           </div>
+          
+//           {/* Divider */}
+//           <div className="w-px h-6 bg-gray-600"></div>
+          
+//           {/* Color picker */}
+//           <input
+//             type="color"
+//             value={color}
+//             onChange={(e) => setColor(e.target.value)}
+//             className="w-7 h-7 rounded cursor-pointer border border-gray-600"
+//             title="Color"
+//           />
+          
+//           <select
+//             value={strokeWidth}
+//             onChange={(e) => setStrokeWidth(Number(e.target.value))}
+//             className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
+//             title="Stroke Width"
+//           >
+//             <option value="1">1px</option>
+//             <option value="2">2px</option>
+//             <option value="3">3px</option>
+//             <option value="5">5px</option>
+//             <option value="8">8px</option>
+//           </select>
+          
+//           <select
+//             value={opacity}
+//             onChange={(e) => setOpacity(Number(e.target.value))}
+//             className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
+//             title="Opacity"
+//           >
+//             <option value="1">100%</option>
+//             <option value="0.8">80%</option>
+//             <option value="0.6">60%</option>
+//             <option value="0.4">40%</option>
+//           </select>
+          
+//           {/* Divider */}
+//           <div className="w-px h-6 bg-gray-600"></div>
+          
+//           {/* Zoom controls */}
+//           <button
+//             onClick={handleZoomOut}
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//             title="Zoom Out"
+//           >
+//             <FiMinusCircle className="w-4 h-4 text-white" />
+//           </button>
+//           <span className="text-white text-sm min-w-[50px] text-center font-medium">
+//             {Math.round(currentZoom * 100)}%
+//           </span>
+//           <button
+//             onClick={handleZoomIn}
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//             title="Zoom In"
+//           >
+//             <FiPlus className="w-4 h-4 text-white" />
+//           </button>
+//           <button
+//             onClick={handleZoomReset}
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//             title="Reset Zoom"
+//           >
+//             <FiRefreshCcw className="w-4 h-4 text-white" />
+//           </button>
+          
+//           {/* Divider */}
+//           <div className="w-px h-6 bg-gray-600"></div>
+          
+//           {/* Undo/Redo */}
+//           <button
+//             onClick={handleUndo}
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//             title="Undo"
+//           >
+//             <FiRefreshCcw className="w-4 h-4 text-white" />
+//           </button>
+//           <button
+//             onClick={handleRedo}
+//             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//             title="Redo"
+//           >
+//             <FiRefreshCcw className="w-4 h-4 text-white transform scale-x-[-1]" />
+//           </button>
+          
+//           {/* Clear/Export */}
+//           <button
+//             onClick={handleClearWhiteboard}
+//             className="p-1.5 bg-red-900 hover:bg-red-800 rounded-lg transition-colors"
+//             title="Clear Whiteboard"
+//           >
+//             <FiTrash2 className="w-4 h-4 text-white" />
+//           </button>
+//           <button
+//             onClick={handleExport}
+//             className="p-1.5 bg-blue-900 hover:bg-blue-800 rounded-lg transition-colors"
+//             title="Export as PNG"
+//           >
+//             <FiDownload className="w-4 h-4 text-white" />
+//           </button>
+          
+//           {/* Grid toggle */}
+//           <button
+//             onClick={() => setIsGridVisible(!isGridVisible)}
+//             className={`p-1.5 rounded-lg transition-colors ${
+//               isGridVisible ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+//             }`}
+//             title="Toggle Grid"
+//           >
+//             <FiSquare className="w-4 h-4" />
+//           </button>
+          
+//           {/* Divider */}
+//           <div className="w-px h-6 bg-gray-600"></div>
+          
+//           {/* Close button */}
+//           <button
+//             onClick={onClose}
+//             className="p-1.5 bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+//             title="Close Whiteboard"
+//           >
+//             <FiX className="w-4 h-4 text-white" />
+//           </button>
+//         </div>
+//       </div>
+      
+//       {/* Bottom Info Bar */}
+//       <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
+//         <div className="flex items-center space-x-3">
+//           <span>Tool: <span className="font-bold capitalize">{tool}</span></span>
+//           <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+//           <span>Zoom: <span className="font-bold">{Math.round(currentZoom * 100)}%</span></span>
+//           <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+//           <span>Viewers: <span className="font-bold">{participants.length}</span></span>
+//           <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+//           <span>Alt+Click to pan</span>
+//         </div>
+//       </div>
+      
+//       {/* Viewers count in top right */}
+//       <div className="absolute top-2 right-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
+//         <div className="flex items-center space-x-2">
+//           <span>{participants.length} active {participants.length === 1 ? 'viewer' : 'viewers'}</span>
+//           {participants.map((p, i) => (
+//             <div
+//               key={p.clientId}
+//               className="w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-medium"
+//               title={`${p.userName || 'User'}`}
+//             >
+//               {p.userName?.charAt(0) || 'U'}
+//             </div>
+//           ))}
+//         </div>
+//       </div>
+      
+//       {/* Panning indicator */}
+//       {isPanning && (
+//         <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/70 text-white px-4 py-2 rounded-lg backdrop-blur-sm border border-gray-600">
+//           <div className="flex items-center space-x-2">
+//             <FiMove className="w-4 h-4" />
+//             <span>Panning...</span>
+//           </div>
+//         </div>
+//       )}
+      
+//       {/* Drawing disabled overlay */}
+//       {!allowViewersToDraw && (
+//         <div className="absolute bottom-2 right-2 bg-yellow-900/70 text-yellow-200 px-3 py-1.5 rounded-lg text-xs backdrop-blur-sm border border-yellow-600/30">
+//           Viewers cannot draw
+//         </div>
+//       )}
+//     </div>
+//   );
+// }, (prevProps, nextProps) => {
+//   // ✅ Custom comparison function for React.memo
+//   // Return true if props are equal (skip re-render), false if they've changed (re-render)
+  
+//   // Always re-render if these critical props change
+//   if (prevProps.sessionId !== nextProps.sessionId) return false;
+//   if (prevProps.roomCode !== nextProps.roomCode) return false;
+//   if (prevProps.wsToken !== nextProps.wsToken) return false;
+//   if (prevProps.isActive !== nextProps.isActive) return false;
+//   if (prevProps.allowViewersToDraw !== nextProps.allowViewersToDraw) return false;
+//   if (prevProps.mainScreenMode !== nextProps.mainScreenMode) return false;
+//   if (prevProps.compact !== nextProps.compact) return false;
+  
+//   // Check sessionInfo deeply (only specific fields)
+//   if (prevProps.sessionInfo?.streamerId !== nextProps.sessionInfo?.streamerId) return false;
+//   if (prevProps.sessionInfo?.streamerName !== nextProps.sessionInfo?.streamerName) return false;
+  
+//   // If all checks pass, props are equal - skip re-render
+//   return true;
+// });
+
+// // ✅ Set display name for better debugging
+// StreamerWhiteboard.displayName = 'StreamerWhiteboard';
+
+// export default StreamerWhiteboard;
 
 
 

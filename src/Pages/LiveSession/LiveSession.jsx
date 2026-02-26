@@ -145,7 +145,6 @@ const [showEndSessionRecordingModal, setShowEndSessionRecordingModal] = useState
 
 const [recorder, setRecorder] = useState(null);
 const [recordedBlob, setRecordedBlob] = useState(null);
-const [recordingChunks, setRecordingChunks] = useState([]);
 
    const [showAudioPermissionModal, setShowAudioPermissionModal] = useState(false);
   const [userInteracted, setUserInteracted] = useState(false);
@@ -165,6 +164,8 @@ const [showRequests, setShowRequests] = useState(false);
   const [showThumbnails, setShowThumbnails] = useState(false);
   const [session, setSession] = useState(null);
   const [participants, setParticipants] = useState([]);
+  const videoOnlyStreamCacheRef = useRef(new Map());
+
   const participantNameById = useMemo(() => {
   const m = new Map();
   for (const p of participants) m.set(p.userId, p.name || `User ${p.userId}`);
@@ -202,11 +203,19 @@ const [showRequests, setShowRequests] = useState(false);
   const [viewerAudios, setViewerAudios] = useState(new Map());
 const [viewerVideoRequests, setViewerVideoRequests] = useState([]);
 const [viewerCameras, setViewerCameras] = useState(new Map()); 
+const recordingChunksRef = useRef([]);
+
 const recordingAudioContextRef = useRef(null);
 const recordingDestinationRef = useRef(null);
 const speakingSourceRef = useRef(null);
 const speakingAudioContextRef = useRef(null);
 const isRecordingRef = useRef(false);
+// ✅ Recording chunks should NOT live in state (rerenders cause whiteboard lag)
+const recordingBytesRef = useRef(0);
+const lastRecUiUpdateRef = useRef(0);
+
+// Optional: UI me size dikhane ke liye (lightweight)
+const [recordingSizeBytes, setRecordingSizeBytes] = useState(0);
 
 const screenCaptureStreamRef = useRef(null);
 
@@ -299,6 +308,28 @@ const thumbnailsCount = (mediaStream ? 1 : 0) +
 // ✅ IMPORTANT (top of component):
 // const speakingAudioContextRef = useRef(null);
 // const speakingSourceRef = useRef(null); // NEW: to disconnect source cleanly
+
+const getVideoOnlyStream = useCallback((stream) => {
+  if (!stream) return null;
+
+  const track = stream.getVideoTracks?.()?.[0];
+  if (!track) return stream;
+
+  const key = track.id; // stable per track
+  const cache = videoOnlyStreamCacheRef.current;
+
+  if (cache.has(key)) return cache.get(key);
+
+  const ms = new MediaStream([track]);
+  cache.set(key, ms);
+
+  // optional: cleanup when track ends
+  track.addEventListener?.("ended", () => {
+    cache.delete(key);
+  });
+
+  return ms;
+}, []);
 
 const startStreamerSpeakingDetection = () => {
   if (!mediaStream || !socket) return;
@@ -1143,15 +1174,13 @@ const startScreenShareForParticipants = async (screenStream) => {
 
 const startMediaRecorder = (recordingStream, screenStream, micStream_UNUSED) => {
   try {
-    const videoTrack = recordingStream.getVideoTracks()[0];
-
     const mimeTypes = [
-      'video/webm;codecs=h264,opus', // 🚀 BEST: Uses GPU (Intel/Nvidia/Mobile)
-      'video/webm;codecs=vp8,opus',  // Good Balance
-      'video/webm'                   // Fallback
+      "video/webm;codecs=h264,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/webm",
     ];
 
-    let selectedMimeType = '';
+    let selectedMimeType = "";
     for (const mime of mimeTypes) {
       if (MediaRecorder.isTypeSupported(mime)) {
         selectedMimeType = mime;
@@ -1160,63 +1189,76 @@ const startMediaRecorder = (recordingStream, screenStream, micStream_UNUSED) => 
       }
     }
 
-    // ✅ 2. Optimized Bitrate (2.5 Mbps is enough for 720p)
     const options = {
-      mimeType: selectedMimeType || 'video/webm',
-      videoBitsPerSecond: 1000000, 
+      mimeType: selectedMimeType || "video/webm",
+      videoBitsPerSecond: 1000000,
       audioBitsPerSecond: 128000,
     };
 
-    // ✅ 3. Lock Resolution & FPS (Crucial for performance)
-    // if (videoTrack) {
-    //   try {
-    //     videoTrack.applyConstraints({
-    //       frameRate: { ideal: 24, max: 30 }, // 60fps causes lag, use 30
-    //       width: { ideal: 1280, max: 1280 }, // 720p is efficient
-    //       height: { ideal: 720, max: 720 },
-    //       resizeMode: "crop-and-scale"
-    //     });
-    //   } catch (e) {
-    //     console.warn('Constraint error:', e);
-    //   }
-    // }
-
     const mediaRecorder = new MediaRecorder(recordingStream, options);
-    const chunks = [];
-    setRecordingChunks(chunks);
+
+    // ✅ RESET refs (NO state writes here)
+    recordingBytesRef.current = 0;
+    lastRecUiUpdateRef.current = 0;
+
+    // (optional) keep UI state clean
+    setRecordingSizeBytes(0);
 
     mediaRecorder.ondataavailable = (event) => {
       if (event.data && event.data.size > 0) {
-        chunks.push(event.data);
-        setRecordingChunks((prev) => [...prev, event.data]);
+        // ✅ push to ref (no rerender)
+        recordingChunksRef.current.push(event.data);
+        recordingBytesRef.current += event.data.size;
+
+        // ✅ throttle UI update (lightweight)
+        const now = Date.now();
+        if (now - lastRecUiUpdateRef.current > 1500) {
+          lastRecUiUpdateRef.current = now;
+          setRecordingSizeBytes(recordingBytesRef.current);
+        }
       }
     };
 
     mediaRecorder.onstop = async () => {
-        // ... (Apka purana save logic yahan same rahega) ...
-        const blob = new Blob(chunks, { type: 'video/webm' });
+      try {
+        const blob = new Blob(recordingChunksRef.current, {
+          type: "video/webm",
+        });
+
         await uploadRecordingToServer(blob);
-        
+
+        addDebugLog(`✅ Recording saved using ${selectedMimeType || "video/webm"}`);
+      } catch (e) {
+        console.error("Recording save/upload failed:", e);
+        toast.error("Recording save failed");
+      } finally {
+        // ✅ cleanup
+        recordingChunksRef.current = [];
+        recordingBytesRef.current = 0;
+        setRecordingSizeBytes(0);
+
         if (recordingStream) {
-            recordingStream.getTracks().forEach(track => track.stop());
+          try {
+            recordingStream.getTracks().forEach((t) => t.stop());
+          } catch {}
         }
         setRecordingStream(null);
-        setRecordingChunks([]);
         setIsRecordingStopping(false);
-        addDebugLog(`✅ Recording saved using ${selectedMimeType}`);
+      }
     };
 
     mediaRecorder.onerror = (error) => {
-      console.error('MediaRecorder error:', error);
-      toast.error('Recording failed');
+      console.error("MediaRecorder error:", error);
+      toast.error("Recording failed");
       setIsRecording(false);
       stopRecordingTimer();
     };
 
-    // ✅ 4. TimeSlice = 2000ms (Relaxes the CPU)
-    mediaRecorder.start(6000);
-    setRecorder(mediaRecorder);
+    // ✅ IMPORTANT: timeslice bada karo ya remove
+    // mediaRecorder.start();       // least events (best for UI smoothness)
+    mediaRecorder.start(15000);      // safe compromise
 
+    setRecorder(mediaRecorder);
   } catch (error) {
     console.error("Failed to start recorder:", error);
     toast.error("Recording failed to start");
@@ -1487,7 +1529,7 @@ const uploadRecordingToServer = async (blob) => {
       sessionId,
       fileName,
       blob.type,
-      blob.size
+      blob.size,
     );
     
     if (!presignedData?.uploadUrl) {
@@ -6067,105 +6109,23 @@ return (
               )}
             </div>
             
-            {/* Thumbnails container */}
-            <div className="flex-1 overflow-y-auto p-3 space-y-3 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-700">
-              {/* ✅ WHITEBOARD THUMBNAIL - Only show when whiteboard is open */}
-              {showWhiteboard && (
-                <ThumbnailVideo
-                  uid="whiteboard"
-                  stream={null}
-                  userName="Whiteboard"
-                  onClick={() => {
-                    setZoomed({ type: "whiteboard", stream: null, userId: "whiteboard" });
-                    setShowPlayButton(false);
-                  }}
-                  isZoomed={zoomed?.type === "whiteboard"}
-                  videoEnabled={true}
-                  isWhiteboard={true}
-                  showWhiteboard={showWhiteboard}
-                  onCloseWhiteboard={handleCloseWhiteboard}
-                />
-              )}
-
-              {/* Streamer thumbnail */}
-              {mediaStream && (
-                <ThumbnailVideo
-                  uid="streamer"
-                  stream={mediaStream}
-                  userName="You"
-                  onClick={() => {
-                    setZoomed({ type: "streamer", stream: mediaStream, userId: user?.id });
-                    setShowPlayButton(false);
-                  }}
-                  isZoomed={zoomed?.type === "streamer"}
-                  videoEnabled={videoEnabled}
-                />
-              )}
-              
-              {/* Viewer cameras */}
-              {[...viewerCameras.entries()].map(([uid, stream]) => (
-                <ThumbnailVideo
-                  key={uid}
-                  uid={uid}
-                  stream={stream}
-                  userName={participants.find(p => p.userId === uid)?.name || `User ${uid}`}
-                  onClick={() => {
-                    setZoomed({ type: "viewer", stream, userId: uid });
-                    setShowPlayButton(false);
-                  }}
-                  isZoomed={zoomed?.type === "viewer" && zoomed.userId === uid}
-                  videoEnabled={true}
-                />
-              ))}
-              
-              {/* Screen share thumbnails */}
-              {activeScreenShare && (
-                <ThumbnailVideo
-                  uid={activeScreenShare.userId}
-                  stream={
-        activeScreenShare.stream?.getVideoTracks?.()[0]
-          ? new MediaStream([activeScreenShare.stream.getVideoTracks()[0]])
-          : activeScreenShare.stream
-      }
-                  userName={`${activeScreenShare.userName}'s Screen`}
-                  onClick={() => {
-                    setZoomed({ type: "screen", stream: activeScreenShare.stream, userId: activeScreenShare.userId });
-                    setShowPlayButton(false);
-                  }}
-                  isZoomed={zoomed?.type === "screen"}
-                  videoEnabled={true}
-                  isScreenShare={true}
-                />
-              )}
-               {viewerScreenShare?.stream && (
-    <ThumbnailVideo
-      uid={viewerScreenShare.userId}
-      stream={viewerScreenShare.stream}
-      userName={`${viewerScreenShare.userName}'s Screen`}
-      onClick={() => {
-        setZoomed({ 
-          type: "viewer-screen", 
-          stream: viewerScreenShare.stream, 
-          userId: viewerScreenShare.userId 
-        });
-        setShowPlayButton(false);
-      }}
-      isZoomed={zoomed?.type === "viewer-screen" && zoomed.userId === viewerScreenShare.userId}
-      videoEnabled={true}
-      isScreenShare={true}
-    />
-  )}
-              
-              {/* Empty state */}
-              {thumbnailsCount === 0 && (
-                <div className="flex-1 flex items-center justify-center text-gray-500 text-sm text-center p-4">
-                  <div>
-                    <FiVideoOff className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                    <p>No active streams</p>
-                  </div>
-                </div>
-              )}
-            </div>
+                 <ThumbnailsPanel
+  variant="column"
+  thumbnailsCount={thumbnailsCount}
+  setThumbnailsExpanded={setThumbnailsExpanded}
+  showWhiteboard={showWhiteboard}
+  handleCloseWhiteboard={handleCloseWhiteboard}
+  setShowPlayButton={setShowPlayButton}
+  setZoomed={setZoomed}
+  mediaStream={mediaStream}
+  videoEnabled={videoEnabled}
+  userId={user?.id}
+  viewerCameras={viewerCameras}
+  participantNameById={participantNameById}
+  activeScreenShare={activeScreenShare}
+  viewerScreenShare={viewerScreenShare}
+  zoomed={zoomed}
+/>
           </div>
 
           {/* Sidebar - Expanded (Participants/Chat) */}
@@ -6761,12 +6721,7 @@ return (
                 </span>
               )}
               
-              {/* Recording Size Indicator */}
-              {recordingChunks.length > 0 && (
-                <div className="absolute bottom-0 left-0 right-0 bg-black/50 text-[10px] py-0.5 rounded-b-2xl">
-                  {formatFileSize(recordingChunks.reduce((total, chunk) => total + chunk.size, 0))}
-                </div>
-              )}
+  
             </>
           ) : (
             <>
@@ -6830,16 +6785,7 @@ return (
                 </span>
               </div>
               
-              <div className="flex items-center space-x-2">
-                {recordingChunks.length > 0 && (
-                  <>
-                    <span className="text-gray-400">Size:</span>
-                    <span className="font-mono">
-                      {formatFileSize(recordingChunks.reduce((total, chunk) => total + chunk.size, 0))}
-                    </span>
-                  </>
-                )}
-              </div>
+              
             </div>
             
             {/* Recording Progress Bar */}
