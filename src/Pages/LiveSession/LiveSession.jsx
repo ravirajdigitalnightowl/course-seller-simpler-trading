@@ -1058,6 +1058,13 @@ const startNewScreenShareWithRecording = async () => {
 
 const startScreenShareForParticipants = async (screenStream) => {
   if (!sendTransportRef.current || !user) return;
+  // 🚫 Viewer already sharing => streamer cannot start screenshare
+if (viewerScreenShare) {
+  const name = viewerScreenShare.userName || "Viewer";
+  toast.info(`${name} is already sharing screen. Stop it first.`);
+  addDebugLog(`🚫 Blocked streamer screenshare: viewerScreenShare active (${name})`);
+  return;
+}
 
   try {
     const videoTrack = screenStream.getVideoTracks()[0];
