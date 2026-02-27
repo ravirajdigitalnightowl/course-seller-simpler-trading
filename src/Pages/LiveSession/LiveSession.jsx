@@ -3732,6 +3732,221 @@ const cleanupOnlyMicrophoneAudio = (userId) => {
   });
 };
 
+const cleanupUserOnLeft = useCallback((data) => {
+  const leftUserId = data?.userId;
+  const leftSocketId = data?.socketId;
+
+  if (!leftUserId) return;
+
+  addDebugLog(`🧹 cleanupUserOnLeft: userId=${leftUserId}, socketId=${leftSocketId || "n/a"}`);
+
+  // =========================
+  // 1) Participants + UI lists
+  // =========================
+  // ✅ USERID PRIMARY removal
+  setParticipants((prev) => prev.filter((p) => p.userId !== leftUserId));
+
+  setHandRaisedUsers((prev) => prev.filter((u) => u.userId !== leftUserId));
+
+  setSpeakingUsers((prev) => {
+    const m = new Map(prev);
+    m.delete(leftUserId);
+    return m;
+  });
+
+  setActiveSpeakers((prev) => {
+    const m = new Map(prev);
+    // values may have {userId, socketId}
+    for (const [k, v] of m.entries()) {
+      if (v?.userId === leftUserId || (leftSocketId && v?.socketId === leftSocketId)) {
+        m.delete(k);
+      }
+    }
+    return m;
+  });
+
+  setViewerAudioRequests((prev) => prev.filter((r) => r.userId !== leftUserId));
+  setViewerVideoRequests((prev) => prev.filter((r) => r.userId !== leftUserId));
+  setScreenShareRequests((prev) => prev.filter((r) => r.userId !== leftUserId));
+
+  setActiveViewerAudio((prev) => {
+    const m = new Map(prev);
+    // keys may be userId/socketId; remove both safely
+    m.delete(leftUserId);
+    if (leftSocketId) m.delete(leftSocketId);
+
+    // also remove any values matching this user
+    for (const [k, v] of m.entries()) {
+      if (v?.userId === leftUserId || (leftSocketId && v?.socketId === leftSocketId)) {
+        m.delete(k);
+      }
+    }
+    return m;
+  });
+
+  // If zoomed is on this user -> unzoom
+  setZoomed((prev) => (prev?.userId === leftUserId ? null : prev));
+
+  // =========================
+  // 2) Screen share state cleanup
+  // =========================
+  setViewerScreenShare((prev) => {
+    if (!prev) return prev;
+    if (prev.userId === leftUserId || (leftSocketId && prev.socketId === leftSocketId)) {
+      try {
+        prev.stream?.getTracks?.()?.forEach((t) => {
+          if (t.readyState === "live") t.stop();
+        });
+      } catch {}
+      return null;
+    }
+    return prev;
+  });
+
+  setActiveScreenShare((prev) => {
+    if (!prev) return prev;
+    if (prev.userId === leftUserId || (leftSocketId && prev.socketId === leftSocketId)) {
+      try {
+        prev.stream?.getTracks?.()?.forEach((t) => {
+          if (t.readyState === "live") t.stop();
+        });
+      } catch {}
+      return null;
+    }
+    return prev;
+  });
+
+  // =========================
+  // 3) Viewer camera map cleanup
+  // =========================
+  setViewerCameras((prev) => {
+    const m = new Map(prev);
+    const stream = m.get(leftUserId);
+    if (stream) {
+      try {
+        stream.getTracks().forEach((t) => {
+          if (t.readyState === "live") t.stop();
+        });
+      } catch {}
+      m.delete(leftUserId);
+    }
+    return m;
+  });
+
+  // =========================
+  // 4) Viewer audio maps + DOM audio elements cleanup
+  // =========================
+  setViewerAudios((prev) => {
+    const m = new Map(prev);
+    const stream = m.get(leftUserId);
+    if (stream) {
+      try {
+        stream.getTracks().forEach((t) => {
+          if (t.readyState === "live") t.stop();
+        });
+      } catch {}
+      m.delete(leftUserId);
+    }
+    return m;
+  });
+
+  // audioElementsRef map (if stored by userId)
+  try {
+    const el = audioElementsRef.current.get(leftUserId);
+    if (el) {
+      el.pause?.();
+      try {
+        if (el.srcObject) {
+          el.srcObject.getTracks?.()?.forEach((t) => t.stop?.());
+        }
+      } catch {}
+      el.srcObject = null;
+      el.remove?.();
+      audioElementsRef.current.delete(leftUserId);
+    }
+  } catch {}
+
+  // Remove any DOM audio elements (safe cleanup)
+  const possibleSelectors = [
+    `#viewer-mic-audio-${leftUserId}`,
+    `#audio-${leftUserId}-screen`,
+    `#audio-${leftUserId}-viewer-screen-audio`,
+    `[data-user-id="${leftUserId}"]`,
+  ];
+  possibleSelectors.forEach((sel) => {
+    try {
+      document.querySelectorAll(sel).forEach((node) => {
+        try {
+          node.pause?.();
+          if (node.srcObject) {
+            node.srcObject.getTracks?.()?.forEach((t) => t.stop?.());
+          }
+          node.srcObject = null;
+        } catch {}
+        node.remove?.();
+      });
+    } catch {}
+  });
+
+  // pendingAudioQueueRef cleanup
+  try {
+    pendingAudioQueueRef.current.delete(`mic-${leftUserId}`);
+    pendingAudioQueueRef.current.delete(`viewer-mic-${leftUserId}`);
+    pendingAudioQueueRef.current.delete(`screen-${leftUserId}`);
+    pendingAudioQueueRef.current.delete(`viewer-screen-audio-${leftUserId}`);
+    setPendingAudioStreams(new Map(pendingAudioQueueRef.current));
+  } catch {}
+
+  // =========================
+  // 5) mediasoup consumers cleanup (best-effort by appData.userId)
+  // =========================
+  try {
+    consumers.current?.forEach?.((consumer, key) => {
+      const uid =
+        consumer?.appData?.userId ||
+        consumer?.appData?.peerId ||
+        consumer?.appData?.participantId;
+
+      if (uid === leftUserId) {
+        try { consumer.close(); } catch {}
+        consumers.current.delete(key);
+      }
+    });
+  } catch {}
+
+  // =========================
+  // 6) remoteVideosRef cleanup by socketId (extra safety)
+  // =========================
+  try {
+    if (leftSocketId) {
+      const toRemove = Array.from(remoteVideosRef.current.entries()).filter(
+        ([_, video]) => video?.dataset?.socketId === leftSocketId
+      );
+
+      toRemove.forEach(([producerId, video]) => {
+        try { video.remove(); } catch {}
+        remoteVideosRef.current.delete(producerId);
+      });
+    }
+  } catch {}
+}, [
+  addDebugLog,
+  setParticipants,
+  setHandRaisedUsers,
+  setSpeakingUsers,
+  setActiveSpeakers,
+  setViewerAudioRequests,
+  setViewerVideoRequests,
+  setScreenShareRequests,
+  setActiveViewerAudio,
+  setZoomed,
+  setViewerScreenShare,
+  setActiveScreenShare,
+  setViewerCameras,
+  setViewerAudios,
+  setPendingAudioStreams,
+]);
+
 const initializeCamera = async () => {
   try {
     addDebugLog('🔄 Initializing camera with smart audio optimization...');
@@ -4087,9 +4302,29 @@ newSocket.on('recording_stopped', (data) => {
 });
 
 newSocket.on("user_left", (data) => {
-  // keep your existing cleanup, but also ensure audio element removed
-  cleanupViewerAudio(data.userId);
-  cleanupViewerMedia(data.userId); // if you already had this
+  try {
+    addDebugLog(`User left: userId=${data?.userId}, socketId=${data?.socketId || "n/a"}`);
+
+    // ✅ 1) One unified cleanup (UI + lists + maps + remote videos)
+    cleanupUserOnLeft(data);
+
+    // ✅ 2) Clean up viewer media (streams/maps etc)
+    cleanupViewerMedia?.(data?.userId);
+
+    // ✅ 3) Remove ALL remote videos for that socketId (extra safety)
+    if (data?.socketId) {
+      const toRemove = Array.from(remoteVideosRef.current.entries()).filter(
+        ([_, video]) => video?.dataset?.socketId === data.socketId
+      );
+
+      toRemove.forEach(([producerId, video]) => {
+        try { video.remove(); } catch {}
+        remoteVideosRef.current.delete(producerId);
+      });
+    }
+  } catch (e) {
+    console.error("user_left handler error:", e);
+  }
 });
 
 
@@ -4219,23 +4454,7 @@ newSocket.on('all_hands_down', () => {
       setParticipants(prev => [...prev, data]);
     });
 
-    newSocket.on('user_left', (data) => {
-      addDebugLog(`User left: ${data.userId}`);
-      setParticipants(prev => prev.filter(p => p.socketId !== data.socketId));
-      
-      // Clean up viewer media
-      cleanupViewerMedia(data.userId);
-      
-      // Clean up remote videos
-      const videoToRemove = Array.from(remoteVideosRef.current.entries())
-        .find(([_, video]) => video.dataset?.socketId === data.socketId);
-      
-      if (videoToRemove) {
-        const [producerId, video] = videoToRemove;
-        video.remove();
-        remoteVideosRef.current.delete(producerId);
-      }
-    });
+  
     // Socket event handlers mein ye add karen
 newSocket.on('chat_message', (message) => {
   addDebugLog(`Chat message from ${message.userId}`);
