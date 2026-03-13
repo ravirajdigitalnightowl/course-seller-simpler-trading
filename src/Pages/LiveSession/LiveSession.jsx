@@ -8942,17 +8942,10 @@ const createConsumer = async (currentSessionId, producerId, kind, transportId = 
 
     addDebugLog(`🎯 Creating consumer for producer: ${producerId}`);
 
-    // ✅ Stale consumer check - closed hai tो replace karo, active hai tो skip
+    // ✅ Skip if EXACT same producerId consumer already exists
     if (consumers.current.has(producerId)) {
-      const existingConsumer = consumers.current.get(producerId);
-      
-      if (!existingConsumer.closed) {
-        addDebugLog(`⚠️ Active consumer already exists for producer ${producerId}, skipping`);
-        return;
-      } else {
-        addDebugLog(`🔄 Stale/closed consumer found for producer ${producerId}, replacing...`);
-        consumers.current.delete(producerId);
-      }
+      addDebugLog(`⚠️ Already have consumer for producer ${producerId}, skipping`);
+      return;
     }
 
     socket.emit(
@@ -9006,23 +8999,6 @@ const createConsumer = async (currentSessionId, producerId, kind, transportId = 
           return;
         }
 
-        // ✅ Transport connection state check
-        const recvTransport = transports.current.get(resolvedTransportId);
-        if (recvTransport?.connectionState === 'failed') {
-          addDebugLog('❌ RecvTransport failed - recreating...');
-          try {
-            await createRecvTransport(currentSessionId);
-            resolvedTransportId = recvTransportRef.current?.id;
-            if (!resolvedTransportId) {
-              addDebugLog("❌ Failed to recreate recv transport");
-              return;
-            }
-          } catch (e) {
-            addDebugLog(`❌ Recv transport recreation failed: ${e.message}`);
-            return;
-          }
-        }
-
         socket.emit(
           "consume",
           {
@@ -9058,19 +9034,8 @@ const createConsumer = async (currentSessionId, producerId, kind, transportId = 
                 },
               });
 
-              // ✅ Store by producer ID
+              // ✅ IMPORTANT: store by PRODUCER ID so skip-check works
               consumers.current.set(producerId, consumer);
-
-              // ✅ Auto-cleanup jab consumer close ho
-              consumer.on('transportclose', () => {
-                addDebugLog(`🧹 Consumer transport closed: ${consumer.id} (producer: ${producerId})`);
-                consumers.current.delete(producerId);
-              });
-
-              consumer.on('trackended', () => {
-                addDebugLog(`🧹 Consumer track ended: ${consumer.id} (producer: ${producerId})`);
-                consumers.current.delete(producerId);
-              });
 
               addDebugLog(`✅ Consumer created: ${consumer.id} (${info.source}) for user ${info.userId}`);
 
@@ -9096,8 +9061,10 @@ const createConsumer = async (currentSessionId, producerId, kind, transportId = 
 
                 // ===== 2) VIEWER SCREEN AUDIO =====
                 else if (info.source === "viewer-screen-audio") {
+          
                   handleAudioConsumer(consumer.track, info, "viewer-screen-audio");
 
+                  // Optional: mark viewerScreenShare hasAudio (no need to keep separate audioStream here)
                   setViewerScreenShare((prev) => {
                     if (prev && prev.userId === info.userId) {
                       return { ...prev, hasAudio: true };
@@ -9133,7 +9100,6 @@ const createConsumer = async (currentSessionId, producerId, kind, transportId = 
                   addDebugLog(`ℹ️ Unhandled source: ${info.source}, kind: ${consumer.track.kind}`);
                 }
               }
-
               // Resume consumer
               socket.emit(
                 "consumer-resume",
@@ -9149,8 +9115,6 @@ const createConsumer = async (currentSessionId, producerId, kind, transportId = 
                 }
               );
             } catch (error) {
-              // ✅ Consumer creation fail hone par map se cleanup
-              consumers.current.delete(producerId);
               addDebugLog(`❌ Error creating consumer: ${error.message}`);
               console.error("Consumer creation error:", error);
             }
@@ -11937,6 +11901,29 @@ const handleViewerVideoResponse = useCallback((requesterSocketId, allow) => {
     
     return { hasVideo, hasAudio };
   }, [mediaStream]);
+
+
+  // Jab viewerScreenShare aaye -> auto zoom karo
+useEffect(() => {
+  if (!viewerScreenShare?.stream) return;
+
+  setZoomed(prev => {
+    // Agar already viewer-screen zoomed hai same user ka -> stream update karo
+    if (prev?.type === "viewer-screen" && prev?.userId === viewerScreenShare.userId) {
+      return { ...prev, stream: viewerScreenShare.stream };
+    }
+    
+    // Agar kuch aur zoomed nahi hai ya viewer-screen naya aaya -> zoom set karo
+    return {
+      type: "viewer-screen",
+      stream: viewerScreenShare.stream,
+      userId: viewerScreenShare.userId
+    };
+  });
+
+  addDebugLog(`🖥️ Auto-zoomed to viewer screen: ${viewerScreenShare.userId}`);
+
+}, [viewerScreenShare?.stream, viewerScreenShare?.userId]);
 
 useEffect(() => {
   if (!isMobile) return;
