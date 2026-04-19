@@ -775,7 +775,7 @@ const LiveClassesModal = ({ course, onClose, onSuccess }) => {
   }, []);
 
   const getAuthToken = () => {
-    return localStorage.getItem('token');
+    return localStorage.getItem('trainertoken');
   };
 
   // Format date for datetime-local input

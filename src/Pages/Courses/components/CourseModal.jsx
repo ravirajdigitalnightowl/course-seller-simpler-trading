@@ -1136,7 +1136,7 @@ const CourseModal = ({ course, onClose, onSuccess, loading }) => {
   }, [course]);
 
   const getAuthToken = () => {
-    return localStorage.getItem('token');
+    return localStorage.getItem('trainertoken');
   };
 
   // Tags functionality

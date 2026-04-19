@@ -1,24 +1,48 @@
-import React, { useState, useEffect, useRef, useCallback, memo } from "react";
+import React, {
+  useState, useEffect, useRef, useCallback, memo,
+} from "react";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import { IndexeddbPersistence } from "y-indexeddb";
-
 import {
-  FiSquare,
-  FiCircle,
-  FiMinus,
-  FiDownload,
-  FiRefreshCcw,
-  FiTrash2,
-  FiMove,
-  FiPlus,
-  FiMinusCircle,
-  FiX,
+  FiSquare, FiCircle, FiMinus, FiDownload, FiRefreshCcw,
+  FiTrash2, FiMove, FiPlus, FiMinusCircle, FiX, FiImage,
+  FiMousePointer
 } from "react-icons/fi";
 import { FaEraser, FaPaintBrush } from "react-icons/fa";
 import { toast } from "react-toastify";
 
-// ✅ Memoized StreamerWhiteboard component with custom comparison
+// ─── constants ────────────────────────────────────────────────────────────────
+const DEFAULT_MEDIA_W = 480;
+const DEFAULT_MEDIA_H = 270;
+const FLUSH_INTERVAL  = 50;   // ms — throttle Yjs stroke sync
+const MIN_MOVE_DIST   = 0.6;  // px — ignore pointer jitter
+const BASE_W = 1920;
+const BASE_H = 1080;
+
+// ─── helpers ──────────────────────────────────────────────────────────────────
+function uid() {
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function fileToBase64(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload  = () => res(r.result);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+}
+
+function pointToLineDist(p, v, w) {
+  const l2 = (v.x - w.x)**2 + (v.y - w.y)**2;
+  if (l2 === 0) return Math.hypot(p.x - v.x, p.y - v.y);
+  let t = ((p.x - v.x)*(w.x - v.x) + (p.y - v.y)*(w.y - v.y)) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p.x - (v.x + t*(w.x - v.x)), p.y - (v.y + t*(w.y - v.y)));
+}
+
+// ─── StreamerWhiteboard ───────────────────────────────────────────────────────
 const StreamerWhiteboard = memo(
   ({
     sessionId,
@@ -28,460 +52,451 @@ const StreamerWhiteboard = memo(
     isActive,
     onClose,
     allowViewersToDraw = true,
-    mainScreenMode = false,
-    compact = false,
+    mainScreenMode     = false,
+    compact            = false,
   }) => {
-    // Canvas refs
-    const canvasRef = useRef(null);
+    // ── canvas refs ──
+    const canvasRef           = useRef(null);
     const backgroundCanvasRef = useRef(null);
-    const ctxRef = useRef(null);
-    const bgCtxRef = useRef(null);
-    const containerRef = useRef(null);
+    const ctxRef              = useRef(null);
+    const bgCtxRef            = useRef(null);
+    const containerRef        = useRef(null);
 
-    // Yjs refs
-    const yDocRef = useRef(null);
-    const yProviderRef = useRef(null);
-    const yWhiteboardRef = useRef(null);
-    const ySettingsRef = useRef(null);
-    const yUndoManagerRef = useRef(null);
+    // ── Yjs refs ──
+    const yDocRef          = useRef(null);
+    const yProviderRef     = useRef(null);
+    const yWhiteboardRef   = useRef(null);
+    const ySettingsRef     = useRef(null);
+    const yUndoManagerRef  = useRef(null);
+    const yObserverCleanup = useRef(null);
 
-    // ✅ observer cleanup refs
-    const yWhiteboardObserverCleanupRef = useRef(null);
+    // ── media caches ──
+    const imageCacheRef = useRef(new Map());
 
-    // ✅ raf redraw scheduler refs (for fast remote updates)
-    const rafIdRef = useRef(null);
-    const pendingObjectsRef = useRef(null);
+    // ── raf / flush ──
+    const rafIdRef        = useRef(null);
+    const pendingObjsRef  = useRef(null);
+    const flushTimerRef   = useRef(null);
+    const pendingUpdateRef= useRef(null); // Used for dragging/resizing
 
-    // State
-    const [isDrawing, setIsDrawing] = useState(false);
-    const [tool, setTool] = useState("pen");
-    const [color, setColor] = useState("#000000");
-    const [strokeWidth, setStrokeWidth] = useState(2);
-    const [opacity, setOpacity] = useState(1);
-    const [currentZoom, setCurrentZoom] = useState(1);
-    const [isConnected, setIsConnected] = useState(false);
-    const [participants, setParticipants] = useState([]);
-    const [isLocalDrawing, setIsLocalDrawing] = useState(false);
+    // ── stroke & shapes state ──
+    const currentStrokeIdRef  = useRef(null);
+    const strokeBufferRef     = useRef([]);
+    const lastLocalPointRef   = useRef(null);
+    const lastLocalMidRef     = useRef(null);
+    const pointerIdRef        = useRef(null);
+    const shapeStartRef       = useRef(null);
+
+    // ── pan ──
+    const lastPanPointRef  = useRef({ x: 0, y: 0 });
+    const canvasOffsetRef  = useRef({ x: 0, y: 0 });
+    const lastPointRef     = useRef({ x: 0, y: 0 });
+
+    // ── selected object (for move/delete/resize) ──
+    const selectedIdRef = useRef(null);
+    const dragOffsetRef = useRef({ x: 0, y: 0 });
+    const isDraggingRef = useRef(false);
+    const isResizingRef = useRef(false);
+
+    // ── state ──
+    const [tool,            setTool]            = useState("pen");
+    const [color,           setColor]           = useState("#000000");
+    const [strokeWidth,     setStrokeWidth]     = useState(2);
+    const [opacity,         setOpacity]         = useState(1);
+    const [currentZoom,     setCurrentZoom]     = useState(1);
+    const [isConnected,     setIsConnected]     = useState(false);
+    const [participants,    setParticipants]    = useState([]);
     const [backgroundColor, setBackgroundColor] = useState("#ffffff");
-    const [isGridVisible, setIsGridVisible] = useState(false);
-    const [isPanning, setIsPanning] = useState(false);
-    const [showControls, setShowControls] = useState(!compact); // (kept for compatibility)
+    const [isGridVisible,   setIsGridVisible]   = useState(false);
+    const [isPanning,       setIsPanning]       = useState(false);
+    const [isDrawing,       setIsDrawing]       = useState(false);
+    const [selectedId,      setSelectedId]      = useState(null);
 
-    // Canvas state refs
-    const lastPointRef = useRef({ x: 0, y: 0 });
-    const canvasOffsetRef = useRef({ x: 0, y: 0 });
-    const lastPanPointRef = useRef({ x: 0, y: 0 });
+    const fileInputRef       = useRef(null);
 
-    // =========================
-    // ✅ Performance refs (smooth drawing during recording)
-    // =========================
-    const currentStrokeIdRef = useRef(null); // active pen/eraser stroke id
-    const strokeBufferRef = useRef([]); // buffered points for Yjs sync
-    const flushTimerRef = useRef(null); // throttle timer
-
-    const lastLocalPointRef = useRef(null); // last point drawn locally
-    const lastLocalMidRef = useRef(null); // last midpoint for smoothing
-    const pointerIdRef = useRef(null); // pointer capture id
-
-    // =========================
+    // ═══════════════════════════════════════════════════════
     // Helpers
-    // =========================
-    const getTransformedPoint = useCallback(
-      (evt) => {
-        if (!canvasRef.current) return { x: 0, y: 0 };
+    // ═══════════════════════════════════════════════════════
+    const getTransformedPoint = useCallback((e) => {
+      if (!canvasRef.current) return { x: 0, y: 0 };
+      const rect   = canvasRef.current.getBoundingClientRect();
+      const scaleX = BASE_W / rect.width;
+      const scaleY = BASE_H / rect.height;
+      const x = (e.clientX - rect.left) * scaleX;
+      const y = (e.clientY - rect.top)  * scaleY;
+      return {
+        x: (x - canvasOffsetRef.current.x) / currentZoom,
+        y: (y - canvasOffsetRef.current.y) / currentZoom,
+      };
+    }, [currentZoom]);
 
-        const rect = canvasRef.current.getBoundingClientRect();
-        const scaleX = canvasRef.current.width / rect.width;
-        const scaleY = canvasRef.current.height / rect.height;
+    const getCurrentObjects = useCallback(() => {
+      if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return [];
+      return (yWhiteboardRef.current.toArray()[0]?.objects) || [];
+    }, []);
 
-        const x = (evt.clientX - rect.left) * scaleX;
-        const y = (evt.clientY - rect.top) * scaleY;
-
-        return {
-          x: (x - canvasOffsetRef.current.x) / currentZoom,
-          y: (y - canvasOffsetRef.current.y) / currentZoom,
+    // ═══════════════════════════════════════════════════════
+    // Yjs write helpers
+    // ═══════════════════════════════════════════════════════
+    const commitState = useCallback((updater) => {
+      if (!yWhiteboardRef.current || !yDocRef.current) return;
+      yDocRef.current.transact(() => {
+        const cur = yWhiteboardRef.current.toArray()[0] || {
+          version: "1.0.0", objects: [], background: backgroundColor,
+          createdAt: new Date().toISOString(),
         };
-      },
-      [currentZoom]
-    );
+        const next = updater(cur);
+        if (yWhiteboardRef.current.length === 0) {
+          yWhiteboardRef.current.insert(0, [next]);
+        } else {
+          yWhiteboardRef.current.delete(0, 1);
+          yWhiteboardRef.current.insert(0, [next]);
+        }
+      }, "drawing");
+    }, [backgroundColor]);
 
-    // Draw grid (memoized)
-    const drawGrid = useCallback((ctx, width, height) => {
+    const addObject = useCallback((obj) => {
+      commitState((cur) => ({
+        ...cur,
+        objects: [...(cur.objects || []), obj],
+        updatedBy: sessionInfo?.streamerId,
+        updatedAt: new Date().toISOString(),
+      }));
+    }, [commitState, sessionInfo]);
+
+    const deleteObject = useCallback((id) => {
+      commitState((cur) => ({
+        ...cur,
+        objects: (cur.objects || []).filter((o) => o.id !== id),
+        updatedBy: sessionInfo?.streamerId,
+        updatedAt: new Date().toISOString(),
+      }));
+      if (selectedIdRef.current === id) {
+        selectedIdRef.current = null;
+        setSelectedId(null);
+      }
+    }, [commitState, sessionInfo]);
+
+    const updateObject = useCallback((id, patch) => {
+      commitState((cur) => ({
+        ...cur,
+        objects: (cur.objects || []).map((o) => o.id === id ? { ...o, ...patch } : o),
+        updatedBy: sessionInfo?.streamerId,
+        updatedAt: new Date().toISOString(),
+      }));
+    }, [commitState, sessionInfo]);
+
+    // ═══════════════════════════════════════════════════════
+    // Drawing & Hit Test
+    // ═══════════════════════════════════════════════════════
+    const drawGrid = useCallback((ctx, w, h) => {
       ctx.save();
       ctx.strokeStyle = "#e0e0e0";
-      ctx.lineWidth = 0.5;
+      ctx.lineWidth   = 0.5;
       ctx.globalAlpha = 0.3;
-
-      const gridSize = 20;
-
-      for (let x = 0; x <= width; x += gridSize) {
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, height);
-        ctx.stroke();
-      }
-
-      for (let y = 0; y <= height; y += gridSize) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(width, y);
-        ctx.stroke();
-      }
-
+      const gs = 20;
+      for (let x = 0; x <= w; x += gs) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
+      for (let y = 0; y <= h; y += gs) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
       ctx.restore();
     }, []);
 
-    // Draw individual object (memoized)
-    const drawObject = useCallback(
-      (ctx, obj) => {
-        if (!obj) return;
+    const drawObject = useCallback((ctx, obj) => {
+      if (!obj) return;
+      ctx.save();
+      ctx.strokeStyle = obj.color       || "#000000";
+      ctx.fillStyle   = obj.fillColor   || "transparent";
+      ctx.lineWidth   = (obj.strokeWidth || 2) / currentZoom;
+      ctx.globalAlpha = obj.opacity     ?? 1;
 
-        ctx.save();
-        ctx.strokeStyle = obj.color || "#000000";
-        ctx.fillStyle = obj.fillColor || "transparent";
-        ctx.lineWidth = (obj.strokeWidth || 2) / currentZoom;
-        ctx.globalAlpha = obj.opacity ?? 1;
-
-        switch (obj.type) {
-          case "pen":
-          case "pencil": {
-            if (!obj.points || obj.points.length < 1) break;
-            ctx.beginPath();
-            ctx.moveTo(obj.points[0].x, obj.points[0].y);
-            obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
-            ctx.stroke();
-            break;
+      switch (obj.type) {
+        case "pen":
+        case "pencil":
+        case "eraser": {
+          if (!obj.points?.length) break;
+          if (obj.type === "eraser") ctx.globalCompositeOperation = "destination-out";
+          ctx.beginPath();
+          ctx.moveTo(obj.points[0].x, obj.points[0].y);
+          obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
+          ctx.stroke();
+          break;
+        }
+        case "line": {
+          ctx.beginPath(); ctx.moveTo(obj.x1, obj.y1); ctx.lineTo(obj.x2, obj.y2); ctx.stroke();
+          break;
+        }
+        case "rectangle": {
+          if (obj.fillColor) ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
+          ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
+          break;
+        }
+        case "circle": {
+          ctx.beginPath(); ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
+          if (obj.fillColor) ctx.fill();
+          ctx.stroke();
+          break;
+        }
+        case "text": {
+          ctx.font      = `${obj.fontSize || 16}px Arial`;
+          ctx.fillStyle = obj.color || "#000";
+          ctx.fillText(obj.text || "", obj.x, obj.y);
+          break;
+        }
+        case "image": {
+          let img = imageCacheRef.current.get(obj.id);
+          if (!img) {
+            img       = new Image();
+            img.src   = obj.src;
+            img.onload = () => scheduleRedraw(getCurrentObjects());
+            imageCacheRef.current.set(obj.id, img);
           }
-
-          case "line": {
-            ctx.beginPath();
-            ctx.moveTo(obj.x1, obj.y1);
-            ctx.lineTo(obj.x2, obj.y2);
-            ctx.stroke();
-            break;
+          if (img.complete && img.naturalWidth > 0) {
+            ctx.globalAlpha = obj.opacity ?? 1;
+            ctx.drawImage(img, obj.x, obj.y, obj.width || DEFAULT_MEDIA_W, obj.height || DEFAULT_MEDIA_H);
+          } else {
+            ctx.strokeStyle = "#aaa"; ctx.strokeRect(obj.x, obj.y, obj.width || DEFAULT_MEDIA_W, obj.height || DEFAULT_MEDIA_H);
+            ctx.fillStyle   = "#eee"; ctx.font = "14px Arial";
+            ctx.fillText("Loading image…", obj.x + 8, obj.y + 20);
           }
+          break;
+        }
+        default: break;
+      }
 
-          case "rectangle": {
-            if (obj.fillColor) ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
-            ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
-            break;
-          }
+      // Selection Highlight & Resize Handle (for rect, image, circle, line)
+      if (selectedIdRef.current === obj.id && tool === "select") {
+        ctx.strokeStyle = "#3b82f6";
+        ctx.lineWidth = 2 / currentZoom;
+        ctx.setLineDash([6 / currentZoom, 3 / currentZoom]);
 
-          case "circle": {
-            ctx.beginPath();
-            ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
-            if (obj.fillColor) ctx.fill();
-            ctx.stroke();
-            break;
-          }
+        let hx, hy; // handle coordinates
 
-          case "text": {
-            ctx.font = `${obj.fontSize || 16}px Arial`;
-            ctx.fillStyle = obj.color || "#000";
-            ctx.fillText(obj.text || "", obj.x, obj.y);
-            break;
-          }
-
-          case "eraser": {
-            if (!obj.points || obj.points.length < 1) break;
-            ctx.save();
-            ctx.globalCompositeOperation = "destination-out";
-            ctx.beginPath();
-            ctx.moveTo(obj.points[0].x, obj.points[0].y);
-            obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
-            ctx.stroke();
-            ctx.restore();
-            break;
-          }
-
-          default:
-            break;
+        if (["rectangle", "image"].includes(obj.type)) {
+          const bw = obj.width || DEFAULT_MEDIA_W;
+          const bh = obj.height || DEFAULT_MEDIA_H;
+          ctx.strokeRect(obj.x - 2, obj.y - 2, bw + 4, bh + 4);
+          hx = obj.x + bw; hy = obj.y + bh;
+        } else if (obj.type === "circle") {
+          const bw = obj.radius * 2;
+          ctx.strokeRect(obj.x - obj.radius - 2, obj.y - obj.radius - 2, bw + 4, bw + 4);
+          hx = obj.x + obj.radius * 0.707; hy = obj.y + obj.radius * 0.707; // 45 deg angle
+        } else if (obj.type === "line") {
+          hx = obj.x2; hy = obj.y2;
         }
 
-        ctx.restore();
-      },
-      [currentZoom]
-    );
+        ctx.setLineDash([]);
 
-    // Redraw canvas from objects (memoized)
-    const redrawCanvas = useCallback(
-      (objects) => {
-        if (!ctxRef.current || !bgCtxRef.current || !canvasRef.current) return;
-
-        const ctx = ctxRef.current;
-        const bgCtx = bgCtxRef.current;
-        const canvas = canvasRef.current;
-
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        bgCtx.clearRect(0, 0, canvas.width, canvas.height);
-
-        // Background
-        bgCtx.fillStyle = backgroundColor;
-        bgCtx.fillRect(0, 0, canvas.width, canvas.height);
-
-        // Grid
-        if (isGridVisible) {
-          drawGrid(bgCtx, canvas.width, canvas.height);
+        // Draw Handle
+        if (hx !== undefined && hy !== undefined) {
+          ctx.fillStyle = "#ffffff";
+          ctx.strokeStyle = "#3b82f6";
+          ctx.lineWidth = 2 / currentZoom;
+          ctx.beginPath();
+          ctx.arc(hx, hy, 6 / currentZoom, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
         }
+      }
 
-        // Apply zoom/pan and draw
-        ctx.save();
-        ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
-        ctx.scale(currentZoom, currentZoom);
+      ctx.restore();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [currentZoom, tool]);
 
-        (objects || []).forEach((obj) => drawObject(ctx, obj));
+    const hitTest = useCallback((pt) => {
+      const objs = getCurrentObjects();
+      for (let i = objs.length - 1; i >= 0; i--) {
+        const o = objs[i];
+        if (["image", "rectangle"].includes(o.type)) {
+          const w = o.width || DEFAULT_MEDIA_W;
+          const h = o.height || DEFAULT_MEDIA_H;
+          if (pt.x >= o.x && pt.x <= o.x + w && pt.y >= o.y && pt.y <= o.y + h) return o;
+        } else if (o.type === "circle") {
+          if (Math.hypot(pt.x - o.x, pt.y - o.y) <= o.radius) return o;
+        } else if (o.type === "line") {
+          if (pointToLineDist(pt, {x: o.x1, y: o.y1}, {x: o.x2, y: o.y2}) < 15 / currentZoom) return o;
+        }
+      }
+      return null;
+    }, [getCurrentObjects, currentZoom]);
 
-        ctx.restore();
-      },
-      [backgroundColor, isGridVisible, currentZoom, drawGrid, drawObject]
-    );
+    const hitTestHandle = useCallback((pt, obj) => {
+      let hx, hy;
+      if (["rectangle", "image"].includes(obj.type)) {
+        hx = obj.x + (obj.width || DEFAULT_MEDIA_W);
+        hy = obj.y + (obj.height || DEFAULT_MEDIA_H);
+      } else if (obj.type === "circle") {
+        hx = obj.x + obj.radius * 0.707; 
+        hy = obj.y + obj.radius * 0.707;
+      } else if (obj.type === "line") {
+        hx = obj.x2; hy = obj.y2;
+      } else return false;
 
-    // ✅ schedule redraw on next animation frame (fast remote updates, avoids spamming)
-    const scheduleRedraw = useCallback(
-      (objects) => {
-        pendingObjectsRef.current = objects || [];
-        if (rafIdRef.current) return;
+      return Math.hypot(pt.x - hx, pt.y - hy) < 15 / currentZoom;
+    }, [currentZoom]);
 
-        rafIdRef.current = requestAnimationFrame(() => {
-          rafIdRef.current = null;
-          const objs = pendingObjectsRef.current || [];
-          pendingObjectsRef.current = null;
-          redrawCanvas(objs);
-        });
-      },
-      [redrawCanvas]
-    );
+    const redrawCanvas = useCallback((objects) => {
+      if (!ctxRef.current || !bgCtxRef.current || !canvasRef.current) return;
+      const ctx    = ctxRef.current;
+      const bgCtx  = bgCtxRef.current;
+      const canvas = canvasRef.current;
 
-    // Load whiteboard state from Yjs (memoized)
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      bgCtx.clearRect(0, 0, canvas.width, canvas.height);
+
+      bgCtx.fillStyle = backgroundColor;
+      bgCtx.fillRect(0, 0, canvas.width, canvas.height);
+      if (isGridVisible) drawGrid(bgCtx, canvas.width, canvas.height);
+
+      ctx.save();
+      ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+      ctx.scale(currentZoom, currentZoom);
+      (objects || []).forEach((obj) => drawObject(ctx, obj));
+      ctx.restore();
+    }, [backgroundColor, isGridVisible, currentZoom, drawGrid, drawObject]);
+
+    const scheduleRedraw = useCallback((objects) => {
+      pendingObjsRef.current = objects || [];
+      if (rafIdRef.current) return;
+      rafIdRef.current = requestAnimationFrame(() => {
+        rafIdRef.current = null;
+        redrawCanvas(pendingObjsRef.current || []);
+        pendingObjsRef.current = null;
+      });
+    }, [redrawCanvas]);
+
     const loadWhiteboardState = useCallback(() => {
       if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return;
-
       try {
         const state = yWhiteboardRef.current.toArray()[0] || {};
         if (state.background) setBackgroundColor(state.background);
-
-        if (Array.isArray(state.objects)) {
-          // ✅ use scheduler for quick UI update
-          scheduleRedraw(state.objects);
-        }
-      } catch (error) {
-        console.error("Error loading whiteboard state:", error);
-      }
+        scheduleRedraw(Array.isArray(state.objects) ? state.objects : []);
+      } catch (e) { console.error(e); }
     }, [scheduleRedraw]);
 
-    // Add object to Yjs document (memoized)
-    const addObject = useCallback(
-      (obj) => {
-        if (!yWhiteboardRef.current || !yDocRef.current) return;
+    // ═══════════════════════════════════════════════════════
+    // Smooth stroke & Shape flushing
+    // ═══════════════════════════════════════════════════════
+    const drawSmoothStroke = useCallback((prev, next, strokeType) => {
+      if (!ctxRef.current) return;
+      const ctx = ctxRef.current;
+      ctx.save();
+      ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+      ctx.scale(currentZoom, currentZoom);
+      ctx.lineCap   = "round";
+      ctx.lineJoin  = "round";
+      ctx.globalAlpha = opacity ?? 1;
+      ctx.lineWidth   = (strokeWidth || 2) / currentZoom;
 
-        setIsLocalDrawing(true);
+      if (strokeType === "eraser") {
+        ctx.globalCompositeOperation = "destination-out";
+        ctx.strokeStyle = "rgba(0,0,0,1)";
+      } else {
+        ctx.globalCompositeOperation = "source-over";
+        ctx.strokeStyle = color || "#000000";
+      }
 
-        try {
-          yDocRef.current.transact(() => {
-            const currentState = yWhiteboardRef.current.toArray()[0] || {
-              version: "1.0.0",
-              objects: [],
-              background: backgroundColor,
-              createdAt: new Date().toISOString(),
-            };
+      const mid = { x: (prev.x + next.x) / 2, y: (prev.y + next.y) / 2 };
+      if (!lastLocalMidRef.current) lastLocalMidRef.current = { x: prev.x, y: prev.y };
+      ctx.beginPath();
+      ctx.moveTo(lastLocalMidRef.current.x, lastLocalMidRef.current.y);
+      ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
+      ctx.stroke();
+      lastLocalMidRef.current = mid;
+      ctx.restore();
+    }, [currentZoom, color, strokeWidth, opacity]);
 
-            const updatedState = {
-              ...currentState,
-              objects: [...(currentState.objects || []), obj],
-              updatedBy: sessionInfo?.streamerId,
-              updatedAt: new Date().toISOString(),
-            };
+    const flushStrokeToYjs = useCallback(() => {
+      const strokeId = currentStrokeIdRef.current;
+      if (!strokeId) return;
+      const buffered = strokeBufferRef.current;
+      if (!buffered.length) return;
+      const pts = buffered.slice();
+      strokeBufferRef.current = [];
 
-            if (yWhiteboardRef.current.length === 0) {
-              yWhiteboardRef.current.insert(0, [updatedState]);
-            } else {
-              yWhiteboardRef.current.delete(0, 1);
-              yWhiteboardRef.current.insert(0, [updatedState]);
-            }
-          }, "drawing");
-        } catch (error) {
-          console.error("Error adding object:", error);
-        } finally {
-          setIsLocalDrawing(false);
+      commitState((cur) => {
+        const objs   = [...(cur.objects || [])];
+        const idx    = objs.findIndex((o) => o?.id === strokeId);
+        if (idx === -1) return cur;
+        const target = { ...objs[idx] };
+        target.points = [...(target.points || []), ...pts];
+        objs[idx] = target;
+        return { ...cur, objects: objs, updatedAt: new Date().toISOString() };
+      });
+    }, [commitState]);
+
+    const flushShapeToYjs = useCallback((currentPoint) => {
+      const strokeId = currentStrokeIdRef.current;
+      const startP = shapeStartRef.current;
+      if (!strokeId || !startP || !currentPoint) return;
+
+      commitState((cur) => {
+        const objs   = [...(cur.objects || [])];
+        const idx    = objs.findIndex((o) => o?.id === strokeId);
+        if (idx === -1) return cur;
+        const target = { ...objs[idx] };
+        
+        if (target.type === "rectangle") {
+          target.width = currentPoint.x - startP.x;
+          target.height = currentPoint.y - startP.y;
+        } else if (target.type === "circle") {
+          target.radius = Math.hypot(currentPoint.x - startP.x, currentPoint.y - startP.y);
+        } else if (target.type === "line") {
+          target.x2 = currentPoint.x;
+          target.y2 = currentPoint.y;
         }
-      },
-      [backgroundColor, sessionInfo]
-    );
-
-    // =========================
-    // ✅ Incremental local draw (SMOOTH CURVE)
-    // =========================
-    const drawSmoothStroke = useCallback(
-      (prev, next, strokeType) => {
-        if (!ctxRef.current) return;
-        const ctx = ctxRef.current;
-
-        ctx.save();
-        ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
-        ctx.scale(currentZoom, currentZoom);
-
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-        ctx.globalAlpha = opacity ?? 1;
-        ctx.lineWidth = (strokeWidth || 2) / currentZoom;
-
-        const isEraser = strokeType === "eraser";
-        if (isEraser) {
-          ctx.globalCompositeOperation = "destination-out";
-          ctx.strokeStyle = "rgba(0,0,0,1)";
-        } else {
-          ctx.globalCompositeOperation = "source-over";
-          ctx.strokeStyle = color || "#000000";
-        }
-
-        const mid = { x: (prev.x + next.x) / 2, y: (prev.y + next.y) / 2 };
-
-        if (!lastLocalMidRef.current) {
-          lastLocalMidRef.current = { x: prev.x, y: prev.y };
-        }
-
-        ctx.beginPath();
-        ctx.moveTo(lastLocalMidRef.current.x, lastLocalMidRef.current.y);
-        ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
-        ctx.stroke();
-
-        lastLocalMidRef.current = mid;
-
-        ctx.restore();
-      },
-      [currentZoom, color, strokeWidth, opacity]
-    );
-
-    // =========================
-    // ✅ Throttled Yjs sync (batch points)
-    // =========================
-    const flushStrokeToYjs = useCallback(
-      (force = false) => {
-        if (!yWhiteboardRef.current || !yDocRef.current) return;
-
-        const strokeId = currentStrokeIdRef.current;
-        if (!strokeId) return;
-
-        const buffered = strokeBufferRef.current;
-        if (!force && buffered.length === 0) return;
-        if (buffered.length === 0) return;
-
-        const pointsToAdd = buffered.slice();
-        strokeBufferRef.current = [];
-
-        try {
-          yDocRef.current.transact(() => {
-            const currentState = yWhiteboardRef.current.toArray()[0] || {
-              version: "1.0.0",
-              objects: [],
-              background: backgroundColor,
-              createdAt: new Date().toISOString(),
-            };
-
-            const objects = [...(currentState.objects || [])];
-
-            let idx = objects.length - 1;
-            const found = objects.findIndex((o) => o && o.id === strokeId);
-            if (found !== -1) idx = found;
-
-            const target = objects[idx];
-            if (!target || (target.type !== "pen" && target.type !== "eraser")) return;
-
-            target.points = [...(target.points || []), ...pointsToAdd];
-
-            const updatedState = {
-              ...currentState,
-              objects,
-              updatedBy: sessionInfo?.streamerId,
-              updatedAt: new Date().toISOString(),
-            };
-
-            if (yWhiteboardRef.current.length === 0) {
-              yWhiteboardRef.current.insert(0, [updatedState]);
-            } else {
-              yWhiteboardRef.current.delete(0, 1);
-              yWhiteboardRef.current.insert(0, [updatedState]);
-            }
-          }, "drawing");
-        } catch (error) {
-          console.error("Error flushing stroke points:", error);
-        }
-      },
-      [backgroundColor, sessionInfo]
-    );
+        
+        objs[idx] = target;
+        return { ...cur, objects: objs, updatedAt: new Date().toISOString() };
+      });
+    }, [commitState]);
 
     const scheduleFlush = useCallback(() => {
       if (flushTimerRef.current) return;
       flushTimerRef.current = setTimeout(() => {
         flushTimerRef.current = null;
-        flushStrokeToYjs(false);
-      }, 50);
-    }, [flushStrokeToYjs]);
-
-    useEffect(() => {
-      return () => {
-        if (flushTimerRef.current) {
-          clearTimeout(flushTimerRef.current);
-          flushTimerRef.current = null;
+        if (tool === "pen" || tool === "eraser") {
+          flushStrokeToYjs();
+        } else if (["line", "rectangle", "circle"].includes(tool)) {
+          flushShapeToYjs(lastPointRef.current);
         }
-        if (rafIdRef.current) {
-          cancelAnimationFrame(rafIdRef.current);
-          rafIdRef.current = null;
-        }
-      };
-    }, []);
+      }, FLUSH_INTERVAL);
+    }, [flushStrokeToYjs, flushShapeToYjs, tool]);
 
-    // =========================
-    // ✅ Initialize Yjs document and WebSocket provider
-    // =========================
+    // ═══════════════════════════════════════════════════════
+    // Yjs init
+    // ═══════════════════════════════════════════════════════
     useEffect(() => {
       if (!sessionId || !wsToken) return;
 
       const initYjs = async () => {
         try {
-          const ydoc = new Y.Doc();
+          const ydoc      = new Y.Doc();
           yDocRef.current = ydoc;
 
-          const baseWs = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
-          const url = `${baseWs}/yjs`;
-
-          const provider = new WebsocketProvider(url, sessionId, ydoc, {
+          const baseWs   = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
+          const provider = new WebsocketProvider(`${baseWs}/yjs`, sessionId, ydoc, {
             WebSocketPolyfill: WebSocket,
             params: {
-              token: wsToken,
-              isStreamer: true,
-              allowViewersToDraw,
-              roomCode,
-              userId: sessionInfo?.streamerId,
-              userName: sessionInfo?.streamerName,
+              token: wsToken, isStreamer: true, allowViewersToDraw,
+              roomCode, userId: sessionInfo?.streamerId, userName: sessionInfo?.streamerName,
             },
           });
+          yProviderRef.current  = provider;
 
-          yProviderRef.current = provider;
-
-          const yWhiteboard = ydoc.getArray("whiteboard");
+          const yWhiteboard      = ydoc.getArray("whiteboard");
           yWhiteboardRef.current = yWhiteboard;
 
-          const ySettings = ydoc.getMap("room_settings");
-          ySettingsRef.current = ySettings;
+          const ySettings        = ydoc.getMap("room_settings");
+          ySettingsRef.current   = ySettings;
 
           provider.awareness.setLocalState({
             userId: sessionInfo?.streamerId || "streamer",
             userName: sessionInfo?.streamerName || "Streamer",
-            role: "STREAMER",
-            isStreamer: true,
-            color,
-            tool,
-            cursor: null,
+            role: "STREAMER", isStreamer: true, color, tool, cursor: null,
           });
 
           provider.awareness.on("change", () => {
             const states = Array.from(provider.awareness.getStates().entries());
-            const participantsList = states
-              .map(([clientId, state]) => ({ clientId, ...state }))
-              .filter((p) => p.userId);
-
-            setParticipants(participantsList);
+            setParticipants(states.map(([id, s]) => ({ clientId: id, ...s })).filter((p) => p.userId));
           });
 
           provider.on("sync", (synced) => {
@@ -489,45 +504,22 @@ const StreamerWhiteboard = memo(
             if (synced) loadWhiteboardState();
           });
 
-          // ✅ Undo manager tracks our transact origin ("drawing")
           yUndoManagerRef.current = new Y.UndoManager(yWhiteboard, {
-            captureTimeout: 150,
-            trackedOrigins: new Set(["drawing"]),
+            captureTimeout: 150, trackedOrigins: new Set(["drawing"]),
           });
 
-          // ✅ Local persistence
           new IndexeddbPersistence(`whiteboard-${sessionId}`, ydoc);
 
-          // =========================================================
-          // ✅ IMPORTANT FIX:
-          // Streamer should listen remote changes & redraw quickly
-          // =========================================================
           const observer = (event) => {
-            try {
-              const origin = event?.transaction?.origin;
-
-              // If it's our own drawing updates and we're actively drawing,
-              // skip full redraw (we already draw incrementally).
-              if (origin === "drawing" && (isDrawing || currentStrokeIdRef.current)) return;
-
-              // Otherwise (viewer draw / remote update), load & redraw ASAP
-              loadWhiteboardState();
-            } catch (e) {
-              // fallback
-              loadWhiteboardState();
-            }
+            const origin = event?.transaction?.origin;
+            if (origin === "drawing" && (isDrawing || currentStrokeIdRef.current)) return;
+            loadWhiteboardState();
           };
-
           yWhiteboard.observe(observer);
+          yObserverCleanup.current = () => { try { yWhiteboard.unobserve(observer); } catch {} };
 
-          // store cleanup
-          yWhiteboardObserverCleanupRef.current = () => {
-            try {
-              yWhiteboard.unobserve(observer);
-            } catch {}
-          };
-        } catch (error) {
-          console.error("Failed to initialize Yjs:", error);
+        } catch (err) {
+          console.error("Failed to init Yjs:", err);
           toast.error("Failed to connect to whiteboard server");
         }
       };
@@ -535,365 +527,460 @@ const StreamerWhiteboard = memo(
       initYjs();
 
       return () => {
-        // flush pending stroke safely before teardown
-        try {
-          flushStrokeToYjs(true);
+        try { 
+          if (tool === "pen" || tool === "eraser") flushStrokeToYjs(true); 
+          else flushShapeToYjs(lastPointRef.current);
         } catch {}
-
-        // ✅ detach observer
-        if (yWhiteboardObserverCleanupRef.current) {
-          try {
-            yWhiteboardObserverCleanupRef.current();
-          } catch {}
-          yWhiteboardObserverCleanupRef.current = null;
-        }
-
-        if (yProviderRef.current) {
-          try {
-            yProviderRef.current.disconnect();
-            yProviderRef.current.destroy();
-          } catch {}
-        }
-        if (yDocRef.current) {
-          try {
-            yDocRef.current.destroy();
-          } catch {}
-        }
-        yProviderRef.current = null;
-        yDocRef.current = null;
-        yWhiteboardRef.current = null;
-        ySettingsRef.current = null;
-        yUndoManagerRef.current = null;
+        if (yObserverCleanup.current) { yObserverCleanup.current(); yObserverCleanup.current = null; }
+        if (yProviderRef.current) { try { yProviderRef.current.disconnect(); yProviderRef.current.destroy(); } catch {} }
+        if (yDocRef.current)      { try { yDocRef.current.destroy(); } catch {} }
+        yProviderRef.current = yDocRef.current = yWhiteboardRef.current = null;
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [sessionId, roomCode, wsToken, allowViewersToDraw, sessionInfo, loadWhiteboardState]);
+    }, [sessionId, roomCode, wsToken, allowViewersToDraw, sessionInfo]);
 
-    // ✅ Keep awareness updated without reconnecting
+    // keep awareness fresh
     useEffect(() => {
-      const provider = yProviderRef.current;
-      if (!provider) return;
-
+      const p = yProviderRef.current;
+      if (!p) return;
       try {
-        const prevState = provider.awareness.getLocalState() || {};
-        provider.awareness.setLocalState({
-          ...prevState,
+        const prev = p.awareness.getLocalState() || {};
+        p.awareness.setLocalState({ ...prev, color, tool,
           userId: sessionInfo?.streamerId || "streamer",
           userName: sessionInfo?.streamerName || "Streamer",
-          role: "STREAMER",
-          isStreamer: true,
-          color,
-          tool,
+          role: "STREAMER", isStreamer: true,
         });
       } catch {}
     }, [color, tool, sessionInfo]);
 
-    // =========================
-    // ✅ Initialize canvas
-    // =========================
+    // cleanup timers
+    useEffect(() => () => {
+      if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+      if (rafIdRef.current)      cancelAnimationFrame(rafIdRef.current);
+    }, []);
+
+    // ═══════════════════════════════════════════════════════
+    // Canvas init + resize
+    // ═══════════════════════════════════════════════════════
     useEffect(() => {
       if (!canvasRef.current || !backgroundCanvasRef.current || !containerRef.current) return;
-
-      const canvas = canvasRef.current;
-      const bgCanvas = backgroundCanvasRef.current;
+      const canvas    = canvasRef.current;
+      const bgCanvas  = backgroundCanvasRef.current;
       const container = containerRef.current;
 
-      const resizeCanvas = () => {
-        const containerWidth = container.clientWidth;
-        const containerHeight = container.clientHeight;
-
-        canvas.width = containerWidth;
-        canvas.height = containerHeight;
-        bgCanvas.width = containerWidth;
-        bgCanvas.height = containerHeight;
-
-        const ctx = canvas.getContext("2d");
+      const resize = () => {
+        canvas.width  = bgCanvas.width  = container.clientWidth;
+        canvas.height = bgCanvas.height = container.clientHeight;
+        const ctx   = canvas.getContext("2d");
         const bgCtx = bgCanvas.getContext("2d");
-
-        ctxRef.current = ctx;
-        bgCtxRef.current = bgCtx;
-
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-
+        ctx.lineCap = "round"; ctx.lineJoin = "round";
+        ctxRef.current = ctx; bgCtxRef.current = bgCtx;
+        
+        // Internal resolution fix
+        canvas.width = BASE_W;
+        canvas.height = BASE_H;
+        bgCanvas.width = BASE_W;
+        bgCanvas.height = BASE_H;
+        
         if (yWhiteboardRef.current) {
-          const state = yWhiteboardRef.current.toArray()[0] || {};
-          scheduleRedraw(state.objects || []);
+          const s = yWhiteboardRef.current.toArray()[0] || {};
+          scheduleRedraw(s.objects || []);
         }
       };
 
-      resizeCanvas();
-
-      const resizeObserver = new ResizeObserver(() => resizeCanvas());
-      resizeObserver.observe(container);
-
-      return () => resizeObserver.disconnect();
+      resize();
+      const ro = new ResizeObserver(resize);
+      ro.observe(container);
+      return () => ro.disconnect();
     }, [scheduleRedraw]);
 
-    // =========================
-    // ✅ Pointer Events + coalesced events
-    // =========================
-    const handlePointerDown = useCallback(
-      (e) => {
-        e.preventDefault();
-        if (!canvasRef.current) return;
-
-        if (e.button === 2) return;
-
-        try {
-          canvasRef.current.setPointerCapture(e.pointerId);
-          pointerIdRef.current = e.pointerId;
-        } catch {}
-
-        if (tool === "pan" || e.altKey || e.button === 1) {
-          setIsPanning(true);
-          lastPanPointRef.current = { x: e.clientX, y: e.clientY };
-          canvasRef.current.style.cursor = "grabbing";
-          return;
-        }
-
-        setIsDrawing(true);
-
-        const p = getTransformedPoint(e);
-        lastPointRef.current = p;
-        lastLocalPointRef.current = p;
-        lastLocalMidRef.current = null;
-
-        if (tool === "pen" || tool === "eraser") {
-          const strokeId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-          currentStrokeIdRef.current = strokeId;
-          strokeBufferRef.current = [];
-
-          addObject({
-            id: strokeId,
-            type: tool,
-            points: [{ x: p.x, y: p.y }],
-            color: tool === "eraser" ? backgroundColor : color,
-            strokeWidth,
-            opacity,
-            timestamp: Date.now(),
-          });
-
-          // dot for click-without-move
-          drawSmoothStroke(p, { x: p.x + 0.01, y: p.y + 0.01 }, tool);
-        }
-      },
-      [tool, getTransformedPoint, addObject, backgroundColor, color, strokeWidth, opacity, drawSmoothStroke]
-    );
-
-    const handlePointerMove = useCallback(
-      (e) => {
-        if (!canvasRef.current) return;
-
-        if (isPanning) {
-          const dx = e.clientX - lastPanPointRef.current.x;
-          const dy = e.clientY - lastPanPointRef.current.y;
-          canvasOffsetRef.current.x += dx;
-          canvasOffsetRef.current.y += dy;
-          lastPanPointRef.current = { x: e.clientX, y: e.clientY };
-
-          if (yWhiteboardRef.current) {
-            const state = yWhiteboardRef.current.toArray()[0] || {};
-            scheduleRedraw(state.objects || []);
+    // ═══════════════════════════════════════════════════════
+    // Paste handler — Ctrl+V image
+    // ═══════════════════════════════════════════════════════
+    useEffect(() => {
+      const handlePaste = async (e) => {
+        for (const item of e.clipboardData.items) {
+          if (item.type.startsWith("image/")) {
+            const file   = item.getAsFile();
+            const b64    = await fileToBase64(file);
+            const img    = new Image();
+            img.src      = b64;
+            img.onload   = () => {
+              const ratio = img.naturalWidth / img.naturalHeight;
+              const w     = Math.min(img.naturalWidth, DEFAULT_MEDIA_W);
+              const h     = w / ratio;
+              addObject({
+                id: uid(), type: "image", src: b64,
+                x: 80, y: 80, width: w, height: h,
+                opacity: 1, timestamp: Date.now(),
+              });
+            };
+            break;
           }
+        }
+      };
+      window.addEventListener("paste", handlePaste);
+      return () => window.removeEventListener("paste", handlePaste);
+    }, [addObject]);
+
+    // ═══════════════════════════════════════════════════════
+    // Keyboard — Delete selected
+    // ═══════════════════════════════════════════════════════
+    useEffect(() => {
+      const handleKey = (e) => {
+        if ((e.key === "Delete" || e.key === "Backspace") && selectedIdRef.current) {
+          if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+          deleteObject(selectedIdRef.current);
+        }
+        if ((e.ctrlKey || e.metaKey) && e.key === "z") {
+          e.preventDefault();
+          yUndoManagerRef.current?.undo();
+        }
+        if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.shiftKey && e.key === "z"))) {
+          e.preventDefault();
+          yUndoManagerRef.current?.redo();
+        }
+      };
+      window.addEventListener("keydown", handleKey);
+      return () => window.removeEventListener("keydown", handleKey);
+    }, [deleteObject]);
+
+    // ═══════════════════════════════════════════════════════
+    // Image upload handler
+    // ═══════════════════════════════════════════════════════
+    const handleImageUpload = useCallback(async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      if (file.size > 10 * 1024 * 1024) { toast.error("Image must be < 10MB"); return; }
+      const b64  = await fileToBase64(file);
+      const img  = new Image();
+      img.src    = b64;
+      img.onload = () => {
+        const ratio = img.naturalWidth / img.naturalHeight;
+        const w     = Math.min(img.naturalWidth, DEFAULT_MEDIA_W);
+        const h     = w / ratio;
+        addObject({ id: uid(), type: "image", src: b64, x: 80, y: 80, width: w, height: h, opacity: 1, timestamp: Date.now() });
+      };
+      e.target.value = "";
+    }, [addObject]);
+
+    // ═══════════════════════════════════════════════════════
+    // Pointer events
+    // ═══════════════════════════════════════════════════════
+    const handlePointerDown = useCallback((e) => {
+      e.preventDefault();
+      if (!canvasRef.current || e.button === 2) return;
+      try { canvasRef.current.setPointerCapture(e.pointerId); pointerIdRef.current = e.pointerId; } catch {}
+
+      if (tool === "pan" || e.altKey || e.button === 1) {
+        setIsPanning(true);
+        lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+        canvasRef.current.style.cursor = "grabbing";
+        return;
+      }
+
+      const p = getTransformedPoint(e);
+
+      // Select / Move / Resize tool
+      if (tool === "select") {
+        const objs = getCurrentObjects();
+        const selObj = objs.find(o => o.id === selectedIdRef.current);
+        
+        // 1. Check if Handle is clicked (Resize)
+        if (selObj && hitTestHandle(p, selObj)) {
+          isResizingRef.current = true;
           return;
         }
 
-        if (!isDrawing) return;
-        if (tool !== "pen" && tool !== "eraser") return;
+        // 2. Check if Object is clicked (Drag/Move)
+        const hit = hitTest(p);
+        if (hit) {
+          selectedIdRef.current = hit.id;
+          setSelectedId(hit.id);
+          dragOffsetRef.current = { 
+            x: p.x - (hit.type === 'line' ? hit.x1 : hit.x), 
+            y: p.y - (hit.type === 'line' ? hit.y1 : hit.y) 
+          };
+          isDraggingRef.current = true;
+        } else {
+          selectedIdRef.current = null;
+          setSelectedId(null);
+        }
+        scheduleRedraw(getCurrentObjects());
+        return;
+      }
 
-        const events =
-          typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
+      setIsDrawing(true);
+      lastPointRef.current      = p;
+      lastLocalPointRef.current = p;
+      lastLocalMidRef.current   = null;
+      shapeStartRef.current     = p; // Set the origin point for shapes
 
+      const strokeId = uid();
+      currentStrokeIdRef.current = strokeId;
+
+      if (tool === "pen" || tool === "eraser") {
+        strokeBufferRef.current    = [];
+        addObject({
+          id: strokeId, type: tool,
+          points: [{ x: p.x, y: p.y }],
+          color: tool === "eraser" ? backgroundColor : color,
+          strokeWidth, opacity, timestamp: Date.now(),
+        });
+        drawSmoothStroke(p, { x: p.x + 0.01, y: p.y + 0.01 }, tool);
+      } else if (["line", "rectangle", "circle"].includes(tool)) {
+         const baseObj = {
+            id: strokeId, type: tool,
+            x: p.x, y: p.y,
+            color, strokeWidth, opacity, timestamp: Date.now()
+         };
+         if (tool === "line") { baseObj.x1 = p.x; baseObj.y1 = p.y; baseObj.x2 = p.x; baseObj.y2 = p.y; }
+         if (tool === "rectangle") { baseObj.width = 0; baseObj.height = 0; }
+         if (tool === "circle") { baseObj.radius = 0; }
+         addObject(baseObj);
+      }
+    }, [tool, getTransformedPoint, hitTestHandle, hitTest, addObject, drawSmoothStroke, scheduleRedraw, getCurrentObjects, backgroundColor, color, strokeWidth, opacity]);
+
+    const handlePointerMove = useCallback((e) => {
+      if (!canvasRef.current) return;
+
+      if (isPanning) {
+        const dx = e.clientX - lastPanPointRef.current.x;
+        const dy = e.clientY - lastPanPointRef.current.y;
+        canvasOffsetRef.current.x += dx;
+        canvasOffsetRef.current.y += dy;
+        lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+        scheduleRedraw(getCurrentObjects());
+        return;
+      }
+
+      const p = getTransformedPoint(e);
+
+      // Drag or Resize media object
+      if (tool === "select" && selectedIdRef.current) {
+        if (isResizingRef.current) {
+          const objs = getCurrentObjects();
+          const selObj = objs.find(o => o.id === selectedIdRef.current);
+          if (!selObj) return;
+
+          let patch = {};
+          if (["rectangle", "image"].includes(selObj.type)) {
+            patch.width = Math.max(20, p.x - selObj.x);
+            patch.height = Math.max(20, p.y - selObj.y);
+          } else if (selObj.type === "circle") {
+            patch.radius = Math.max(10, Math.hypot(p.x - selObj.x, p.y - selObj.y));
+          } else if (selObj.type === "line") {
+            patch.x2 = p.x;
+            patch.y2 = p.y;
+          }
+          pendingUpdateRef.current = patch;
+
+        } else if (isDraggingRef.current) {
+          const selObj = getCurrentObjects().find(o => o.id === selectedIdRef.current);
+          if (!selObj) return;
+
+          let patch = {};
+          const newX = p.x - dragOffsetRef.current.x;
+          const newY = p.y - dragOffsetRef.current.y;
+
+          if (selObj.type === "line") {
+            const dx = newX - selObj.x1;
+            const dy = newY - selObj.y1;
+            patch.x1 = newX;
+            patch.y1 = newY;
+            patch.x2 = selObj.x2 + dx;
+            patch.y2 = selObj.y2 + dy;
+          } else {
+            patch.x = newX;
+            patch.y = newY;
+          }
+          pendingUpdateRef.current = patch;
+        }
+
+        if (pendingUpdateRef.current) {
+          // Instant Local Feedback
+          const tempObjs = getCurrentObjects().map(o => o.id === selectedIdRef.current ? { ...o, ...pendingUpdateRef.current } : o);
+          redrawCanvas(tempObjs);
+
+          // Throttled Network Sync
+          if (!flushTimerRef.current) {
+            flushTimerRef.current = setTimeout(() => {
+                flushTimerRef.current = null;
+                if (pendingUpdateRef.current) {
+                    updateObject(selectedIdRef.current, pendingUpdateRef.current);
+                    pendingUpdateRef.current = null;
+                }
+            }, FLUSH_INTERVAL);
+          }
+        }
+        return;
+      }
+
+      if (!isDrawing) return;
+
+      if (tool === "pen" || tool === "eraser") {
+        const events = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
         for (const evt of events) {
           const next = getTransformedPoint(evt);
           const prev = lastLocalPointRef.current || lastPointRef.current;
-
           const dist = prev ? Math.hypot(next.x - prev.x, next.y - prev.y) : 999;
-
-          const minDist = 0.6;
-          if (dist < minDist) continue;
-
+          if (dist < MIN_MOVE_DIST) continue;
           if (prev) drawSmoothStroke(prev, next, tool);
-
           strokeBufferRef.current.push(next);
           scheduleFlush();
-
           lastLocalPointRef.current = next;
-          lastPointRef.current = next;
+          lastPointRef.current      = next;
         }
-      },
-      [isDrawing, isPanning, tool, getTransformedPoint, drawSmoothStroke, scheduleFlush, scheduleRedraw]
-    );
+      } else if (["line", "rectangle", "circle"].includes(tool)) {
+        lastPointRef.current = p;
+
+        // Instant local UI feedback
+        redrawCanvas(getCurrentObjects());
+        const ctx = ctxRef.current;
+        ctx.save();
+        ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+        ctx.scale(currentZoom, currentZoom);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = (strokeWidth || 2) / currentZoom;
+        ctx.globalAlpha = opacity ?? 1;
+
+        if (tool === "rectangle") {
+            ctx.strokeRect(shapeStartRef.current.x, shapeStartRef.current.y, p.x - shapeStartRef.current.x, p.y - shapeStartRef.current.y);
+        } else if (tool === "circle") {
+            ctx.beginPath();
+            ctx.arc(shapeStartRef.current.x, shapeStartRef.current.y, Math.hypot(p.x - shapeStartRef.current.x, p.y - shapeStartRef.current.y), 0, Math.PI * 2);
+            ctx.stroke();
+        } else if (tool === "line") {
+            ctx.beginPath();
+            ctx.moveTo(shapeStartRef.current.x, shapeStartRef.current.y);
+            ctx.lineTo(p.x, p.y);
+            ctx.stroke();
+        }
+        ctx.restore();
+
+        // Throttled sync to network
+        if (!flushTimerRef.current) {
+          flushTimerRef.current = setTimeout(() => {
+              flushTimerRef.current = null;
+              flushShapeToYjs(lastPointRef.current);
+          }, FLUSH_INTERVAL);
+        }
+      }
+    }, [isDrawing, isPanning, tool, getTransformedPoint, drawSmoothStroke, scheduleFlush, flushShapeToYjs, scheduleRedraw, getCurrentObjects, updateObject, redrawCanvas, color, strokeWidth, opacity, currentZoom]);
 
     const endStrokeCleanup = useCallback(() => {
-      flushStrokeToYjs(true);
-
+      if (tool === "pen" || tool === "eraser") {
+         flushStrokeToYjs(true);
+      } else if (["line", "rectangle", "circle"].includes(tool)) {
+         flushShapeToYjs(lastPointRef.current);
+      } else if (tool === "select" && pendingUpdateRef.current) {
+         updateObject(selectedIdRef.current, pendingUpdateRef.current);
+         pendingUpdateRef.current = null;
+      }
+      
       currentStrokeIdRef.current = null;
-      strokeBufferRef.current = [];
-      lastLocalPointRef.current = null;
-      lastLocalMidRef.current = null;
+      strokeBufferRef.current    = [];
+      lastLocalPointRef.current  = null;
+      lastLocalMidRef.current    = null;
+      shapeStartRef.current      = null;
+      isDraggingRef.current      = false;
+      isResizingRef.current      = false;
 
       if (canvasRef.current && pointerIdRef.current != null) {
-        try {
-          canvasRef.current.releasePointerCapture(pointerIdRef.current);
-        } catch {}
+        try { canvasRef.current.releasePointerCapture(pointerIdRef.current); } catch {}
       }
       pointerIdRef.current = null;
-    }, [flushStrokeToYjs]);
+    }, [flushStrokeToYjs, flushShapeToYjs, tool, updateObject]);
 
-    const handlePointerUp = useCallback(() => {
-      setIsDrawing(false);
-      setIsPanning(false);
+    const handlePointerUp    = useCallback(() => { setIsDrawing(false); setIsPanning(false); endStrokeCleanup(); if (canvasRef.current) canvasRef.current.style.cursor = tool === "pan" ? "grab" : tool === "select" ? "default" : "crosshair"; }, [tool, endStrokeCleanup]);
+    const handlePointerLeave = useCallback(() => { setIsDrawing(false); setIsPanning(false); endStrokeCleanup(); }, [endStrokeCleanup]);
 
-      endStrokeCleanup();
+    // ── wheel zoom ──
+    const handleWheel = useCallback((e) => {
+      e.preventDefault();
+      if (!canvasRef.current) return;
+      const rect   = canvasRef.current.getBoundingClientRect();
+      const scaleX = BASE_W / rect.width;
+      const scaleY = BASE_H / rect.height;
+      const mx     = (e.clientX - rect.left) * scaleX;
+      const my     = (e.clientY - rect.top) * scaleY;
+      
+      const factor = e.deltaY > 0 ? 0.9 : 1.1;
+      const newZ   = Math.max(0.5, Math.min(3, currentZoom * factor));
+      const change = newZ / currentZoom;
+      
+      canvasOffsetRef.current.x = mx - (mx - canvasOffsetRef.current.x) * change;
+      canvasOffsetRef.current.y = my - (my - canvasOffsetRef.current.y) * change;
+      setCurrentZoom(newZ);
+      scheduleRedraw(getCurrentObjects());
+    }, [currentZoom, scheduleRedraw, getCurrentObjects]);
 
-      if (canvasRef.current) {
-        canvasRef.current.style.cursor = tool === "pan" ? "grab" : "crosshair";
-      }
-    }, [tool, endStrokeCleanup]);
+    const handleZoomIn    = useCallback(() => { setCurrentZoom((p) => Math.min(p + 0.1, 3));  scheduleRedraw(getCurrentObjects()); }, [scheduleRedraw, getCurrentObjects]);
+    const handleZoomOut   = useCallback(() => { setCurrentZoom((p) => Math.max(p - 0.1, 0.5)); scheduleRedraw(getCurrentObjects()); }, [scheduleRedraw, getCurrentObjects]);
+    const handleZoomReset = useCallback(() => { setCurrentZoom(1); canvasOffsetRef.current = { x: 0, y: 0 }; scheduleRedraw(getCurrentObjects()); }, [scheduleRedraw, getCurrentObjects]);
 
-    const handlePointerLeave = useCallback(() => {
-      setIsDrawing(false);
-      setIsPanning(false);
-      endStrokeCleanup();
-    }, [endStrokeCleanup]);
+    const cursorStyle = tool === "pan" ? "grab" : tool === "select" ? "default" : "crosshair";
 
-    // =========================
-    // Wheel Zoom
-    // =========================
-    const handleWheel = useCallback(
-      (e) => {
-        e.preventDefault();
-        if (!canvasRef.current) return;
-
-        const rect = canvasRef.current.getBoundingClientRect();
-        const mouseX = e.clientX - rect.left;
-        const mouseY = e.clientY - rect.top;
-
-        const scaleFactor = e.deltaY > 0 ? 0.9 : 1.1;
-        const newZoom = Math.max(0.5, Math.min(3, currentZoom * scaleFactor));
-
-        const zoomChange = newZoom / currentZoom;
-
-        canvasOffsetRef.current.x =
-          mouseX - (mouseX - canvasOffsetRef.current.x) * zoomChange;
-        canvasOffsetRef.current.y =
-          mouseY - (mouseY - canvasOffsetRef.current.y) * zoomChange;
-
-        setCurrentZoom(newZoom);
-
-        if (yWhiteboardRef.current) {
-          const state = yWhiteboardRef.current.toArray()[0] || {};
-          scheduleRedraw(state.objects || []);
-        }
-      },
-      [currentZoom, scheduleRedraw]
-    );
-
-    // Zoom controls (memoized)
-    const handleZoomIn = useCallback(() => {
-      setCurrentZoom((prev) => Math.min(prev + 0.1, 3));
-      if (yWhiteboardRef.current) {
-        const state = yWhiteboardRef.current.toArray()[0] || {};
-        scheduleRedraw(state.objects || []);
-      }
-    }, [scheduleRedraw]);
-
-    const handleZoomOut = useCallback(() => {
-      setCurrentZoom((prev) => Math.max(prev - 0.1, 0.5));
-      if (yWhiteboardRef.current) {
-        const state = yWhiteboardRef.current.toArray()[0] || {};
-        scheduleRedraw(state.objects || []);
-      }
-    }, [scheduleRedraw]);
-
-    const handleZoomReset = useCallback(() => {
-      setCurrentZoom(1);
-      canvasOffsetRef.current = { x: 0, y: 0 };
-
-      if (yWhiteboardRef.current) {
-        const state = yWhiteboardRef.current.toArray()[0] || {};
-        scheduleRedraw(state.objects || []);
-      }
-    }, [scheduleRedraw]);
-
-    // Clear whiteboard (memoized)
+    // ═══════════════════════════════════════════════════════
+    // Whiteboard actions
+    // ═══════════════════════════════════════════════════════
     const handleClearWhiteboard = useCallback(() => {
       if (!yWhiteboardRef.current || !yDocRef.current) return;
-
-      if (window.confirm("Clear entire whiteboard?")) {
-        const emptyState = {
-          version: "1.0.0",
-          objects: [],
-          background: backgroundColor,
-          clearedAt: new Date().toISOString(),
-          clearedBy: sessionInfo?.streamerId,
-        };
-
-        yDocRef.current.transact(() => {
-          yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
-          yWhiteboardRef.current.insert(0, [emptyState]);
-        }, "drawing");
-
-        scheduleRedraw([]);
-        toast.success("Whiteboard cleared");
-      }
+      if (!window.confirm("Clear entire whiteboard?")) return;
+      yDocRef.current.transact(() => {
+        yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
+        yWhiteboardRef.current.insert(0, [{
+          version: "1.0.0", objects: [], background: backgroundColor,
+          clearedAt: new Date().toISOString(), clearedBy: sessionInfo?.streamerId,
+        }]);
+      }, "drawing");
+      imageCacheRef.current.clear();
+      scheduleRedraw([]);
+      toast.success("Whiteboard cleared");
     }, [backgroundColor, sessionInfo, scheduleRedraw]);
 
-    // Export as image (memoized)
     const handleExport = useCallback(() => {
       if (!canvasRef.current || !backgroundCanvasRef.current) return;
-
-      const canvas = canvasRef.current;
-      const bgCanvas = backgroundCanvasRef.current;
-
-      const exportCanvas = document.createElement("canvas");
-      exportCanvas.width = canvas.width;
-      exportCanvas.height = canvas.height;
-
-      const exportCtx = exportCanvas.getContext("2d");
-      exportCtx.drawImage(bgCanvas, 0, 0);
-      exportCtx.drawImage(canvas, 0, 0);
-
-      const link = document.createElement("a");
-      link.download = `whiteboard-${sessionId}-${Date.now()}.png`;
-      link.href = exportCanvas.toDataURL("image/png");
+      const exp = document.createElement("canvas");
+      exp.width  = canvasRef.current.width;
+      exp.height = canvasRef.current.height;
+      const ctx  = exp.getContext("2d");
+      ctx.drawImage(backgroundCanvasRef.current, 0, 0);
+      ctx.drawImage(canvasRef.current,           0, 0);
+      const link     = document.createElement("a");
+      link.download  = `whiteboard-${sessionId}-${Date.now()}.png`;
+      link.href      = exp.toDataURL("image/png");
       link.click();
-
       toast.success("Whiteboard exported");
     }, [sessionId]);
 
-    // Undo/Redo (memoized)
-    const handleUndo = useCallback(() => {
-      if (yUndoManagerRef.current) yUndoManagerRef.current.undo();
-    }, []);
+    const handleUndo = useCallback(() => yUndoManagerRef.current?.undo(), []);
+    const handleRedo = useCallback(() => yUndoManagerRef.current?.redo(), []);
 
-    const handleRedo = useCallback(() => {
-      if (yUndoManagerRef.current) yUndoManagerRef.current.redo();
-    }, []);
+    const handleDeleteSelected = useCallback(() => {
+      if (selectedIdRef.current) deleteObject(selectedIdRef.current);
+    }, [deleteObject]);
 
+    // ═══════════════════════════════════════════════════════
+    // Render
+    // ═══════════════════════════════════════════════════════
     return (
       <div
         ref={containerRef}
-        className={`absolute inset-0 z-20 w-full h-full bg-gray-900 overflow-hidden ${
-          isActive ? "block" : "hidden"
-        }`}
+        className={`absolute inset-0 z-20 w-full h-full bg-gray-900 overflow-hidden ${isActive ? "block" : "hidden"}`}
         onWheel={handleWheel}
       >
+        {/* Hidden file inputs */}
+        <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+
         {/* Background canvas */}
-        <canvas
-          ref={backgroundCanvasRef}
-          className="absolute top-0 left-0 w-full h-full"
-          style={{ pointerEvents: "none" }}
-        />
+        <canvas ref={backgroundCanvasRef} className="absolute top-0 left-0 w-full h-full" style={{ pointerEvents: "none" }} />
 
         {/* Main drawing canvas */}
         <canvas
           ref={canvasRef}
-          className={`absolute top-0 left-0 w-full h-full ${
-            tool === "pan" ? "cursor-grab" : "cursor-crosshair"
-          }`}
-          style={{ touchAction: "none" }}
+          className={`absolute top-0 left-0 w-full h-full`}
+          style={{ touchAction: "none", cursor: cursorStyle, zIndex: 20 }}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
@@ -901,297 +988,6051 @@ const StreamerWhiteboard = memo(
           onContextMenu={(e) => e.preventDefault()}
         />
 
-        {/* Floating Controls - Always Visible */}
-        <div className="absolute top-2 left-1/2 transform -translate-x-1/2 z-10">
-          <div className="bg-gray-800/95 backdrop-blur-sm rounded-lg shadow-lg border border-gray-700 p-2 flex items-center space-x-2">
+        {/* ── Top Toolbar ── */}
+        <div className="absolute top-2 left-1/2 transform -translate-x-1/2 z-30">
+          <div className="bg-gray-800/95 backdrop-blur-sm rounded-xl shadow-2xl border border-gray-700 px-2 py-1.5 flex items-center gap-1.5 flex-wrap">
+
             {/* Connection status */}
-            <div
-              className={`w-2 h-2 rounded-full ${
-                isConnected ? "bg-green-500 animate-pulse" : "bg-red-500"
-              }`}
-            />
-            <span className="text-white text-xs mr-2">
-              {isConnected ? "Connected" : "Disconnected"}
-            </span>
+            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isConnected ? "bg-green-500 animate-pulse" : "bg-red-500"}`} />
+            <span className="text-white text-xs mr-1">{isConnected ? "Live" : "Offline"}</span>
 
-            <div className="w-px h-6 bg-gray-600"></div>
+            <div className="w-px h-5 bg-gray-600" />
 
-            {/* Drawing tools */}
-            <div className="flex items-center space-x-1">
-              <button
-                onClick={() => setTool("pen")}
-                className={`p-1.5 rounded-lg transition-colors ${
-                  tool === "pen"
-                    ? "bg-blue-600 text-white"
-                    : "bg-gray-700 hover:bg-gray-600 text-gray-300"
-                }`}
-                title="Pen"
-              >
-                <FaPaintBrush className="w-4 h-4" />
+            {/* Draw tools */}
+            {[
+              { t: "pen",       icon: <FaPaintBrush className="w-3.5 h-3.5" />,   title: "Pen" },
+              { t: "eraser",    icon: <FaEraser     className="w-3.5 h-3.5" />,   title: "Eraser" },
+              { t: "line",      icon: <FiMinus      className="w-3.5 h-3.5" />,   title: "Line" },
+              { t: "rectangle", icon: <FiSquare     className="w-3.5 h-3.5" />,   title: "Rectangle" },
+              { t: "circle",    icon: <FiCircle     className="w-3.5 h-3.5" />,   title: "Circle" },
+              { t: "select",    icon: <FiMousePointer className="w-3.5 h-3.5" />, title: "Select / Move / Resize" },
+              { t: "pan",       icon: <FiMove       className="w-3.5 h-3.5" />,   title: "Pan (Alt+Drag)" },
+            ].map(({ t, icon, title }) => (
+              <button key={t} onClick={() => setTool(t)} title={title}
+                className={`p-1.5 rounded-lg transition-colors ${tool === t ? "bg-blue-600 text-white" : "bg-gray-700 hover:bg-gray-600 text-gray-300"}`}>
+                {icon}
               </button>
+            ))}
 
-              <button
-                onClick={() => setTool("eraser")}
-                className={`p-1.5 rounded-lg transition-colors ${
-                  tool === "eraser"
-                    ? "bg-blue-600 text-white"
-                    : "bg-gray-700 hover:bg-gray-600 text-gray-300"
-                }`}
-                title="Eraser"
-              >
-                <FaEraser className="w-4 h-4" />
-              </button>
+            <div className="w-px h-5 bg-gray-600" />
 
-              <button
-                onClick={() => setTool("line")}
-                className={`p-1.5 rounded-lg transition-colors ${
-                  tool === "line"
-                    ? "bg-blue-600 text-white"
-                    : "bg-gray-700 hover:bg-gray-600 text-gray-300"
-                }`}
-                title="Line"
-              >
-                <FiMinus className="w-4 h-4" />
-              </button>
-
-              <button
-                onClick={() => setTool("rectangle")}
-                className={`p-1.5 rounded-lg transition-colors ${
-                  tool === "rectangle"
-                    ? "bg-blue-600 text-white"
-                    : "bg-gray-700 hover:bg-gray-600 text-gray-300"
-                }`}
-                title="Rectangle"
-              >
-                <FiSquare className="w-4 h-4" />
-              </button>
-
-              <button
-                onClick={() => setTool("circle")}
-                className={`p-1.5 rounded-lg transition-colors ${
-                  tool === "circle"
-                    ? "bg-blue-600 text-white"
-                    : "bg-gray-700 hover:bg-gray-600 text-gray-300"
-                }`}
-                title="Circle"
-              >
-                <FiCircle className="w-4 h-4" />
-              </button>
-
-              <button
-                onClick={() => setTool("pan")}
-                className={`p-1.5 rounded-lg transition-colors ${
-                  tool === "pan"
-                    ? "bg-blue-600 text-white"
-                    : "bg-gray-700 hover:bg-gray-600 text-gray-300"
-                }`}
-                title="Pan (Alt + Drag)"
-              >
-                <FiMove className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="w-px h-6 bg-gray-600"></div>
-
-            {/* Color picker */}
-            <input
-              type="color"
-              value={color}
-              onChange={(e) => setColor(e.target.value)}
-              className="w-7 h-7 rounded cursor-pointer border border-gray-600"
-              title="Color"
-            />
-
-            <select
-              value={strokeWidth}
-              onChange={(e) => setStrokeWidth(Number(e.target.value))}
-              className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
-              title="Stroke Width"
-            >
-              <option value="1">1px</option>
-              <option value="2">2px</option>
-              <option value="3">3px</option>
-              <option value="5">5px</option>
-              <option value="8">8px</option>
+            {/* Color + stroke */}
+            <input type="color" value={color} onChange={(e) => setColor(e.target.value)}
+              className="w-6 h-6 rounded cursor-pointer border border-gray-600" title="Color" />
+            <select value={strokeWidth} onChange={(e) => setStrokeWidth(Number(e.target.value))}
+              className="bg-gray-700 text-white text-xs rounded px-1.5 py-1 border border-gray-600 w-14">
+              {[1,2,3,5,8].map((v) => <option key={v} value={v}>{v}px</option>)}
+            </select>
+            <select value={opacity} onChange={(e) => setOpacity(Number(e.target.value))}
+              className="bg-gray-700 text-white text-xs rounded px-1.5 py-1 border border-gray-600 w-14">
+              {[1,0.8,0.6,0.4].map((v) => <option key={v} value={v}>{v*100}%</option>)}
             </select>
 
-            <select
-              value={opacity}
-              onChange={(e) => setOpacity(Number(e.target.value))}
-              className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
-              title="Opacity"
-            >
-              <option value="1">100%</option>
-              <option value="0.8">80%</option>
-              <option value="0.6">60%</option>
-              <option value="0.4">40%</option>
-            </select>
+            <div className="w-px h-5 bg-gray-600" />
 
-            <div className="w-px h-6 bg-gray-600"></div>
-
-            {/* Zoom controls */}
-            <button
-              onClick={handleZoomOut}
-              className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
-              title="Zoom Out"
-            >
-              <FiMinusCircle className="w-4 h-4 text-white" />
-            </button>
-            <span className="text-white text-sm min-w-[50px] text-center font-medium">
-              {Math.round(currentZoom * 100)}%
-            </span>
-            <button
-              onClick={handleZoomIn}
-              className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
-              title="Zoom In"
-            >
-              <FiPlus className="w-4 h-4 text-white" />
-            </button>
-            <button
-              onClick={handleZoomReset}
-              className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
-              title="Reset Zoom"
-            >
-              <FiRefreshCcw className="w-4 h-4 text-white" />
+            {/* Image insert button */}
+            <button onClick={() => fileInputRef.current?.click()} title="Upload Image"
+              className="p-1.5 bg-gray-700 hover:bg-green-700 rounded-lg transition-colors text-gray-300 hover:text-white">
+              <FiImage className="w-3.5 h-3.5" />
             </button>
 
-            <div className="w-px h-6 bg-gray-600"></div>
+            <div className="w-px h-5 bg-gray-600" />
+
+            {/* Delete selected */}
+            {selectedId && (
+              <button onClick={handleDeleteSelected} title="Delete selected (Del)"
+                className="p-1.5 bg-red-700 hover:bg-red-600 rounded-lg transition-colors text-white">
+                <FiTrash2 className="w-3.5 h-3.5" />
+              </button>
+            )}
+
+            {/* Zoom */}
+            <button onClick={handleZoomOut}   title="Zoom Out"  className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiMinusCircle className="w-3.5 h-3.5 text-white"/></button>
+            <span className="text-white text-xs min-w-[44px] text-center">{Math.round(currentZoom * 100)}%</span>
+            <button onClick={handleZoomIn}    title="Zoom In"   className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiPlus className="w-3.5 h-3.5 text-white"/></button>
+            <button onClick={handleZoomReset} title="Reset Zoom" className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiRefreshCcw className="w-3.5 h-3.5 text-white"/></button>
+
+            <div className="w-px h-5 bg-gray-600" />
 
             {/* Undo/Redo */}
-            <button
-              onClick={handleUndo}
-              className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
-              title="Undo"
-            >
-              <FiRefreshCcw className="w-4 h-4 text-white" />
-            </button>
-            <button
-              onClick={handleRedo}
-              className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
-              title="Redo"
-            >
-              <FiRefreshCcw className="w-4 h-4 text-white transform scale-x-[-1]" />
+            <button onClick={handleUndo} title="Undo (Ctrl+Z)"             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiRefreshCcw className="w-3.5 h-3.5 text-white"/></button>
+            <button onClick={handleRedo} title="Redo (Ctrl+Y)"             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiRefreshCcw className="w-3.5 h-3.5 text-white transform scale-x-[-1]"/></button>
+
+            {/* Grid */}
+            <button onClick={() => setIsGridVisible((v) => !v)} title="Toggle Grid"
+              className={`p-1.5 rounded-lg transition-colors ${isGridVisible ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-300 hover:bg-gray-600"}`}>
+              <FiSquare className="w-3.5 h-3.5" />
             </button>
 
-            {/* Clear/Export */}
-            <button
-              onClick={handleClearWhiteboard}
-              className="p-1.5 bg-red-900 hover:bg-red-800 rounded-lg transition-colors"
-              title="Clear Whiteboard"
-            >
-              <FiTrash2 className="w-4 h-4 text-white" />
-            </button>
-            <button
-              onClick={handleExport}
-              className="p-1.5 bg-blue-900 hover:bg-blue-800 rounded-lg transition-colors"
-              title="Export as PNG"
-            >
-              <FiDownload className="w-4 h-4 text-white" />
-            </button>
+            {/* Clear + Export */}
+            <button onClick={handleClearWhiteboard} title="Clear All" className="p-1.5 bg-red-900 hover:bg-red-800 rounded-lg"><FiTrash2   className="w-3.5 h-3.5 text-white"/></button>
+            <button onClick={handleExport}          title="Export PNG" className="p-1.5 bg-blue-900 hover:bg-blue-800 rounded-lg"><FiDownload className="w-3.5 h-3.5 text-white"/></button>
 
-            {/* Grid toggle */}
-            <button
-              onClick={() => setIsGridVisible(!isGridVisible)}
-              className={`p-1.5 rounded-lg transition-colors ${
-                isGridVisible
-                  ? "bg-blue-600 text-white"
-                  : "bg-gray-700 text-gray-300 hover:bg-gray-600"
-              }`}
-              title="Toggle Grid"
-            >
-              <FiSquare className="w-4 h-4" />
-            </button>
-
-            <div className="w-px h-6 bg-gray-600"></div>
-
-            {/* Close button */}
-            <button
-              onClick={onClose}
-              className="p-1.5 bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
-              title="Close Whiteboard"
-            >
-              <FiX className="w-4 h-4 text-white" />
-            </button>
+            <div className="w-px h-5 bg-gray-600" />
+            <button onClick={onClose} title="Close" className="p-1.5 bg-red-600 hover:bg-red-700 rounded-lg"><FiX className="w-3.5 h-3.5 text-white"/></button>
           </div>
         </div>
 
-        {/* Bottom Info Bar */}
-        <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
-          <div className="flex items-center space-x-3">
-            <span>
-              Tool: <span className="font-bold capitalize">{tool}</span>
-            </span>
-            <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
-            <span>
-              Zoom:{" "}
-              <span className="font-bold">{Math.round(currentZoom * 100)}%</span>
-            </span>
-            <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
-            <span>
-              Viewers: <span className="font-bold">{participants.length}</span>
-            </span>
-            <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
-            <span>Alt+Click to pan</span>
+        {/* ── Bottom status bar ── */}
+        <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded-lg backdrop-blur-sm border border-gray-700">
+          <div className="flex items-center gap-3">
+            <span>Tool: <span className="font-bold capitalize">{tool}</span></span>
+            <span className="w-1 h-1 bg-gray-500 rounded-full" />
+            <span>Zoom: <span className="font-bold">{Math.round(currentZoom * 100)}%</span></span>
+            <span className="w-1 h-1 bg-gray-500 rounded-full" />
+            <span>Viewers: <span className="font-bold">{participants.length}</span></span>
+            {selectedId && <><span className="w-1 h-1 bg-gray-500 rounded-full" /><span className="text-blue-400">Object selected — Del to remove</span></>}
+            <span className="w-1 h-1 bg-gray-500 rounded-full" />
+            <span className="text-gray-400">Ctrl+V to paste image</span>
           </div>
         </div>
 
-        {/* Viewers count in top right */}
-        <div className="absolute top-2 right-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
-          <div className="flex items-center space-x-2">
-            <span>
-              {participants.length} active{" "}
-              {participants.length === 1 ? "viewer" : "viewers"}
-            </span>
+        {/* ── Viewers list ── */}
+        <div className="absolute top-2 right-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded-lg backdrop-blur-sm border border-gray-700">
+          <div className="flex items-center gap-2">
+            <span>{participants.length} viewer{participants.length !== 1 ? "s" : ""}</span>
             {participants.map((p) => (
-              <div
-                key={p.clientId}
-                className="w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-medium"
-                title={`${p.userName || "User"}`}
-              >
-                {p.userName?.charAt(0) || "U"}
+              <div key={p.clientId} className="w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-medium" title={p.userName || "User"}>
+                {(p.userName || "U").charAt(0)}
               </div>
             ))}
           </div>
         </div>
 
-        {/* Panning indicator */}
         {isPanning && (
-          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/70 text-white px-4 py-2 rounded-lg backdrop-blur-sm border border-gray-600">
-            <div className="flex items-center space-x-2">
-              <FiMove className="w-4 h-4" />
-              <span>Panning...</span>
-            </div>
-          </div>
-        )}
-
-        {/* Drawing disabled overlay */}
-        {!allowViewersToDraw && (
-          <div className="absolute bottom-2 right-2 bg-yellow-900/70 text-yellow-200 px-3 py-1.5 rounded-lg text-xs backdrop-blur-sm border border-yellow-600/30">
-            Viewers cannot draw
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-black/70 text-white px-4 py-2 rounded-lg backdrop-blur-sm border border-gray-600 flex items-center gap-2 pointer-events-none">
+            <FiMove className="w-4 h-4" /> <span>Panning…</span>
           </div>
         )}
       </div>
     );
   },
-  (prevProps, nextProps) => {
-    if (prevProps.sessionId !== nextProps.sessionId) return false;
-    if (prevProps.roomCode !== nextProps.roomCode) return false;
-    if (prevProps.wsToken !== nextProps.wsToken) return false;
-    if (prevProps.isActive !== nextProps.isActive) return false;
-    if (prevProps.allowViewersToDraw !== nextProps.allowViewersToDraw) return false;
-    if (prevProps.mainScreenMode !== nextProps.mainScreenMode) return false;
-    if (prevProps.compact !== nextProps.compact) return false;
-
-    if (prevProps.sessionInfo?.streamerId !== nextProps.sessionInfo?.streamerId) return false;
-    if (prevProps.sessionInfo?.streamerName !== nextProps.sessionInfo?.streamerName) return false;
-
+  (prev, next) => {
+    if (prev.sessionId         !== next.sessionId)         return false;
+    if (prev.roomCode          !== next.roomCode)          return false;
+    if (prev.wsToken           !== next.wsToken)           return false;
+    if (prev.isActive          !== next.isActive)          return false;
+    if (prev.allowViewersToDraw !== next.allowViewersToDraw) return false;
+    if (prev.mainScreenMode    !== next.mainScreenMode)    return false;
+    if (prev.compact           !== next.compact)           return false;
+    if (prev.sessionInfo?.streamerId   !== next.sessionInfo?.streamerId)   return false;
+    if (prev.sessionInfo?.streamerName !== next.sessionInfo?.streamerName) return false;
     return true;
   }
 );
 
 StreamerWhiteboard.displayName = "StreamerWhiteboard";
-
 export default StreamerWhiteboard;
+
+
+
+// import React, {
+//   useState, useEffect, useRef, useCallback, memo,
+// } from "react";
+// import * as Y from "yjs";
+// import { WebsocketProvider } from "y-websocket";
+// import { IndexeddbPersistence } from "y-indexeddb";
+// import {
+//   FiSquare, FiCircle, FiMinus, FiDownload, FiRefreshCcw,
+//   FiTrash2, FiMove, FiPlus, FiMinusCircle, FiX, FiImage,
+//   FiMousePointer
+// } from "react-icons/fi";
+// import { FaEraser, FaPaintBrush } from "react-icons/fa";
+// import { toast } from "react-toastify";
+
+// // ─── constants ────────────────────────────────────────────────────────────────
+// const DEFAULT_MEDIA_W = 480;
+// const DEFAULT_MEDIA_H = 270;
+// const FLUSH_INTERVAL  = 50;   // ms — throttle Yjs stroke sync
+// const MIN_MOVE_DIST   = 0.6;  // px — ignore pointer jitter
+// const BASE_W = 1920;
+// const BASE_H = 1080;
+
+// // ─── helpers ──────────────────────────────────────────────────────────────────
+// function uid() {
+//   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+// }
+
+// function fileToBase64(file) {
+//   return new Promise((res, rej) => {
+//     const r = new FileReader();
+//     r.onload  = () => res(r.result);
+//     r.onerror = rej;
+//     r.readAsDataURL(file);
+//   });
+// }
+
+// function pointToLineDist(p, v, w) {
+//   const l2 = (v.x - w.x)**2 + (v.y - w.y)**2;
+//   if (l2 === 0) return Math.hypot(p.x - v.x, p.y - v.y);
+//   let t = ((p.x - v.x)*(w.x - v.x) + (p.y - v.y)*(w.y - v.y)) / l2;
+//   t = Math.max(0, Math.min(1, t));
+//   return Math.hypot(p.x - (v.x + t*(w.x - v.x)), p.y - (v.y + t*(w.y - v.y)));
+// }
+
+// // ─── StreamerWhiteboard ───────────────────────────────────────────────────────
+// const StreamerWhiteboard = memo(
+//   ({
+//     sessionId,
+//     roomCode,
+//     wsToken,
+//     sessionInfo,
+//     isActive,
+//     onClose,
+//     allowViewersToDraw = true,
+//     mainScreenMode     = false,
+//     compact            = false,
+//   }) => {
+//     // ── canvas refs ──
+//     const canvasRef           = useRef(null);
+//     const backgroundCanvasRef = useRef(null);
+//     const ctxRef              = useRef(null);
+//     const bgCtxRef            = useRef(null);
+//     const containerRef        = useRef(null);
+
+//     // ── Yjs refs ──
+//     const yDocRef          = useRef(null);
+//     const yProviderRef     = useRef(null);
+//     const yWhiteboardRef   = useRef(null);
+//     const ySettingsRef     = useRef(null);
+//     const yUndoManagerRef  = useRef(null);
+//     const yObserverCleanup = useRef(null);
+
+//     // ── media caches ──
+//     const imageCacheRef = useRef(new Map());
+
+//     // ── raf / flush ──
+//     const rafIdRef        = useRef(null);
+//     const pendingObjsRef  = useRef(null);
+//     const flushTimerRef   = useRef(null);
+//     const pendingUpdateRef= useRef(null); // Used for dragging/resizing
+
+//     // ── stroke & shapes state ──
+//     const currentStrokeIdRef  = useRef(null);
+//     const strokeBufferRef     = useRef([]);
+//     const lastLocalPointRef   = useRef(null);
+//     const lastLocalMidRef     = useRef(null);
+//     const pointerIdRef        = useRef(null);
+//     const shapeStartRef       = useRef(null);
+
+//     // ── pan ──
+//     const lastPanPointRef  = useRef({ x: 0, y: 0 });
+//     const canvasOffsetRef  = useRef({ x: 0, y: 0 });
+//     const lastPointRef     = useRef({ x: 0, y: 0 });
+
+//     // ── selected object (for move/delete/resize) ──
+//     const selectedIdRef = useRef(null);
+//     const dragOffsetRef = useRef({ x: 0, y: 0 });
+//     const isDraggingRef = useRef(false);
+//     const isResizingRef = useRef(false);
+
+//     // ── state ──
+//     const [tool,            setTool]            = useState("pen");
+//     const [color,           setColor]           = useState("#000000");
+//     const [strokeWidth,     setStrokeWidth]     = useState(2);
+//     const [opacity,         setOpacity]         = useState(1);
+//     const [currentZoom,     setCurrentZoom]     = useState(1);
+//     const [isConnected,     setIsConnected]     = useState(false);
+//     const [participants,    setParticipants]    = useState([]);
+//     const [backgroundColor, setBackgroundColor] = useState("#ffffff");
+//     const [isGridVisible,   setIsGridVisible]   = useState(false);
+//     const [isPanning,       setIsPanning]       = useState(false);
+//     const [isDrawing,       setIsDrawing]       = useState(false);
+//     const [selectedId,      setSelectedId]      = useState(null);
+
+//     const fileInputRef       = useRef(null);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Helpers
+//     // ═══════════════════════════════════════════════════════
+//     const getTransformedPoint = useCallback((e) => {
+//       if (!canvasRef.current) return { x: 0, y: 0 };
+//       const rect   = canvasRef.current.getBoundingClientRect();
+//       const scaleX = BASE_W / rect.width;
+//       const scaleY = BASE_H / rect.height;
+//       const x = (e.clientX - rect.left) * scaleX;
+//       const y = (e.clientY - rect.top)  * scaleY;
+//       return {
+//         x: (x - canvasOffsetRef.current.x) / currentZoom,
+//         y: (y - canvasOffsetRef.current.y) / currentZoom,
+//       };
+//     }, [currentZoom]);
+
+//     const getCurrentObjects = useCallback(() => {
+//       if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return [];
+//       return (yWhiteboardRef.current.toArray()[0]?.objects) || [];
+//     }, []);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Yjs write helpers
+//     // ═══════════════════════════════════════════════════════
+//     const commitState = useCallback((updater) => {
+//       if (!yWhiteboardRef.current || !yDocRef.current) return;
+//       yDocRef.current.transact(() => {
+//         const cur = yWhiteboardRef.current.toArray()[0] || {
+//           version: "1.0.0", objects: [], background: backgroundColor,
+//           createdAt: new Date().toISOString(),
+//         };
+//         const next = updater(cur);
+//         if (yWhiteboardRef.current.length === 0) {
+//           yWhiteboardRef.current.insert(0, [next]);
+//         } else {
+//           yWhiteboardRef.current.delete(0, 1);
+//           yWhiteboardRef.current.insert(0, [next]);
+//         }
+//       }, "drawing");
+//     }, [backgroundColor]);
+
+//     const addObject = useCallback((obj) => {
+//       commitState((cur) => ({
+//         ...cur,
+//         objects: [...(cur.objects || []), obj],
+//         updatedBy: sessionInfo?.streamerId,
+//         updatedAt: new Date().toISOString(),
+//       }));
+//     }, [commitState, sessionInfo]);
+
+//     const deleteObject = useCallback((id) => {
+//       commitState((cur) => ({
+//         ...cur,
+//         objects: (cur.objects || []).filter((o) => o.id !== id),
+//         updatedBy: sessionInfo?.streamerId,
+//         updatedAt: new Date().toISOString(),
+//       }));
+//       if (selectedIdRef.current === id) {
+//         selectedIdRef.current = null;
+//         setSelectedId(null);
+//       }
+//     }, [commitState, sessionInfo]);
+
+//     const updateObject = useCallback((id, patch) => {
+//       commitState((cur) => ({
+//         ...cur,
+//         objects: (cur.objects || []).map((o) => o.id === id ? { ...o, ...patch } : o),
+//         updatedBy: sessionInfo?.streamerId,
+//         updatedAt: new Date().toISOString(),
+//       }));
+//     }, [commitState, sessionInfo]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Drawing & Hit Test
+//     // ═══════════════════════════════════════════════════════
+//     const drawGrid = useCallback((ctx, w, h) => {
+//       ctx.save();
+//       ctx.strokeStyle = "#e0e0e0";
+//       ctx.lineWidth   = 0.5;
+//       ctx.globalAlpha = 0.3;
+//       const gs = 20;
+//       for (let x = 0; x <= w; x += gs) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
+//       for (let y = 0; y <= h; y += gs) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
+//       ctx.restore();
+//     }, []);
+
+//     const drawObject = useCallback((ctx, obj) => {
+//       if (!obj) return;
+//       ctx.save();
+//       ctx.strokeStyle = obj.color       || "#000000";
+//       ctx.fillStyle   = obj.fillColor   || "transparent";
+//       ctx.lineWidth   = (obj.strokeWidth || 2) / currentZoom;
+//       ctx.globalAlpha = obj.opacity     ?? 1;
+
+//       switch (obj.type) {
+//         case "pen":
+//         case "pencil":
+//         case "eraser": {
+//           if (!obj.points?.length) break;
+//           if (obj.type === "eraser") ctx.globalCompositeOperation = "destination-out";
+//           ctx.beginPath();
+//           ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//           obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
+//           ctx.stroke();
+//           break;
+//         }
+//         case "line": {
+//           ctx.beginPath(); ctx.moveTo(obj.x1, obj.y1); ctx.lineTo(obj.x2, obj.y2); ctx.stroke();
+//           break;
+//         }
+//         case "rectangle": {
+//           if (obj.fillColor) ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
+//           ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
+//           break;
+//         }
+//         case "circle": {
+//           ctx.beginPath(); ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
+//           if (obj.fillColor) ctx.fill();
+//           ctx.stroke();
+//           break;
+//         }
+//         case "text": {
+//           ctx.font      = `${obj.fontSize || 16}px Arial`;
+//           ctx.fillStyle = obj.color || "#000";
+//           ctx.fillText(obj.text || "", obj.x, obj.y);
+//           break;
+//         }
+//         case "image": {
+//           let img = imageCacheRef.current.get(obj.id);
+//           if (!img) {
+//             img       = new Image();
+//             img.src   = obj.src;
+//             img.onload = () => scheduleRedraw(getCurrentObjects());
+//             imageCacheRef.current.set(obj.id, img);
+//           }
+//           if (img.complete && img.naturalWidth > 0) {
+//             ctx.globalAlpha = obj.opacity ?? 1;
+//             ctx.drawImage(img, obj.x, obj.y, obj.width || DEFAULT_MEDIA_W, obj.height || DEFAULT_MEDIA_H);
+//           } else {
+//             ctx.strokeStyle = "#aaa"; ctx.strokeRect(obj.x, obj.y, obj.width || DEFAULT_MEDIA_W, obj.height || DEFAULT_MEDIA_H);
+//             ctx.fillStyle   = "#eee"; ctx.font = "14px Arial";
+//             ctx.fillText("Loading image…", obj.x + 8, obj.y + 20);
+//           }
+//           break;
+//         }
+//         default: break;
+//       }
+
+//       // Selection Highlight & Resize Handle (for rect, image, circle, line)
+//       if (selectedIdRef.current === obj.id && tool === "select") {
+//         ctx.strokeStyle = "#3b82f6";
+//         ctx.lineWidth = 2 / currentZoom;
+//         ctx.setLineDash([6 / currentZoom, 3 / currentZoom]);
+
+//         let hx, hy; // handle coordinates
+
+//         if (["rectangle", "image"].includes(obj.type)) {
+//           const bw = obj.width || DEFAULT_MEDIA_W;
+//           const bh = obj.height || DEFAULT_MEDIA_H;
+//           ctx.strokeRect(obj.x - 2, obj.y - 2, bw + 4, bh + 4);
+//           hx = obj.x + bw; hy = obj.y + bh;
+//         } else if (obj.type === "circle") {
+//           const bw = obj.radius * 2;
+//           ctx.strokeRect(obj.x - obj.radius - 2, obj.y - obj.radius - 2, bw + 4, bw + 4);
+//           hx = obj.x + obj.radius * 0.707; hy = obj.y + obj.radius * 0.707; // 45 deg angle
+//         } else if (obj.type === "line") {
+//           hx = obj.x2; hy = obj.y2;
+//         }
+
+//         ctx.setLineDash([]);
+
+//         // Draw Handle
+//         if (hx !== undefined && hy !== undefined) {
+//           ctx.fillStyle = "#ffffff";
+//           ctx.strokeStyle = "#3b82f6";
+//           ctx.lineWidth = 2 / currentZoom;
+//           ctx.beginPath();
+//           ctx.arc(hx, hy, 6 / currentZoom, 0, Math.PI * 2);
+//           ctx.fill();
+//           ctx.stroke();
+//         }
+//       }
+
+//       ctx.restore();
+//     // eslint-disable-next-line react-hooks/exhaustive-deps
+//     }, [currentZoom, tool]);
+
+//     const hitTest = useCallback((pt) => {
+//       const objs = getCurrentObjects();
+//       for (let i = objs.length - 1; i >= 0; i--) {
+//         const o = objs[i];
+//         if (["image", "rectangle"].includes(o.type)) {
+//           const w = o.width || DEFAULT_MEDIA_W;
+//           const h = o.height || DEFAULT_MEDIA_H;
+//           if (pt.x >= o.x && pt.x <= o.x + w && pt.y >= o.y && pt.y <= o.y + h) return o;
+//         } else if (o.type === "circle") {
+//           if (Math.hypot(pt.x - o.x, pt.y - o.y) <= o.radius) return o;
+//         } else if (o.type === "line") {
+//           if (pointToLineDist(pt, {x: o.x1, y: o.y1}, {x: o.x2, y: o.y2}) < 15 / currentZoom) return o;
+//         }
+//       }
+//       return null;
+//     }, [getCurrentObjects, currentZoom]);
+
+//     const hitTestHandle = useCallback((pt, obj) => {
+//       let hx, hy;
+//       if (["rectangle", "image"].includes(obj.type)) {
+//         hx = obj.x + (obj.width || DEFAULT_MEDIA_W);
+//         hy = obj.y + (obj.height || DEFAULT_MEDIA_H);
+//       } else if (obj.type === "circle") {
+//         hx = obj.x + obj.radius * 0.707; 
+//         hy = obj.y + obj.radius * 0.707;
+//       } else if (obj.type === "line") {
+//         hx = obj.x2; hy = obj.y2;
+//       } else return false;
+
+//       return Math.hypot(pt.x - hx, pt.y - hy) < 15 / currentZoom;
+//     }, [currentZoom]);
+
+//     const redrawCanvas = useCallback((objects) => {
+//       if (!ctxRef.current || !bgCtxRef.current || !canvasRef.current) return;
+//       const ctx    = ctxRef.current;
+//       const bgCtx  = bgCtxRef.current;
+//       const canvas = canvasRef.current;
+
+//       ctx.clearRect(0, 0, canvas.width, canvas.height);
+//       bgCtx.clearRect(0, 0, canvas.width, canvas.height);
+
+//       bgCtx.fillStyle = backgroundColor;
+//       bgCtx.fillRect(0, 0, canvas.width, canvas.height);
+//       if (isGridVisible) drawGrid(bgCtx, canvas.width, canvas.height);
+
+//       ctx.save();
+//       ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//       ctx.scale(currentZoom, currentZoom);
+//       (objects || []).forEach((obj) => drawObject(ctx, obj));
+//       ctx.restore();
+//     }, [backgroundColor, isGridVisible, currentZoom, drawGrid, drawObject]);
+
+//     const scheduleRedraw = useCallback((objects) => {
+//       pendingObjsRef.current = objects || [];
+//       if (rafIdRef.current) return;
+//       rafIdRef.current = requestAnimationFrame(() => {
+//         rafIdRef.current = null;
+//         redrawCanvas(pendingObjsRef.current || []);
+//         pendingObjsRef.current = null;
+//       });
+//     }, [redrawCanvas]);
+
+//     const loadWhiteboardState = useCallback(() => {
+//       if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return;
+//       try {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         if (state.background) setBackgroundColor(state.background);
+//         scheduleRedraw(Array.isArray(state.objects) ? state.objects : []);
+//       } catch (e) { console.error(e); }
+//     }, [scheduleRedraw]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Smooth stroke & Shape flushing
+//     // ═══════════════════════════════════════════════════════
+//     const drawSmoothStroke = useCallback((prev, next, strokeType) => {
+//       if (!ctxRef.current) return;
+//       const ctx = ctxRef.current;
+//       ctx.save();
+//       ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//       ctx.scale(currentZoom, currentZoom);
+//       ctx.lineCap   = "round";
+//       ctx.lineJoin  = "round";
+//       ctx.globalAlpha = opacity ?? 1;
+//       ctx.lineWidth   = (strokeWidth || 2) / currentZoom;
+
+//       if (strokeType === "eraser") {
+//         ctx.globalCompositeOperation = "destination-out";
+//         ctx.strokeStyle = "rgba(0,0,0,1)";
+//       } else {
+//         ctx.globalCompositeOperation = "source-over";
+//         ctx.strokeStyle = color || "#000000";
+//       }
+
+//       const mid = { x: (prev.x + next.x) / 2, y: (prev.y + next.y) / 2 };
+//       if (!lastLocalMidRef.current) lastLocalMidRef.current = { x: prev.x, y: prev.y };
+//       ctx.beginPath();
+//       ctx.moveTo(lastLocalMidRef.current.x, lastLocalMidRef.current.y);
+//       ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
+//       ctx.stroke();
+//       lastLocalMidRef.current = mid;
+//       ctx.restore();
+//     }, [currentZoom, color, strokeWidth, opacity]);
+
+//     const flushStrokeToYjs = useCallback(() => {
+//       const strokeId = currentStrokeIdRef.current;
+//       if (!strokeId) return;
+//       const buffered = strokeBufferRef.current;
+//       if (!buffered.length) return;
+//       const pts = buffered.slice();
+//       strokeBufferRef.current = [];
+
+//       commitState((cur) => {
+//         const objs   = [...(cur.objects || [])];
+//         const idx    = objs.findIndex((o) => o?.id === strokeId);
+//         if (idx === -1) return cur;
+//         const target = { ...objs[idx] };
+//         target.points = [...(target.points || []), ...pts];
+//         objs[idx] = target;
+//         return { ...cur, objects: objs, updatedAt: new Date().toISOString() };
+//       });
+//     }, [commitState]);
+
+//     const flushShapeToYjs = useCallback((currentPoint) => {
+//       const strokeId = currentStrokeIdRef.current;
+//       const startP = shapeStartRef.current;
+//       if (!strokeId || !startP || !currentPoint) return;
+
+//       commitState((cur) => {
+//         const objs   = [...(cur.objects || [])];
+//         const idx    = objs.findIndex((o) => o?.id === strokeId);
+//         if (idx === -1) return cur;
+//         const target = { ...objs[idx] };
+        
+//         if (target.type === "rectangle") {
+//           target.width = currentPoint.x - startP.x;
+//           target.height = currentPoint.y - startP.y;
+//         } else if (target.type === "circle") {
+//           target.radius = Math.hypot(currentPoint.x - startP.x, currentPoint.y - startP.y);
+//         } else if (target.type === "line") {
+//           target.x2 = currentPoint.x;
+//           target.y2 = currentPoint.y;
+//         }
+        
+//         objs[idx] = target;
+//         return { ...cur, objects: objs, updatedAt: new Date().toISOString() };
+//       });
+//     }, [commitState]);
+
+//     const scheduleFlush = useCallback(() => {
+//       if (flushTimerRef.current) return;
+//       flushTimerRef.current = setTimeout(() => {
+//         flushTimerRef.current = null;
+//         if (tool === "pen" || tool === "eraser") {
+//           flushStrokeToYjs();
+//         } else if (["line", "rectangle", "circle"].includes(tool)) {
+//           flushShapeToYjs(lastPointRef.current);
+//         }
+//       }, FLUSH_INTERVAL);
+//     }, [flushStrokeToYjs, flushShapeToYjs, tool]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Yjs init
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       if (!sessionId || !wsToken) return;
+
+//       const initYjs = async () => {
+//         try {
+//           const ydoc      = new Y.Doc();
+//           yDocRef.current = ydoc;
+
+//           const baseWs   = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
+//           const provider = new WebsocketProvider(`${baseWs}/yjs`, sessionId, ydoc, {
+//             WebSocketPolyfill: WebSocket,
+//             params: {
+//               token: wsToken, isStreamer: true, allowViewersToDraw,
+//               roomCode, userId: sessionInfo?.streamerId, userName: sessionInfo?.streamerName,
+//             },
+//           });
+//           yProviderRef.current  = provider;
+
+//           const yWhiteboard      = ydoc.getArray("whiteboard");
+//           yWhiteboardRef.current = yWhiteboard;
+
+//           const ySettings        = ydoc.getMap("room_settings");
+//           ySettingsRef.current   = ySettings;
+
+//           provider.awareness.setLocalState({
+//             userId: sessionInfo?.streamerId || "streamer",
+//             userName: sessionInfo?.streamerName || "Streamer",
+//             role: "STREAMER", isStreamer: true, color, tool, cursor: null,
+//           });
+
+//           provider.awareness.on("change", () => {
+//             const states = Array.from(provider.awareness.getStates().entries());
+//             setParticipants(states.map(([id, s]) => ({ clientId: id, ...s })).filter((p) => p.userId));
+//           });
+
+//           provider.on("sync", (synced) => {
+//             setIsConnected(!!synced);
+//             if (synced) loadWhiteboardState();
+//           });
+
+//           yUndoManagerRef.current = new Y.UndoManager(yWhiteboard, {
+//             captureTimeout: 150, trackedOrigins: new Set(["drawing"]),
+//           });
+
+//           new IndexeddbPersistence(`whiteboard-${sessionId}`, ydoc);
+
+//           const observer = (event) => {
+//             const origin = event?.transaction?.origin;
+//             if (origin === "drawing" && (isDrawing || currentStrokeIdRef.current)) return;
+//             loadWhiteboardState();
+//           };
+//           yWhiteboard.observe(observer);
+//           yObserverCleanup.current = () => { try { yWhiteboard.unobserve(observer); } catch {} };
+
+//         } catch (err) {
+//           console.error("Failed to init Yjs:", err);
+//           toast.error("Failed to connect to whiteboard server");
+//         }
+//       };
+
+//       initYjs();
+
+//       return () => {
+//         try { 
+//           if (tool === "pen" || tool === "eraser") flushStrokeToYjs(true); 
+//           else flushShapeToYjs(lastPointRef.current);
+//         } catch {}
+//         if (yObserverCleanup.current) { yObserverCleanup.current(); yObserverCleanup.current = null; }
+//         if (yProviderRef.current) { try { yProviderRef.current.disconnect(); yProviderRef.current.destroy(); } catch {} }
+//         if (yDocRef.current)      { try { yDocRef.current.destroy(); } catch {} }
+//         yProviderRef.current = yDocRef.current = yWhiteboardRef.current = null;
+//       };
+//       // eslint-disable-next-line react-hooks/exhaustive-deps
+//     }, [sessionId, roomCode, wsToken, allowViewersToDraw, sessionInfo]);
+
+//     // keep awareness fresh
+//     useEffect(() => {
+//       const p = yProviderRef.current;
+//       if (!p) return;
+//       try {
+//         const prev = p.awareness.getLocalState() || {};
+//         p.awareness.setLocalState({ ...prev, color, tool,
+//           userId: sessionInfo?.streamerId || "streamer",
+//           userName: sessionInfo?.streamerName || "Streamer",
+//           role: "STREAMER", isStreamer: true,
+//         });
+//       } catch {}
+//     }, [color, tool, sessionInfo]);
+
+//     // cleanup timers
+//     useEffect(() => () => {
+//       if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+//       if (rafIdRef.current)      cancelAnimationFrame(rafIdRef.current);
+//     }, []);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Canvas init + resize
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       if (!canvasRef.current || !backgroundCanvasRef.current || !containerRef.current) return;
+//       const canvas    = canvasRef.current;
+//       const bgCanvas  = backgroundCanvasRef.current;
+//       const container = containerRef.current;
+
+//       const resize = () => {
+//         canvas.width  = bgCanvas.width  = container.clientWidth;
+//         canvas.height = bgCanvas.height = container.clientHeight;
+//         const ctx   = canvas.getContext("2d");
+//         const bgCtx = bgCanvas.getContext("2d");
+//         ctx.lineCap = "round"; ctx.lineJoin = "round";
+//         ctxRef.current = ctx; bgCtxRef.current = bgCtx;
+        
+//         // Internal resolution fix
+//         canvas.width = BASE_W;
+//         canvas.height = BASE_H;
+//         bgCanvas.width = BASE_W;
+//         bgCanvas.height = BASE_H;
+        
+//         if (yWhiteboardRef.current) {
+//           const s = yWhiteboardRef.current.toArray()[0] || {};
+//           scheduleRedraw(s.objects || []);
+//         }
+//       };
+
+//       resize();
+//       const ro = new ResizeObserver(resize);
+//       ro.observe(container);
+//       return () => ro.disconnect();
+//     }, [scheduleRedraw]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Paste handler — Ctrl+V image
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       const handlePaste = async (e) => {
+//         for (const item of e.clipboardData.items) {
+//           if (item.type.startsWith("image/")) {
+//             const file   = item.getAsFile();
+//             const b64    = await fileToBase64(file);
+//             const img    = new Image();
+//             img.src      = b64;
+//             img.onload   = () => {
+//               const ratio = img.naturalWidth / img.naturalHeight;
+//               const w     = Math.min(img.naturalWidth, DEFAULT_MEDIA_W);
+//               const h     = w / ratio;
+//               addObject({
+//                 id: uid(), type: "image", src: b64,
+//                 x: 80, y: 80, width: w, height: h,
+//                 opacity: 1, timestamp: Date.now(),
+//               });
+//             };
+//             break;
+//           }
+//         }
+//       };
+//       window.addEventListener("paste", handlePaste);
+//       return () => window.removeEventListener("paste", handlePaste);
+//     }, [addObject]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Keyboard — Delete selected
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       const handleKey = (e) => {
+//         if ((e.key === "Delete" || e.key === "Backspace") && selectedIdRef.current) {
+//           if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+//           deleteObject(selectedIdRef.current);
+//         }
+//         if ((e.ctrlKey || e.metaKey) && e.key === "z") {
+//           e.preventDefault();
+//           yUndoManagerRef.current?.undo();
+//         }
+//         if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.shiftKey && e.key === "z"))) {
+//           e.preventDefault();
+//           yUndoManagerRef.current?.redo();
+//         }
+//       };
+//       window.addEventListener("keydown", handleKey);
+//       return () => window.removeEventListener("keydown", handleKey);
+//     }, [deleteObject]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Image upload handler
+//     // ═══════════════════════════════════════════════════════
+//     const handleImageUpload = useCallback(async (e) => {
+//       const file = e.target.files?.[0];
+//       if (!file) return;
+//       if (file.size > 10 * 1024 * 1024) { toast.error("Image must be < 10MB"); return; }
+//       const b64  = await fileToBase64(file);
+//       const img  = new Image();
+//       img.src    = b64;
+//       img.onload = () => {
+//         const ratio = img.naturalWidth / img.naturalHeight;
+//         const w     = Math.min(img.naturalWidth, DEFAULT_MEDIA_W);
+//         const h     = w / ratio;
+//         addObject({ id: uid(), type: "image", src: b64, x: 80, y: 80, width: w, height: h, opacity: 1, timestamp: Date.now() });
+//       };
+//       e.target.value = "";
+//     }, [addObject]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Pointer events
+//     // ═══════════════════════════════════════════════════════
+//     const handlePointerDown = useCallback((e) => {
+//       e.preventDefault();
+//       if (!canvasRef.current || e.button === 2) return;
+//       try { canvasRef.current.setPointerCapture(e.pointerId); pointerIdRef.current = e.pointerId; } catch {}
+
+//       if (tool === "pan" || e.altKey || e.button === 1) {
+//         setIsPanning(true);
+//         lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+//         canvasRef.current.style.cursor = "grabbing";
+//         return;
+//       }
+
+//       const p = getTransformedPoint(e);
+
+//       // Select / Move / Resize tool
+//       if (tool === "select") {
+//         const objs = getCurrentObjects();
+//         const selObj = objs.find(o => o.id === selectedIdRef.current);
+        
+//         // 1. Check if Handle is clicked (Resize)
+//         if (selObj && hitTestHandle(p, selObj)) {
+//           isResizingRef.current = true;
+//           return;
+//         }
+
+//         // 2. Check if Object is clicked (Drag/Move)
+//         const hit = hitTest(p);
+//         if (hit) {
+//           selectedIdRef.current = hit.id;
+//           setSelectedId(hit.id);
+//           dragOffsetRef.current = { 
+//             x: p.x - (hit.type === 'line' ? hit.x1 : hit.x), 
+//             y: p.y - (hit.type === 'line' ? hit.y1 : hit.y) 
+//           };
+//           isDraggingRef.current = true;
+//         } else {
+//           selectedIdRef.current = null;
+//           setSelectedId(null);
+//         }
+//         scheduleRedraw(getCurrentObjects());
+//         return;
+//       }
+
+//       setIsDrawing(true);
+//       lastPointRef.current      = p;
+//       lastLocalPointRef.current = p;
+//       lastLocalMidRef.current   = null;
+//       shapeStartRef.current     = p; // Set the origin point for shapes
+
+//       const strokeId = uid();
+//       currentStrokeIdRef.current = strokeId;
+
+//       if (tool === "pen" || tool === "eraser") {
+//         strokeBufferRef.current    = [];
+//         addObject({
+//           id: strokeId, type: tool,
+//           points: [{ x: p.x, y: p.y }],
+//           color: tool === "eraser" ? backgroundColor : color,
+//           strokeWidth, opacity, timestamp: Date.now(),
+//         });
+//         drawSmoothStroke(p, { x: p.x + 0.01, y: p.y + 0.01 }, tool);
+//       } else if (["line", "rectangle", "circle"].includes(tool)) {
+//          const baseObj = {
+//             id: strokeId, type: tool,
+//             x: p.x, y: p.y,
+//             color, strokeWidth, opacity, timestamp: Date.now()
+//          };
+//          if (tool === "line") { baseObj.x1 = p.x; baseObj.y1 = p.y; baseObj.x2 = p.x; baseObj.y2 = p.y; }
+//          if (tool === "rectangle") { baseObj.width = 0; baseObj.height = 0; }
+//          if (tool === "circle") { baseObj.radius = 0; }
+//          addObject(baseObj);
+//       }
+//     }, [tool, getTransformedPoint, hitTestHandle, hitTest, addObject, drawSmoothStroke, scheduleRedraw, getCurrentObjects, backgroundColor, color, strokeWidth, opacity]);
+
+//     const handlePointerMove = useCallback((e) => {
+//       if (!canvasRef.current) return;
+
+//       if (isPanning) {
+//         const dx = e.clientX - lastPanPointRef.current.x;
+//         const dy = e.clientY - lastPanPointRef.current.y;
+//         canvasOffsetRef.current.x += dx;
+//         canvasOffsetRef.current.y += dy;
+//         lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+//         scheduleRedraw(getCurrentObjects());
+//         return;
+//       }
+
+//       const p = getTransformedPoint(e);
+
+//       // Drag or Resize media object
+//       if (tool === "select" && selectedIdRef.current) {
+//         if (isResizingRef.current) {
+//           const objs = getCurrentObjects();
+//           const selObj = objs.find(o => o.id === selectedIdRef.current);
+//           if (!selObj) return;
+
+//           let patch = {};
+//           if (["rectangle", "image"].includes(selObj.type)) {
+//             patch.width = Math.max(20, p.x - selObj.x);
+//             patch.height = Math.max(20, p.y - selObj.y);
+//           } else if (selObj.type === "circle") {
+//             patch.radius = Math.max(10, Math.hypot(p.x - selObj.x, p.y - selObj.y));
+//           } else if (selObj.type === "line") {
+//             patch.x2 = p.x;
+//             patch.y2 = p.y;
+//           }
+//           pendingUpdateRef.current = patch;
+
+//         } else if (isDraggingRef.current) {
+//           const selObj = getCurrentObjects().find(o => o.id === selectedIdRef.current);
+//           if (!selObj) return;
+
+//           let patch = {};
+//           const newX = p.x - dragOffsetRef.current.x;
+//           const newY = p.y - dragOffsetRef.current.y;
+
+//           if (selObj.type === "line") {
+//             const dx = newX - selObj.x1;
+//             const dy = newY - selObj.y1;
+//             patch.x1 = newX;
+//             patch.y1 = newY;
+//             patch.x2 = selObj.x2 + dx;
+//             patch.y2 = selObj.y2 + dy;
+//           } else {
+//             patch.x = newX;
+//             patch.y = newY;
+//           }
+//           pendingUpdateRef.current = patch;
+//         }
+
+//         if (pendingUpdateRef.current) {
+//           // Instant Local Feedback
+//           const tempObjs = getCurrentObjects().map(o => o.id === selectedIdRef.current ? { ...o, ...pendingUpdateRef.current } : o);
+//           redrawCanvas(tempObjs);
+
+//           // Throttled Network Sync
+//           if (!flushTimerRef.current) {
+//             flushTimerRef.current = setTimeout(() => {
+//                 flushTimerRef.current = null;
+//                 if (pendingUpdateRef.current) {
+//                     updateObject(selectedIdRef.current, pendingUpdateRef.current);
+//                     pendingUpdateRef.current = null;
+//                 }
+//             }, FLUSH_INTERVAL);
+//           }
+//         }
+//         return;
+//       }
+
+//       if (!isDrawing) return;
+
+//       if (tool === "pen" || tool === "eraser") {
+//         const events = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
+//         for (const evt of events) {
+//           const next = getTransformedPoint(evt);
+//           const prev = lastLocalPointRef.current || lastPointRef.current;
+//           const dist = prev ? Math.hypot(next.x - prev.x, next.y - prev.y) : 999;
+//           if (dist < MIN_MOVE_DIST) continue;
+//           if (prev) drawSmoothStroke(prev, next, tool);
+//           strokeBufferRef.current.push(next);
+//           scheduleFlush();
+//           lastLocalPointRef.current = next;
+//           lastPointRef.current      = next;
+//         }
+//       } else if (["line", "rectangle", "circle"].includes(tool)) {
+//         lastPointRef.current = p;
+
+//         // Instant local UI feedback
+//         redrawCanvas(getCurrentObjects());
+//         const ctx = ctxRef.current;
+//         ctx.save();
+//         ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//         ctx.scale(currentZoom, currentZoom);
+//         ctx.strokeStyle = color;
+//         ctx.lineWidth = (strokeWidth || 2) / currentZoom;
+//         ctx.globalAlpha = opacity ?? 1;
+
+//         if (tool === "rectangle") {
+//             ctx.strokeRect(shapeStartRef.current.x, shapeStartRef.current.y, p.x - shapeStartRef.current.x, p.y - shapeStartRef.current.y);
+//         } else if (tool === "circle") {
+//             ctx.beginPath();
+//             ctx.arc(shapeStartRef.current.x, shapeStartRef.current.y, Math.hypot(p.x - shapeStartRef.current.x, p.y - shapeStartRef.current.y), 0, Math.PI * 2);
+//             ctx.stroke();
+//         } else if (tool === "line") {
+//             ctx.beginPath();
+//             ctx.moveTo(shapeStartRef.current.x, shapeStartRef.current.y);
+//             ctx.lineTo(p.x, p.y);
+//             ctx.stroke();
+//         }
+//         ctx.restore();
+
+//         // Throttled sync to network
+//         if (!flushTimerRef.current) {
+//           flushTimerRef.current = setTimeout(() => {
+//               flushTimerRef.current = null;
+//               flushShapeToYjs(lastPointRef.current);
+//           }, FLUSH_INTERVAL);
+//         }
+//       }
+//     }, [isDrawing, isPanning, tool, getTransformedPoint, drawSmoothStroke, scheduleFlush, flushShapeToYjs, scheduleRedraw, getCurrentObjects, updateObject, redrawCanvas, color, strokeWidth, opacity, currentZoom]);
+
+//     const endStrokeCleanup = useCallback(() => {
+//       if (tool === "pen" || tool === "eraser") {
+//          flushStrokeToYjs(true);
+//       } else if (["line", "rectangle", "circle"].includes(tool)) {
+//          flushShapeToYjs(lastPointRef.current);
+//       } else if (tool === "select" && pendingUpdateRef.current) {
+//          updateObject(selectedIdRef.current, pendingUpdateRef.current);
+//          pendingUpdateRef.current = null;
+//       }
+      
+//       currentStrokeIdRef.current = null;
+//       strokeBufferRef.current    = [];
+//       lastLocalPointRef.current  = null;
+//       lastLocalMidRef.current    = null;
+//       shapeStartRef.current      = null;
+//       isDraggingRef.current      = false;
+//       isResizingRef.current      = false;
+
+//       if (canvasRef.current && pointerIdRef.current != null) {
+//         try { canvasRef.current.releasePointerCapture(pointerIdRef.current); } catch {}
+//       }
+//       pointerIdRef.current = null;
+//     }, [flushStrokeToYjs, flushShapeToYjs, tool, updateObject]);
+
+//     const handlePointerUp    = useCallback(() => { setIsDrawing(false); setIsPanning(false); endStrokeCleanup(); if (canvasRef.current) canvasRef.current.style.cursor = tool === "pan" ? "grab" : tool === "select" ? "default" : "crosshair"; }, [tool, endStrokeCleanup]);
+//     const handlePointerLeave = useCallback(() => { setIsDrawing(false); setIsPanning(false); endStrokeCleanup(); }, [endStrokeCleanup]);
+
+//     // ── wheel zoom ──
+//     const handleWheel = useCallback((e) => {
+//       e.preventDefault();
+//       if (!canvasRef.current) return;
+//       const rect   = canvasRef.current.getBoundingClientRect();
+//       const scaleX = BASE_W / rect.width;
+//       const scaleY = BASE_H / rect.height;
+//       const mx     = (e.clientX - rect.left) * scaleX;
+//       const my     = (e.clientY - rect.top) * scaleY;
+      
+//       const factor = e.deltaY > 0 ? 0.9 : 1.1;
+//       const newZ   = Math.max(0.5, Math.min(3, currentZoom * factor));
+//       const change = newZ / currentZoom;
+      
+//       canvasOffsetRef.current.x = mx - (mx - canvasOffsetRef.current.x) * change;
+//       canvasOffsetRef.current.y = my - (my - canvasOffsetRef.current.y) * change;
+//       setCurrentZoom(newZ);
+//       scheduleRedraw(getCurrentObjects());
+//     }, [currentZoom, scheduleRedraw, getCurrentObjects]);
+
+//     const handleZoomIn    = useCallback(() => { setCurrentZoom((p) => Math.min(p + 0.1, 3));  scheduleRedraw(getCurrentObjects()); }, [scheduleRedraw, getCurrentObjects]);
+//     const handleZoomOut   = useCallback(() => { setCurrentZoom((p) => Math.max(p - 0.1, 0.5)); scheduleRedraw(getCurrentObjects()); }, [scheduleRedraw, getCurrentObjects]);
+//     const handleZoomReset = useCallback(() => { setCurrentZoom(1); canvasOffsetRef.current = { x: 0, y: 0 }; scheduleRedraw(getCurrentObjects()); }, [scheduleRedraw, getCurrentObjects]);
+
+//     const cursorStyle = tool === "pan" ? "grab" : tool === "select" ? "default" : "crosshair";
+
+//     // ═══════════════════════════════════════════════════════
+//     // Whiteboard actions
+//     // ═══════════════════════════════════════════════════════
+//     const handleClearWhiteboard = useCallback(() => {
+//       if (!yWhiteboardRef.current || !yDocRef.current) return;
+//       if (!window.confirm("Clear entire whiteboard?")) return;
+//       yDocRef.current.transact(() => {
+//         yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
+//         yWhiteboardRef.current.insert(0, [{
+//           version: "1.0.0", objects: [], background: backgroundColor,
+//           clearedAt: new Date().toISOString(), clearedBy: sessionInfo?.streamerId,
+//         }]);
+//       }, "drawing");
+//       imageCacheRef.current.clear();
+//       scheduleRedraw([]);
+//       toast.success("Whiteboard cleared");
+//     }, [backgroundColor, sessionInfo, scheduleRedraw]);
+
+//     const handleExport = useCallback(() => {
+//       if (!canvasRef.current || !backgroundCanvasRef.current) return;
+//       const exp = document.createElement("canvas");
+//       exp.width  = canvasRef.current.width;
+//       exp.height = canvasRef.current.height;
+//       const ctx  = exp.getContext("2d");
+//       ctx.drawImage(backgroundCanvasRef.current, 0, 0);
+//       ctx.drawImage(canvasRef.current,           0, 0);
+//       const link     = document.createElement("a");
+//       link.download  = `whiteboard-${sessionId}-${Date.now()}.png`;
+//       link.href      = exp.toDataURL("image/png");
+//       link.click();
+//       toast.success("Whiteboard exported");
+//     }, [sessionId]);
+
+//     const handleUndo = useCallback(() => yUndoManagerRef.current?.undo(), []);
+//     const handleRedo = useCallback(() => yUndoManagerRef.current?.redo(), []);
+
+//     const handleDeleteSelected = useCallback(() => {
+//       if (selectedIdRef.current) deleteObject(selectedIdRef.current);
+//     }, [deleteObject]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Render
+//     // ═══════════════════════════════════════════════════════
+//     return (
+//       <div
+//         ref={containerRef}
+//         className={`absolute inset-0 z-20 w-full h-full bg-gray-900 overflow-hidden ${isActive ? "block" : "hidden"}`}
+//         onWheel={handleWheel}
+//       >
+//         {/* Hidden file inputs */}
+//         <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+
+//         {/* Background canvas */}
+//         <canvas ref={backgroundCanvasRef} className="absolute top-0 left-0 w-full h-full" style={{ pointerEvents: "none" }} />
+
+//         {/* Main drawing canvas */}
+//         <canvas
+//           ref={canvasRef}
+//           className={`absolute top-0 left-0 w-full h-full`}
+//           style={{ touchAction: "none", cursor: cursorStyle, zIndex: 20 }}
+//           onPointerDown={handlePointerDown}
+//           onPointerMove={handlePointerMove}
+//           onPointerUp={handlePointerUp}
+//           onPointerLeave={handlePointerLeave}
+//           onContextMenu={(e) => e.preventDefault()}
+//         />
+
+//         {/* ── Top Toolbar ── */}
+//         <div className="absolute top-2 left-1/2 transform -translate-x-1/2 z-30">
+//           <div className="bg-gray-800/95 backdrop-blur-sm rounded-xl shadow-2xl border border-gray-700 px-2 py-1.5 flex items-center gap-1.5 flex-wrap">
+
+//             {/* Connection status */}
+//             <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isConnected ? "bg-green-500 animate-pulse" : "bg-red-500"}`} />
+//             <span className="text-white text-xs mr-1">{isConnected ? "Live" : "Offline"}</span>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Draw tools */}
+//             {[
+//               { t: "pen",       icon: <FaPaintBrush className="w-3.5 h-3.5" />,   title: "Pen" },
+//               { t: "eraser",    icon: <FaEraser     className="w-3.5 h-3.5" />,   title: "Eraser" },
+//               { t: "line",      icon: <FiMinus      className="w-3.5 h-3.5" />,   title: "Line" },
+//               { t: "rectangle", icon: <FiSquare     className="w-3.5 h-3.5" />,   title: "Rectangle" },
+//               { t: "circle",    icon: <FiCircle     className="w-3.5 h-3.5" />,   title: "Circle" },
+//               { t: "select",    icon: <FiMousePointer className="w-3.5 h-3.5" />, title: "Select / Move / Resize" },
+//               { t: "pan",       icon: <FiMove       className="w-3.5 h-3.5" />,   title: "Pan (Alt+Drag)" },
+//             ].map(({ t, icon, title }) => (
+//               <button key={t} onClick={() => setTool(t)} title={title}
+//                 className={`p-1.5 rounded-lg transition-colors ${tool === t ? "bg-blue-600 text-white" : "bg-gray-700 hover:bg-gray-600 text-gray-300"}`}>
+//                 {icon}
+//               </button>
+//             ))}
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Color + stroke */}
+//             <input type="color" value={color} onChange={(e) => setColor(e.target.value)}
+//               className="w-6 h-6 rounded cursor-pointer border border-gray-600" title="Color" />
+//             <select value={strokeWidth} onChange={(e) => setStrokeWidth(Number(e.target.value))}
+//               className="bg-gray-700 text-white text-xs rounded px-1.5 py-1 border border-gray-600 w-14">
+//               {[1,2,3,5,8].map((v) => <option key={v} value={v}>{v}px</option>)}
+//             </select>
+//             <select value={opacity} onChange={(e) => setOpacity(Number(e.target.value))}
+//               className="bg-gray-700 text-white text-xs rounded px-1.5 py-1 border border-gray-600 w-14">
+//               {[1,0.8,0.6,0.4].map((v) => <option key={v} value={v}>{v*100}%</option>)}
+//             </select>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Image insert button */}
+//             <button onClick={() => fileInputRef.current?.click()} title="Upload Image"
+//               className="p-1.5 bg-gray-700 hover:bg-green-700 rounded-lg transition-colors text-gray-300 hover:text-white">
+//               <FiImage className="w-3.5 h-3.5" />
+//             </button>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Delete selected */}
+//             {selectedId && (
+//               <button onClick={handleDeleteSelected} title="Delete selected (Del)"
+//                 className="p-1.5 bg-red-700 hover:bg-red-600 rounded-lg transition-colors text-white">
+//                 <FiTrash2 className="w-3.5 h-3.5" />
+//               </button>
+//             )}
+
+//             {/* Zoom */}
+//             <button onClick={handleZoomOut}   title="Zoom Out"  className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiMinusCircle className="w-3.5 h-3.5 text-white"/></button>
+//             <span className="text-white text-xs min-w-[44px] text-center">{Math.round(currentZoom * 100)}%</span>
+//             <button onClick={handleZoomIn}    title="Zoom In"   className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiPlus className="w-3.5 h-3.5 text-white"/></button>
+//             <button onClick={handleZoomReset} title="Reset Zoom" className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiRefreshCcw className="w-3.5 h-3.5 text-white"/></button>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Undo/Redo */}
+//             <button onClick={handleUndo} title="Undo (Ctrl+Z)"             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiRefreshCcw className="w-3.5 h-3.5 text-white"/></button>
+//             <button onClick={handleRedo} title="Redo (Ctrl+Y)"             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiRefreshCcw className="w-3.5 h-3.5 text-white transform scale-x-[-1]"/></button>
+
+//             {/* Grid */}
+//             <button onClick={() => setIsGridVisible((v) => !v)} title="Toggle Grid"
+//               className={`p-1.5 rounded-lg transition-colors ${isGridVisible ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-300 hover:bg-gray-600"}`}>
+//               <FiSquare className="w-3.5 h-3.5" />
+//             </button>
+
+//             {/* Clear + Export */}
+//             <button onClick={handleClearWhiteboard} title="Clear All" className="p-1.5 bg-red-900 hover:bg-red-800 rounded-lg"><FiTrash2   className="w-3.5 h-3.5 text-white"/></button>
+//             <button onClick={handleExport}          title="Export PNG" className="p-1.5 bg-blue-900 hover:bg-blue-800 rounded-lg"><FiDownload className="w-3.5 h-3.5 text-white"/></button>
+
+//             <div className="w-px h-5 bg-gray-600" />
+//             <button onClick={onClose} title="Close" className="p-1.5 bg-red-600 hover:bg-red-700 rounded-lg"><FiX className="w-3.5 h-3.5 text-white"/></button>
+//           </div>
+//         </div>
+
+//         {/* ── Bottom status bar ── */}
+//         <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded-lg backdrop-blur-sm border border-gray-700">
+//           <div className="flex items-center gap-3">
+//             <span>Tool: <span className="font-bold capitalize">{tool}</span></span>
+//             <span className="w-1 h-1 bg-gray-500 rounded-full" />
+//             <span>Zoom: <span className="font-bold">{Math.round(currentZoom * 100)}%</span></span>
+//             <span className="w-1 h-1 bg-gray-500 rounded-full" />
+//             <span>Viewers: <span className="font-bold">{participants.length}</span></span>
+//             {selectedId && <><span className="w-1 h-1 bg-gray-500 rounded-full" /><span className="text-blue-400">Object selected — Del to remove</span></>}
+//             <span className="w-1 h-1 bg-gray-500 rounded-full" />
+//             <span className="text-gray-400">Ctrl+V to paste image</span>
+//           </div>
+//         </div>
+
+//         {/* ── Viewers list ── */}
+//         <div className="absolute top-2 right-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded-lg backdrop-blur-sm border border-gray-700">
+//           <div className="flex items-center gap-2">
+//             <span>{participants.length} viewer{participants.length !== 1 ? "s" : ""}</span>
+//             {participants.map((p) => (
+//               <div key={p.clientId} className="w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-medium" title={p.userName || "User"}>
+//                 {(p.userName || "U").charAt(0)}
+//               </div>
+//             ))}
+//           </div>
+//         </div>
+
+//         {isPanning && (
+//           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-black/70 text-white px-4 py-2 rounded-lg backdrop-blur-sm border border-gray-600 flex items-center gap-2 pointer-events-none">
+//             <FiMove className="w-4 h-4" /> <span>Panning…</span>
+//           </div>
+//         )}
+//       </div>
+//     );
+//   },
+//   (prev, next) => {
+//     if (prev.sessionId         !== next.sessionId)         return false;
+//     if (prev.roomCode          !== next.roomCode)          return false;
+//     if (prev.wsToken           !== next.wsToken)           return false;
+//     if (prev.isActive          !== next.isActive)          return false;
+//     if (prev.allowViewersToDraw !== next.allowViewersToDraw) return false;
+//     if (prev.mainScreenMode    !== next.mainScreenMode)    return false;
+//     if (prev.compact           !== next.compact)           return false;
+//     if (prev.sessionInfo?.streamerId   !== next.sessionInfo?.streamerId)   return false;
+//     if (prev.sessionInfo?.streamerName !== next.sessionInfo?.streamerName) return false;
+//     return true;
+//   }
+// );
+
+// StreamerWhiteboard.displayName = "StreamerWhiteboard";
+// export default StreamerWhiteboard;
+
+
+
+
+// import React, {
+//   useState, useEffect, useRef, useCallback, memo,
+// } from "react";
+// import * as Y from "yjs";
+// import { WebsocketProvider } from "y-websocket";
+// import { IndexeddbPersistence } from "y-indexeddb";
+// import {
+//   FiSquare, FiCircle, FiMinus, FiDownload, FiRefreshCcw,
+//   FiTrash2, FiMove, FiPlus, FiMinusCircle, FiX, FiImage,
+//   FiFileText, FiMousePointer
+// } from "react-icons/fi";
+// import { FaEraser, FaPaintBrush } from "react-icons/fa";
+// import { toast } from "react-toastify";
+
+// // ─── constants ────────────────────────────────────────────────────────────────
+// const DEFAULT_MEDIA_W = 480;
+// const DEFAULT_MEDIA_H = 270;
+// const FLUSH_INTERVAL  = 50;   // ms — throttle Yjs stroke sync
+// const MIN_MOVE_DIST   = 0.6;  // px — ignore pointer jitter
+
+// // ─── helpers ──────────────────────────────────────────────────────────────────
+// function uid() {
+//   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+// }
+
+// function fileToBase64(file) {
+//   return new Promise((res, rej) => {
+//     const r = new FileReader();
+//     r.onload  = () => res(r.result);
+//     r.onerror = rej;
+//     r.readAsDataURL(file);
+//   });
+// }
+
+// // ─── StreamerWhiteboard ───────────────────────────────────────────────────────
+// const StreamerWhiteboard = memo(
+//   ({
+//     sessionId,
+//     roomCode,
+//     wsToken,
+//     sessionInfo,
+//     isActive,
+//     onClose,
+//     allowViewersToDraw = true,
+//     mainScreenMode     = false,
+//     compact            = false,
+//   }) => {
+//     // ── canvas refs ──
+//     const canvasRef           = useRef(null);
+//     const backgroundCanvasRef = useRef(null);
+//     const ctxRef              = useRef(null);
+//     const bgCtxRef            = useRef(null);
+//     const containerRef        = useRef(null);
+
+//     // ── Yjs refs ──
+//     const yDocRef          = useRef(null);
+//     const yProviderRef     = useRef(null);
+//     const yWhiteboardRef   = useRef(null);
+//     const ySettingsRef     = useRef(null);
+//     const yUndoManagerRef  = useRef(null);
+//     const yObserverCleanup = useRef(null);
+
+//     // ── media caches ──
+//     const imageCacheRef = useRef(new Map());   // id → HTMLImageElement
+
+//     // ── raf / flush ──
+//     const rafIdRef        = useRef(null);
+//     const pendingObjsRef  = useRef(null);
+//     const flushTimerRef   = useRef(null);
+
+//     // ── stroke & shapes state ──
+//     const currentStrokeIdRef  = useRef(null);
+//     const strokeBufferRef     = useRef([]);
+//     const lastLocalPointRef   = useRef(null);
+//     const lastLocalMidRef     = useRef(null);
+//     const pointerIdRef        = useRef(null);
+//     const shapeStartRef       = useRef(null); // ✅ Added for shapes (Square, Circle, Line)
+
+//     // ── pan ──
+//     const lastPanPointRef  = useRef({ x: 0, y: 0 });
+//     const canvasOffsetRef  = useRef({ x: 0, y: 0 });
+//     const lastPointRef     = useRef({ x: 0, y: 0 });
+
+//     // ── selected object (for move/delete) ──
+//     const selectedIdRef = useRef(null);
+//     const dragOffsetRef = useRef({ x: 0, y: 0 });
+//     const isDraggingRef = useRef(false);
+
+//     // ── state ──
+//     const [tool,            setTool]            = useState("pen");
+//     const [color,           setColor]           = useState("#000000");
+//     const [strokeWidth,     setStrokeWidth]     = useState(2);
+//     const [opacity,         setOpacity]         = useState(1);
+//     const [currentZoom,     setCurrentZoom]     = useState(1);
+//     const [isConnected,     setIsConnected]     = useState(false);
+//     const [participants,    setParticipants]    = useState([]);
+//     const [backgroundColor, setBackgroundColor] = useState("#ffffff");
+//     const [isGridVisible,   setIsGridVisible]   = useState(false);
+//     const [isPanning,       setIsPanning]       = useState(false);
+//     const [isDrawing,       setIsDrawing]       = useState(false);
+//     const [selectedId,      setSelectedId]      = useState(null);
+
+//     const fileInputRef       = useRef(null);
+//     const pdfInputRef        = useRef(null);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Helpers
+//     // ═══════════════════════════════════════════════════════
+//     const getTransformedPoint = useCallback((e) => {
+//       if (!canvasRef.current) return { x: 0, y: 0 };
+//       const rect   = canvasRef.current.getBoundingClientRect();
+//       const scaleX = canvasRef.current.width  / rect.width;
+//       const scaleY = canvasRef.current.height / rect.height;
+//       const x = (e.clientX - rect.left) * scaleX;
+//       const y = (e.clientY - rect.top)  * scaleY;
+//       return {
+//         x: (x - canvasOffsetRef.current.x) / currentZoom,
+//         y: (y - canvasOffsetRef.current.y) / currentZoom,
+//       };
+//     }, [currentZoom]);
+
+//     const getCurrentObjects = useCallback(() => {
+//       if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return [];
+//       return (yWhiteboardRef.current.toArray()[0]?.objects) || [];
+//     }, []);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Yjs write helpers
+//     // ═══════════════════════════════════════════════════════
+//     const commitState = useCallback((updater) => {
+//       if (!yWhiteboardRef.current || !yDocRef.current) return;
+//       yDocRef.current.transact(() => {
+//         const cur = yWhiteboardRef.current.toArray()[0] || {
+//           version: "1.0.0", objects: [], background: backgroundColor,
+//           createdAt: new Date().toISOString(),
+//         };
+//         const next = updater(cur);
+//         if (yWhiteboardRef.current.length === 0) {
+//           yWhiteboardRef.current.insert(0, [next]);
+//         } else {
+//           yWhiteboardRef.current.delete(0, 1);
+//           yWhiteboardRef.current.insert(0, [next]);
+//         }
+//       }, "drawing");
+//     }, [backgroundColor]);
+
+//     const addObject = useCallback((obj) => {
+//       commitState((cur) => ({
+//         ...cur,
+//         objects: [...(cur.objects || []), obj],
+//         updatedBy: sessionInfo?.streamerId,
+//         updatedAt: new Date().toISOString(),
+//       }));
+//     }, [commitState, sessionInfo]);
+
+//     const deleteObject = useCallback((id) => {
+//       commitState((cur) => ({
+//         ...cur,
+//         objects: (cur.objects || []).filter((o) => o.id !== id),
+//         updatedBy: sessionInfo?.streamerId,
+//         updatedAt: new Date().toISOString(),
+//       }));
+//       if (selectedIdRef.current === id) {
+//         selectedIdRef.current = null;
+//         setSelectedId(null);
+//       }
+//     }, [commitState, sessionInfo]);
+
+//     const updateObject = useCallback((id, patch) => {
+//       commitState((cur) => ({
+//         ...cur,
+//         objects: (cur.objects || []).map((o) => o.id === id ? { ...o, ...patch } : o),
+//         updatedBy: sessionInfo?.streamerId,
+//         updatedAt: new Date().toISOString(),
+//       }));
+//     }, [commitState, sessionInfo]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Drawing
+//     // ═══════════════════════════════════════════════════════
+//     const drawGrid = useCallback((ctx, w, h) => {
+//       ctx.save();
+//       ctx.strokeStyle = "#e0e0e0";
+//       ctx.lineWidth   = 0.5;
+//       ctx.globalAlpha = 0.3;
+//       const gs = 20;
+//       for (let x = 0; x <= w; x += gs) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
+//       for (let y = 0; y <= h; y += gs) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
+//       ctx.restore();
+//     }, []);
+
+//     const drawObject = useCallback((ctx, obj) => {
+//       if (!obj) return;
+//       ctx.save();
+//       ctx.strokeStyle = obj.color       || "#000000";
+//       ctx.fillStyle   = obj.fillColor   || "transparent";
+//       ctx.lineWidth   = (obj.strokeWidth || 2) / currentZoom;
+//       ctx.globalAlpha = obj.opacity     ?? 1;
+
+//       switch (obj.type) {
+//         case "pen":
+//         case "pencil": {
+//           if (!obj.points?.length) break;
+//           ctx.beginPath();
+//           ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//           obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
+//           ctx.stroke();
+//           break;
+//         }
+//         case "eraser": {
+//           if (!obj.points?.length) break;
+//           ctx.save();
+//           ctx.globalCompositeOperation = "destination-out";
+//           ctx.beginPath();
+//           ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//           obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
+//           ctx.stroke();
+//           ctx.restore();
+//           break;
+//         }
+//         case "line": {
+//           ctx.beginPath(); ctx.moveTo(obj.x1, obj.y1); ctx.lineTo(obj.x2, obj.y2); ctx.stroke();
+//           break;
+//         }
+//         case "rectangle": {
+//           if (obj.fillColor) ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
+//           ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
+//           break;
+//         }
+//         case "circle": {
+//           ctx.beginPath(); ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
+//           if (obj.fillColor) ctx.fill();
+//           ctx.stroke();
+//           break;
+//         }
+//         case "text": {
+//           ctx.font      = `${obj.fontSize || 16}px Arial`;
+//           ctx.fillStyle = obj.color || "#000";
+//           ctx.fillText(obj.text || "", obj.x, obj.y);
+//           break;
+//         }
+//         case "image": {
+//           let img = imageCacheRef.current.get(obj.id);
+//           if (!img) {
+//             img       = new Image();
+//             img.src   = obj.src;
+//             img.onload = () => scheduleRedraw(getCurrentObjects());
+//             imageCacheRef.current.set(obj.id, img);
+//           }
+//           if (img.complete && img.naturalWidth > 0) {
+//             ctx.globalAlpha = obj.opacity ?? 1;
+//             ctx.drawImage(img, obj.x, obj.y, obj.width || DEFAULT_MEDIA_W, obj.height || DEFAULT_MEDIA_H);
+//           } else {
+//             ctx.strokeStyle = "#aaa"; ctx.strokeRect(obj.x, obj.y, obj.width || DEFAULT_MEDIA_W, obj.height || DEFAULT_MEDIA_H);
+//             ctx.fillStyle   = "#eee"; ctx.font = "14px Arial";
+//             ctx.fillText("Loading image…", obj.x + 8, obj.y + 20);
+//           }
+//           break;
+//         }
+//         case "pdf": {
+//           let img = imageCacheRef.current.get(obj.id);
+//           if (!img) {
+//             img       = new Image();
+//             img.src   = obj.src; // base64 rendered page
+//             img.onload = () => scheduleRedraw(getCurrentObjects());
+//             imageCacheRef.current.set(obj.id, img);
+//           }
+//           const w = obj.width  || DEFAULT_MEDIA_W;
+//           const h = obj.height || DEFAULT_MEDIA_H;
+//           if (img.complete && img.naturalWidth > 0) {
+//             ctx.globalAlpha = obj.opacity ?? 1;
+//             ctx.drawImage(img, obj.x, obj.y, w, h);
+//           } else {
+//             ctx.fillStyle   = "#f9fafb"; ctx.fillRect(obj.x, obj.y, w, h);
+//             ctx.strokeStyle = "#d1d5db"; ctx.strokeRect(obj.x, obj.y, w, h);
+//             ctx.fillStyle   = "#6b7280"; ctx.font = "14px Arial";
+//             ctx.fillText("Rendering PDF…", obj.x + 8, obj.y + h / 2);
+//           }
+//           if (selectedIdRef.current === obj.id) {
+//             ctx.strokeStyle = "#3b82f6"; ctx.lineWidth = 2 / currentZoom;
+//             ctx.setLineDash([6 / currentZoom, 3 / currentZoom]);
+//             ctx.strokeRect(obj.x - 2, obj.y - 2, w + 4, h + 4);
+//             ctx.setLineDash([]);
+//           }
+//           break;
+//         }
+//         default: break;
+//       }
+
+//       if ((obj.type === "image") && selectedIdRef.current === obj.id) {
+//         ctx.strokeStyle = "#3b82f6"; ctx.lineWidth = 2 / currentZoom;
+//         ctx.setLineDash([6 / currentZoom, 3 / currentZoom]);
+//         ctx.strokeRect(obj.x - 2, obj.y - 2, (obj.width || DEFAULT_MEDIA_W) + 4, (obj.height || DEFAULT_MEDIA_H) + 4);
+//         ctx.setLineDash([]);
+//       }
+
+//       ctx.restore();
+//     // eslint-disable-next-line react-hooks/exhaustive-deps
+//     }, [currentZoom]);
+
+//     const redrawCanvas = useCallback((objects) => {
+//       if (!ctxRef.current || !bgCtxRef.current || !canvasRef.current) return;
+//       const ctx    = ctxRef.current;
+//       const bgCtx  = bgCtxRef.current;
+//       const canvas = canvasRef.current;
+
+//       ctx.clearRect(0, 0, canvas.width, canvas.height);
+//       bgCtx.clearRect(0, 0, canvas.width, canvas.height);
+
+//       bgCtx.fillStyle = backgroundColor;
+//       bgCtx.fillRect(0, 0, canvas.width, canvas.height);
+//       if (isGridVisible) drawGrid(bgCtx, canvas.width, canvas.height);
+
+//       ctx.save();
+//       ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//       ctx.scale(currentZoom, currentZoom);
+//       (objects || []).forEach((obj) => drawObject(ctx, obj));
+//       ctx.restore();
+//     }, [backgroundColor, isGridVisible, currentZoom, drawGrid, drawObject]);
+
+//     const scheduleRedraw = useCallback((objects) => {
+//       pendingObjsRef.current = objects || [];
+//       if (rafIdRef.current) return;
+//       rafIdRef.current = requestAnimationFrame(() => {
+//         rafIdRef.current = null;
+//         redrawCanvas(pendingObjsRef.current || []);
+//         pendingObjsRef.current = null;
+//       });
+//     }, [redrawCanvas]);
+
+//     const loadWhiteboardState = useCallback(() => {
+//       if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return;
+//       try {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         if (state.background) setBackgroundColor(state.background);
+//         if (Array.isArray(state.objects)) scheduleRedraw(state.objects);
+//       } catch (e) { console.error(e); }
+//     }, [scheduleRedraw]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Smooth stroke & Shape flushing
+//     // ═══════════════════════════════════════════════════════
+//     const drawSmoothStroke = useCallback((prev, next, strokeType) => {
+//       if (!ctxRef.current) return;
+//       const ctx = ctxRef.current;
+//       ctx.save();
+//       ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//       ctx.scale(currentZoom, currentZoom);
+//       ctx.lineCap   = "round";
+//       ctx.lineJoin  = "round";
+//       ctx.globalAlpha = opacity ?? 1;
+//       ctx.lineWidth   = (strokeWidth || 2) / currentZoom;
+
+//       if (strokeType === "eraser") {
+//         ctx.globalCompositeOperation = "destination-out";
+//         ctx.strokeStyle = "rgba(0,0,0,1)";
+//       } else {
+//         ctx.globalCompositeOperation = "source-over";
+//         ctx.strokeStyle = color || "#000000";
+//       }
+
+//       const mid = { x: (prev.x + next.x) / 2, y: (prev.y + next.y) / 2 };
+//       if (!lastLocalMidRef.current) lastLocalMidRef.current = { x: prev.x, y: prev.y };
+//       ctx.beginPath();
+//       ctx.moveTo(lastLocalMidRef.current.x, lastLocalMidRef.current.y);
+//       ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
+//       ctx.stroke();
+//       lastLocalMidRef.current = mid;
+//       ctx.restore();
+//     }, [currentZoom, color, strokeWidth, opacity]);
+
+//     const flushStrokeToYjs = useCallback((force = false) => {
+//       const strokeId = currentStrokeIdRef.current;
+//       if (!strokeId) return;
+//       const buffered = strokeBufferRef.current;
+//       if (!buffered.length) return;
+//       const pts = buffered.slice();
+//       strokeBufferRef.current = [];
+
+//       commitState((cur) => {
+//         const objs   = [...(cur.objects || [])];
+//         const idx    = objs.findIndex((o) => o?.id === strokeId);
+//         if (idx === -1) return cur;
+//         const target = { ...objs[idx] };
+//         target.points = [...(target.points || []), ...pts];
+//         objs[idx] = target;
+//         return { ...cur, objects: objs, updatedAt: new Date().toISOString() };
+//       });
+//     }, [commitState]);
+
+//     const flushShapeToYjs = useCallback((currentPoint) => {
+//       const strokeId = currentStrokeIdRef.current;
+//       const startP = shapeStartRef.current;
+//       if (!strokeId || !startP || !currentPoint) return;
+
+//       commitState((cur) => {
+//         const objs   = [...(cur.objects || [])];
+//         const idx    = objs.findIndex((o) => o?.id === strokeId);
+//         if (idx === -1) return cur;
+//         const target = { ...objs[idx] };
+        
+//         if (target.type === "rectangle") {
+//           target.width = currentPoint.x - startP.x;
+//           target.height = currentPoint.y - startP.y;
+//         } else if (target.type === "circle") {
+//           target.radius = Math.hypot(currentPoint.x - startP.x, currentPoint.y - startP.y);
+//         } else if (target.type === "line") {
+//           target.x2 = currentPoint.x;
+//           target.y2 = currentPoint.y;
+//         }
+        
+//         objs[idx] = target;
+//         return { ...cur, objects: objs, updatedAt: new Date().toISOString() };
+//       });
+//     }, [commitState]);
+
+//     const scheduleFlush = useCallback(() => {
+//       if (flushTimerRef.current) return;
+//       flushTimerRef.current = setTimeout(() => {
+//         flushTimerRef.current = null;
+//         if (tool === "pen" || tool === "eraser") {
+//           flushStrokeToYjs(false);
+//         } else {
+//           flushShapeToYjs(lastPointRef.current);
+//         }
+//       }, FLUSH_INTERVAL);
+//     }, [flushStrokeToYjs, flushShapeToYjs, tool]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Hit-test for select tool
+//     // ═══════════════════════════════════════════════════════
+//     const hitTest = useCallback((pt) => {
+//       const objs = getCurrentObjects();
+//       for (let i = objs.length - 1; i >= 0; i--) {
+//         const o = objs[i];
+//         const w = o.width  || DEFAULT_MEDIA_W;
+//         const h = o.height || DEFAULT_MEDIA_H;
+//         if (["image", "pdf"].includes(o.type)) {
+//           if (pt.x >= o.x && pt.x <= o.x + w && pt.y >= o.y && pt.y <= o.y + h) return o;
+//         }
+//       }
+//       return null;
+//     }, [getCurrentObjects]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Yjs init
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       if (!sessionId || !wsToken) return;
+
+//       const initYjs = async () => {
+//         try {
+//           const ydoc      = new Y.Doc();
+//           yDocRef.current = ydoc;
+
+//           const baseWs   = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
+//           const provider = new WebsocketProvider(`${baseWs}/yjs`, sessionId, ydoc, {
+//             WebSocketPolyfill: WebSocket,
+//             params: {
+//               token: wsToken, isStreamer: true, allowViewersToDraw,
+//               roomCode, userId: sessionInfo?.streamerId, userName: sessionInfo?.streamerName,
+//             },
+//           });
+//           yProviderRef.current  = provider;
+
+//           const yWhiteboard      = ydoc.getArray("whiteboard");
+//           yWhiteboardRef.current = yWhiteboard;
+
+//           const ySettings        = ydoc.getMap("room_settings");
+//           ySettingsRef.current   = ySettings;
+
+//           provider.awareness.setLocalState({
+//             userId: sessionInfo?.streamerId || "streamer",
+//             userName: sessionInfo?.streamerName || "Streamer",
+//             role: "STREAMER", isStreamer: true, color, tool, cursor: null,
+//           });
+
+//           provider.awareness.on("change", () => {
+//             const states = Array.from(provider.awareness.getStates().entries());
+//             setParticipants(states.map(([id, s]) => ({ clientId: id, ...s })).filter((p) => p.userId));
+//           });
+
+//           provider.on("sync", (synced) => {
+//             setIsConnected(!!synced);
+//             if (synced) loadWhiteboardState();
+//           });
+
+//           yUndoManagerRef.current = new Y.UndoManager(yWhiteboard, {
+//             captureTimeout: 150, trackedOrigins: new Set(["drawing"]),
+//           });
+
+//           new IndexeddbPersistence(`whiteboard-${sessionId}`, ydoc);
+
+//           const observer = (event) => {
+//             const origin = event?.transaction?.origin;
+//             if (origin === "drawing" && (isDrawing || currentStrokeIdRef.current)) return;
+//             loadWhiteboardState();
+//           };
+//           yWhiteboard.observe(observer);
+//           yObserverCleanup.current = () => { try { yWhiteboard.unobserve(observer); } catch {} };
+
+//         } catch (err) {
+//           console.error("Failed to init Yjs:", err);
+//           toast.error("Failed to connect to whiteboard server");
+//         }
+//       };
+
+//       initYjs();
+
+//       return () => {
+//         try { 
+//           if (tool === "pen" || tool === "eraser") flushStrokeToYjs(true); 
+//           else flushShapeToYjs(lastPointRef.current);
+//         } catch {}
+//         if (yObserverCleanup.current) { yObserverCleanup.current(); yObserverCleanup.current = null; }
+//         if (yProviderRef.current) { try { yProviderRef.current.disconnect(); yProviderRef.current.destroy(); } catch {} }
+//         if (yDocRef.current)      { try { yDocRef.current.destroy(); } catch {} }
+//         yProviderRef.current = yDocRef.current = yWhiteboardRef.current = null;
+//       };
+//       // eslint-disable-next-line react-hooks/exhaustive-deps
+//     }, [sessionId, roomCode, wsToken, allowViewersToDraw, sessionInfo]);
+
+//     // keep awareness fresh
+//     useEffect(() => {
+//       const p = yProviderRef.current;
+//       if (!p) return;
+//       try {
+//         const prev = p.awareness.getLocalState() || {};
+//         p.awareness.setLocalState({ ...prev, color, tool,
+//           userId: sessionInfo?.streamerId || "streamer",
+//           userName: sessionInfo?.streamerName || "Streamer",
+//           role: "STREAMER", isStreamer: true,
+//         });
+//       } catch {}
+//     }, [color, tool, sessionInfo]);
+
+//     // cleanup timers
+//     useEffect(() => () => {
+//       if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+//       if (rafIdRef.current)      cancelAnimationFrame(rafIdRef.current);
+//     }, []);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Canvas init + resize
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       if (!canvasRef.current || !backgroundCanvasRef.current || !containerRef.current) return;
+//       const canvas    = canvasRef.current;
+//       const bgCanvas  = backgroundCanvasRef.current;
+//       const container = containerRef.current;
+
+//       const resize = () => {
+//         canvas.width  = bgCanvas.width  = container.clientWidth;
+//         canvas.height = bgCanvas.height = container.clientHeight;
+//         const ctx   = canvas.getContext("2d");
+//         const bgCtx = bgCanvas.getContext("2d");
+//         ctx.lineCap = "round"; ctx.lineJoin = "round";
+//         ctxRef.current = ctx; bgCtxRef.current = bgCtx;
+//         if (yWhiteboardRef.current) {
+//           const s = yWhiteboardRef.current.toArray()[0] || {};
+//           scheduleRedraw(s.objects || []);
+//         }
+//       };
+
+//       resize();
+//       const ro = new ResizeObserver(resize);
+//       ro.observe(container);
+//       return () => ro.disconnect();
+//     }, [scheduleRedraw]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Paste handler — Ctrl+V image
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       const handlePaste = async (e) => {
+//         for (const item of e.clipboardData.items) {
+//           if (item.type.startsWith("image/")) {
+//             const file   = item.getAsFile();
+//             const b64    = await fileToBase64(file);
+//             const img    = new Image();
+//             img.src      = b64;
+//             img.onload   = () => {
+//               const ratio = img.naturalWidth / img.naturalHeight;
+//               const w     = Math.min(img.naturalWidth, DEFAULT_MEDIA_W);
+//               const h     = w / ratio;
+//               addObject({
+//                 id: uid(), type: "image", src: b64,
+//                 x: 80, y: 80, width: w, height: h,
+//                 opacity: 1, timestamp: Date.now(),
+//               });
+//             };
+//             break;
+//           }
+//         }
+//       };
+//       window.addEventListener("paste", handlePaste);
+//       return () => window.removeEventListener("paste", handlePaste);
+//     }, [addObject]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Keyboard — Delete selected
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       const handleKey = (e) => {
+//         if ((e.key === "Delete" || e.key === "Backspace") && selectedIdRef.current) {
+//           // Don't delete if user is typing in an input
+//           if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+//           deleteObject(selectedIdRef.current);
+//         }
+//         if ((e.ctrlKey || e.metaKey) && e.key === "z") {
+//           e.preventDefault();
+//           yUndoManagerRef.current?.undo();
+//         }
+//         if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.shiftKey && e.key === "z"))) {
+//           e.preventDefault();
+//           yUndoManagerRef.current?.redo();
+//         }
+//       };
+//       window.addEventListener("keydown", handleKey);
+//       return () => window.removeEventListener("keydown", handleKey);
+//     }, [deleteObject]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Media upload handlers
+//     // ═══════════════════════════════════════════════════════
+//     const handleImageUpload = useCallback(async (e) => {
+//       const file = e.target.files?.[0];
+//       if (!file) return;
+//       if (file.size > 10 * 1024 * 1024) { toast.error("Image must be < 10MB"); return; }
+//       const b64  = await fileToBase64(file);
+//       const img  = new Image();
+//       img.src    = b64;
+//       img.onload = () => {
+//         const ratio = img.naturalWidth / img.naturalHeight;
+//         const w     = Math.min(img.naturalWidth, DEFAULT_MEDIA_W);
+//         const h     = w / ratio;
+//         addObject({ id: uid(), type: "image", src: b64, x: 80, y: 80, width: w, height: h, opacity: 1, timestamp: Date.now() });
+//       };
+//       e.target.value = "";
+//     }, [addObject]);
+
+//     const handlePdfUpload = useCallback(async (e) => {
+//       const file = e.target.files?.[0];
+//       if (!file) return;
+
+//       // Dynamically import pdfjs
+//       const pdfjsLib = await import("pdfjs-dist");
+//       pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.js`;
+
+//       const arrayBuffer = await file.arrayBuffer();
+//       const pdfDoc      = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+//       let yPos = 80;
+//       for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+//         const page     = await pdfDoc.getPage(pageNum);
+//         const viewport = page.getViewport({ scale: 1.5 });
+//         const offCanvas = document.createElement("canvas");
+//         offCanvas.width  = viewport.width;
+//         offCanvas.height = viewport.height;
+//         await page.render({ canvasContext: offCanvas.getContext("2d"), viewport }).promise;
+//         const src = offCanvas.toDataURL("image/png");
+//         addObject({
+//           id: uid(), type: "pdf", src,
+//           x: 80, y: yPos,
+//           width: Math.min(viewport.width, DEFAULT_MEDIA_W),
+//           height: Math.min(viewport.width, DEFAULT_MEDIA_W) * (viewport.height / viewport.width),
+//           page: pageNum, opacity: 1, timestamp: Date.now(),
+//         });
+//         yPos += Math.min(viewport.width, DEFAULT_MEDIA_W) * (viewport.height / viewport.width) + 20;
+//       }
+//       toast.success(`PDF loaded — ${pdfDoc.numPages} page(s)`);
+//       e.target.value = "";
+//     }, [addObject]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Pointer events
+//     // ═══════════════════════════════════════════════════════
+//     const handlePointerDown = useCallback((e) => {
+//       e.preventDefault();
+//       if (!canvasRef.current || e.button === 2) return;
+//       try { canvasRef.current.setPointerCapture(e.pointerId); pointerIdRef.current = e.pointerId; } catch {}
+
+//       if (tool === "pan" || e.altKey || e.button === 1) {
+//         setIsPanning(true);
+//         lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+//         canvasRef.current.style.cursor = "grabbing";
+//         return;
+//       }
+
+//       const p = getTransformedPoint(e);
+
+//       // Select tool
+//       if (tool === "select") {
+//         const hit = hitTest(p);
+//         if (hit) {
+//           selectedIdRef.current = hit.id;
+//           setSelectedId(hit.id);
+//           dragOffsetRef.current = { x: p.x - hit.x, y: p.y - hit.y };
+//           isDraggingRef.current = true;
+//         } else {
+//           selectedIdRef.current = null;
+//           setSelectedId(null);
+//         }
+//         scheduleRedraw(getCurrentObjects());
+//         return;
+//       }
+
+//       setIsDrawing(true);
+//       lastPointRef.current      = p;
+//       lastLocalPointRef.current = p;
+//       lastLocalMidRef.current   = null;
+//       shapeStartRef.current     = p; // Set the origin point for shapes
+
+//       const strokeId = uid();
+//       currentStrokeIdRef.current = strokeId;
+
+//       if (tool === "pen" || tool === "eraser") {
+//         strokeBufferRef.current    = [];
+//         addObject({
+//           id: strokeId, type: tool,
+//           points: [{ x: p.x, y: p.y }],
+//           color: tool === "eraser" ? backgroundColor : color,
+//           strokeWidth, opacity, timestamp: Date.now(),
+//         });
+//         drawSmoothStroke(p, { x: p.x + 0.01, y: p.y + 0.01 }, tool);
+//       } else if (["line", "rectangle", "circle"].includes(tool)) {
+//          // Create initial shape object
+//          const baseObj = {
+//             id: strokeId, type: tool,
+//             x: p.x, y: p.y,
+//             color, strokeWidth, opacity, timestamp: Date.now()
+//          };
+//          if (tool === "line") { baseObj.x1 = p.x; baseObj.y1 = p.y; baseObj.x2 = p.x; baseObj.y2 = p.y; }
+//          if (tool === "rectangle") { baseObj.width = 0; baseObj.height = 0; }
+//          if (tool === "circle") { baseObj.radius = 0; }
+//          addObject(baseObj);
+//       }
+//     }, [tool, getTransformedPoint, hitTest, addObject, drawSmoothStroke, scheduleRedraw, getCurrentObjects, backgroundColor, color, strokeWidth, opacity]);
+
+//     const handlePointerMove = useCallback((e) => {
+//       if (!canvasRef.current) return;
+
+//       if (isPanning) {
+//         const dx = e.clientX - lastPanPointRef.current.x;
+//         const dy = e.clientY - lastPanPointRef.current.y;
+//         canvasOffsetRef.current.x += dx;
+//         canvasOffsetRef.current.y += dy;
+//         lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+//         scheduleRedraw(getCurrentObjects());
+//         return;
+//       }
+
+//       // drag media object
+//       if (tool === "select" && isDraggingRef.current && selectedIdRef.current) {
+//         const p = getTransformedPoint(e);
+//         updateObject(selectedIdRef.current, {
+//           x: p.x - dragOffsetRef.current.x,
+//           y: p.y - dragOffsetRef.current.y,
+//         });
+//         return;
+//       }
+
+//       if (!isDrawing) return;
+
+//       if (tool === "pen" || tool === "eraser") {
+//         const events = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
+//         for (const evt of events) {
+//           const next = getTransformedPoint(evt);
+//           const prev = lastLocalPointRef.current || lastPointRef.current;
+//           const dist = prev ? Math.hypot(next.x - prev.x, next.y - prev.y) : 999;
+//           if (dist < MIN_MOVE_DIST) continue;
+//           if (prev) drawSmoothStroke(prev, next, tool);
+//           strokeBufferRef.current.push(next);
+//           scheduleFlush();
+//           lastLocalPointRef.current = next;
+//           lastPointRef.current      = next;
+//         }
+//       } else if (["line", "rectangle", "circle"].includes(tool)) {
+//         const next = getTransformedPoint(e);
+//         lastPointRef.current = next;
+
+//         // 1. Instant local UI feedback
+//         redrawCanvas(getCurrentObjects());
+//         const ctx = ctxRef.current;
+//         ctx.save();
+//         ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//         ctx.scale(currentZoom, currentZoom);
+//         ctx.strokeStyle = color;
+//         ctx.lineWidth = (strokeWidth || 2) / currentZoom;
+//         ctx.globalAlpha = opacity ?? 1;
+
+//         if (tool === "rectangle") {
+//             ctx.strokeRect(shapeStartRef.current.x, shapeStartRef.current.y, next.x - shapeStartRef.current.x, next.y - shapeStartRef.current.y);
+//         } else if (tool === "circle") {
+//             ctx.beginPath();
+//             ctx.arc(shapeStartRef.current.x, shapeStartRef.current.y, Math.hypot(next.x - shapeStartRef.current.x, next.y - shapeStartRef.current.y), 0, Math.PI * 2);
+//             ctx.stroke();
+//         } else if (tool === "line") {
+//             ctx.beginPath();
+//             ctx.moveTo(shapeStartRef.current.x, shapeStartRef.current.y);
+//             ctx.lineTo(next.x, next.y);
+//             ctx.stroke();
+//         }
+//         ctx.restore();
+
+//         // 2. Throttled sync to network
+//         if (!flushTimerRef.current) {
+//           flushTimerRef.current = setTimeout(() => {
+//               flushTimerRef.current = null;
+//               flushShapeToYjs(lastPointRef.current);
+//           }, FLUSH_INTERVAL);
+//         }
+//       }
+//     }, [isDrawing, isPanning, tool, getTransformedPoint, drawSmoothStroke, scheduleFlush, flushShapeToYjs, scheduleRedraw, getCurrentObjects, updateObject, redrawCanvas, color, strokeWidth, opacity, currentZoom]);
+
+//     const endStrokeCleanup = useCallback(() => {
+//       if (tool === "pen" || tool === "eraser") {
+//          flushStrokeToYjs(true);
+//       } else if (["line", "rectangle", "circle"].includes(tool)) {
+//          flushShapeToYjs(lastPointRef.current);
+//       }
+      
+//       currentStrokeIdRef.current = null;
+//       strokeBufferRef.current    = [];
+//       lastLocalPointRef.current  = null;
+//       lastLocalMidRef.current    = null;
+//       shapeStartRef.current      = null;
+//       isDraggingRef.current      = false;
+//       if (canvasRef.current && pointerIdRef.current != null) {
+//         try { canvasRef.current.releasePointerCapture(pointerIdRef.current); } catch {}
+//       }
+//       pointerIdRef.current = null;
+//     }, [flushStrokeToYjs, flushShapeToYjs, tool]);
+
+//     const handlePointerUp   = useCallback(() => { setIsDrawing(false); setIsPanning(false); endStrokeCleanup(); if (canvasRef.current) canvasRef.current.style.cursor = tool === "pan" ? "grab" : tool === "select" ? "default" : "crosshair"; }, [tool, endStrokeCleanup]);
+//     const handlePointerLeave = useCallback(() => { setIsDrawing(false); setIsPanning(false); endStrokeCleanup(); }, [endStrokeCleanup]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Zoom + wheel
+//     // ═══════════════════════════════════════════════════════
+//     const handleWheel = useCallback((e) => {
+//       e.preventDefault();
+//       if (!canvasRef.current) return;
+//       const rect   = canvasRef.current.getBoundingClientRect();
+//       const mx     = e.clientX - rect.left;
+//       const my     = e.clientY - rect.top;
+//       const factor = e.deltaY > 0 ? 0.9 : 1.1;
+//       const newZ   = Math.max(0.5, Math.min(3, currentZoom * factor));
+//       const change = newZ / currentZoom;
+//       canvasOffsetRef.current.x = mx - (mx - canvasOffsetRef.current.x) * change;
+//       canvasOffsetRef.current.y = my - (my - canvasOffsetRef.current.y) * change;
+//       setCurrentZoom(newZ);
+//       scheduleRedraw(getCurrentObjects());
+//     }, [currentZoom, scheduleRedraw, getCurrentObjects]);
+
+//     const handleZoomIn    = useCallback(() => { setCurrentZoom((p) => Math.min(p + 0.1, 3));  scheduleRedraw(getCurrentObjects()); }, [scheduleRedraw, getCurrentObjects]);
+//     const handleZoomOut   = useCallback(() => { setCurrentZoom((p) => Math.max(p - 0.1, 0.5)); scheduleRedraw(getCurrentObjects()); }, [scheduleRedraw, getCurrentObjects]);
+//     const handleZoomReset = useCallback(() => { setCurrentZoom(1); canvasOffsetRef.current = { x: 0, y: 0 }; scheduleRedraw(getCurrentObjects()); }, [scheduleRedraw, getCurrentObjects]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Whiteboard actions
+//     // ═══════════════════════════════════════════════════════
+//     const handleClearWhiteboard = useCallback(() => {
+//       if (!yWhiteboardRef.current || !yDocRef.current) return;
+//       if (!window.confirm("Clear entire whiteboard?")) return;
+//       yDocRef.current.transact(() => {
+//         yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
+//         yWhiteboardRef.current.insert(0, [{
+//           version: "1.0.0", objects: [], background: backgroundColor,
+//           clearedAt: new Date().toISOString(), clearedBy: sessionInfo?.streamerId,
+//         }]);
+//       }, "drawing");
+//       imageCacheRef.current.clear();
+//       scheduleRedraw([]);
+//       toast.success("Whiteboard cleared");
+//     }, [backgroundColor, sessionInfo, scheduleRedraw]);
+
+//     const handleExport = useCallback(() => {
+//       if (!canvasRef.current || !backgroundCanvasRef.current) return;
+//       const exp = document.createElement("canvas");
+//       exp.width  = canvasRef.current.width;
+//       exp.height = canvasRef.current.height;
+//       const ctx  = exp.getContext("2d");
+//       ctx.drawImage(backgroundCanvasRef.current, 0, 0);
+//       ctx.drawImage(canvasRef.current,           0, 0);
+//       const link     = document.createElement("a");
+//       link.download  = `whiteboard-${sessionId}-${Date.now()}.png`;
+//       link.href      = exp.toDataURL("image/png");
+//       link.click();
+//       toast.success("Whiteboard exported");
+//     }, [sessionId]);
+
+//     const handleUndo = useCallback(() => yUndoManagerRef.current?.undo(), []);
+//     const handleRedo = useCallback(() => yUndoManagerRef.current?.redo(), []);
+
+//     const handleDeleteSelected = useCallback(() => {
+//       if (selectedIdRef.current) deleteObject(selectedIdRef.current);
+//     }, [deleteObject]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Render
+//     // ═══════════════════════════════════════════════════════
+//     const cursorStyle = tool === "pan" ? "grab" : tool === "select" ? "default" : "crosshair";
+
+//     return (
+//       <div
+//         ref={containerRef}
+//         className={`absolute inset-0 z-20 w-full h-full bg-gray-900 overflow-hidden ${isActive ? "block" : "hidden"}`}
+//         onWheel={handleWheel}
+//       >
+//         {/* Hidden file inputs */}
+//         <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+//         <input ref={pdfInputRef}  type="file" accept=".pdf,.doc,.docx" className="hidden" onChange={handlePdfUpload} />
+
+//         {/* Background canvas */}
+//         <canvas ref={backgroundCanvasRef} className="absolute top-0 left-0 w-full h-full" style={{ pointerEvents: "none" }} />
+
+//         {/* Main drawing canvas */}
+//         <canvas
+//           ref={canvasRef}
+//           className={`absolute top-0 left-0 w-full h-full`}
+//           style={{ touchAction: "none", cursor: cursorStyle, zIndex: 20 }}
+//           onPointerDown={handlePointerDown}
+//           onPointerMove={handlePointerMove}
+//           onPointerUp={handlePointerUp}
+//           onPointerLeave={handlePointerLeave}
+//           onContextMenu={(e) => e.preventDefault()}
+//         />
+
+//         {/* ── Top Toolbar ── */}
+//         <div className="absolute top-2 left-1/2 transform -translate-x-1/2 z-30">
+//           <div className="bg-gray-800/95 backdrop-blur-sm rounded-xl shadow-2xl border border-gray-700 px-2 py-1.5 flex items-center gap-1.5 flex-wrap">
+
+//             {/* Connection status */}
+//             <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isConnected ? "bg-green-500 animate-pulse" : "bg-red-500"}`} />
+//             <span className="text-white text-xs mr-1">{isConnected ? "Live" : "Offline"}</span>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Draw tools */}
+//             {[
+//               { t: "pen",       icon: <FaPaintBrush className="w-3.5 h-3.5" />,   title: "Pen" },
+//               { t: "eraser",    icon: <FaEraser     className="w-3.5 h-3.5" />,   title: "Eraser" },
+//               { t: "line",      icon: <FiMinus      className="w-3.5 h-3.5" />,   title: "Line" },
+//               { t: "rectangle", icon: <FiSquare     className="w-3.5 h-3.5" />,   title: "Rectangle" },
+//               { t: "circle",    icon: <FiCircle     className="w-3.5 h-3.5" />,   title: "Circle" },
+//               { t: "select",    icon: <FiMousePointer className="w-3.5 h-3.5" />, title: "Select / Move (media)" },
+//               { t: "pan",       icon: <FiMove       className="w-3.5 h-3.5" />,   title: "Pan (Alt+Drag)" },
+//             ].map(({ t, icon, title }) => (
+//               <button key={t} onClick={() => setTool(t)} title={title}
+//                 className={`p-1.5 rounded-lg transition-colors ${tool === t ? "bg-blue-600 text-white" : "bg-gray-700 hover:bg-gray-600 text-gray-300"}`}>
+//                 {icon}
+//               </button>
+//             ))}
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Color + stroke */}
+//             <input type="color" value={color} onChange={(e) => setColor(e.target.value)}
+//               className="w-6 h-6 rounded cursor-pointer border border-gray-600" title="Color" />
+//             <select value={strokeWidth} onChange={(e) => setStrokeWidth(Number(e.target.value))}
+//               className="bg-gray-700 text-white text-xs rounded px-1.5 py-1 border border-gray-600 w-14">
+//               {[1,2,3,5,8].map((v) => <option key={v} value={v}>{v}px</option>)}
+//             </select>
+//             <select value={opacity} onChange={(e) => setOpacity(Number(e.target.value))}
+//               className="bg-gray-700 text-white text-xs rounded px-1.5 py-1 border border-gray-600 w-14">
+//               {[1,0.8,0.6,0.4].map((v) => <option key={v} value={v}>{v*100}%</option>)}
+//             </select>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Media insert buttons */}
+//             <button onClick={() => fileInputRef.current?.click()} title="Upload Image"
+//               className="p-1.5 bg-gray-700 hover:bg-green-700 rounded-lg transition-colors text-gray-300 hover:text-white">
+//               <FiImage className="w-3.5 h-3.5" />
+//             </button>
+//             <button onClick={() => pdfInputRef.current?.click()} title="Upload PDF / Document"
+//               className="p-1.5 bg-gray-700 hover:bg-orange-700 rounded-lg transition-colors text-gray-300 hover:text-white">
+//               <FiFileText className="w-3.5 h-3.5" />
+//             </button>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Delete selected */}
+//             {selectedId && (
+//               <button onClick={handleDeleteSelected} title="Delete selected (Del)"
+//                 className="p-1.5 bg-red-700 hover:bg-red-600 rounded-lg transition-colors text-white">
+//                 <FiTrash2 className="w-3.5 h-3.5" />
+//               </button>
+//             )}
+
+//             {/* Zoom */}
+//             <button onClick={handleZoomOut}   title="Zoom Out"  className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiMinusCircle className="w-3.5 h-3.5 text-white"/></button>
+//             <span className="text-white text-xs min-w-[44px] text-center">{Math.round(currentZoom * 100)}%</span>
+//             <button onClick={handleZoomIn}    title="Zoom In"   className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiPlus className="w-3.5 h-3.5 text-white"/></button>
+//             <button onClick={handleZoomReset} title="Reset Zoom" className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiRefreshCcw className="w-3.5 h-3.5 text-white"/></button>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Undo/Redo */}
+//             <button onClick={handleUndo} title="Undo (Ctrl+Z)"             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiRefreshCcw className="w-3.5 h-3.5 text-white"/></button>
+//             <button onClick={handleRedo} title="Redo (Ctrl+Y)"             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiRefreshCcw className="w-3.5 h-3.5 text-white transform scale-x-[-1]"/></button>
+
+//             {/* Grid */}
+//             <button onClick={() => setIsGridVisible((v) => !v)} title="Toggle Grid"
+//               className={`p-1.5 rounded-lg transition-colors ${isGridVisible ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-300 hover:bg-gray-600"}`}>
+//               <FiSquare className="w-3.5 h-3.5" />
+//             </button>
+
+//             {/* Clear + Export */}
+//             <button onClick={handleClearWhiteboard} title="Clear All" className="p-1.5 bg-red-900 hover:bg-red-800 rounded-lg"><FiTrash2   className="w-3.5 h-3.5 text-white"/></button>
+//             <button onClick={handleExport}          title="Export PNG" className="p-1.5 bg-blue-900 hover:bg-blue-800 rounded-lg"><FiDownload className="w-3.5 h-3.5 text-white"/></button>
+
+//             <div className="w-px h-5 bg-gray-600" />
+//             <button onClick={onClose} title="Close" className="p-1.5 bg-red-600 hover:bg-red-700 rounded-lg"><FiX className="w-3.5 h-3.5 text-white"/></button>
+//           </div>
+//         </div>
+
+//         {/* ── Bottom status bar ── */}
+//         <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded-lg backdrop-blur-sm border border-gray-700">
+//           <div className="flex items-center gap-3">
+//             <span>Tool: <span className="font-bold capitalize">{tool}</span></span>
+//             <span className="w-1 h-1 bg-gray-500 rounded-full" />
+//             <span>Zoom: <span className="font-bold">{Math.round(currentZoom * 100)}%</span></span>
+//             <span className="w-1 h-1 bg-gray-500 rounded-full" />
+//             <span>Viewers: <span className="font-bold">{participants.length}</span></span>
+//             {selectedId && <><span className="w-1 h-1 bg-gray-500 rounded-full" /><span className="text-blue-400">Object selected — Del to remove</span></>}
+//             <span className="w-1 h-1 bg-gray-500 rounded-full" />
+//             <span className="text-gray-400">Ctrl+V to paste image</span>
+//           </div>
+//         </div>
+
+//         {/* ── Viewers list ── */}
+//         <div className="absolute top-2 right-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded-lg backdrop-blur-sm border border-gray-700">
+//           <div className="flex items-center gap-2">
+//             <span>{participants.length} viewer{participants.length !== 1 ? "s" : ""}</span>
+//             {participants.map((p) => (
+//               <div key={p.clientId} className="w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-medium" title={p.userName || "User"}>
+//                 {(p.userName || "U").charAt(0)}
+//               </div>
+//             ))}
+//           </div>
+//         </div>
+
+//         {isPanning && (
+//           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-black/70 text-white px-4 py-2 rounded-lg backdrop-blur-sm border border-gray-600 flex items-center gap-2 pointer-events-none">
+//             <FiMove className="w-4 h-4" /> <span>Panning…</span>
+//           </div>
+//         )}
+//       </div>
+//     );
+//   },
+//   (prev, next) => {
+//     if (prev.sessionId         !== next.sessionId)         return false;
+//     if (prev.roomCode          !== next.roomCode)          return false;
+//     if (prev.wsToken           !== next.wsToken)           return false;
+//     if (prev.isActive          !== next.isActive)          return false;
+//     if (prev.allowViewersToDraw !== next.allowViewersToDraw) return false;
+//     if (prev.mainScreenMode    !== next.mainScreenMode)    return false;
+//     if (prev.compact           !== next.compact)           return false;
+//     if (prev.sessionInfo?.streamerId   !== next.sessionInfo?.streamerId)   return false;
+//     if (prev.sessionInfo?.streamerName !== next.sessionInfo?.streamerName) return false;
+//     return true;
+//   }
+// );
+
+// StreamerWhiteboard.displayName = "StreamerWhiteboard";
+// export default StreamerWhiteboard;
+
+
+
+// import React, {
+//   useState, useEffect, useRef, useCallback, memo,
+// } from "react";
+// import * as Y from "yjs";
+// import { WebsocketProvider } from "y-websocket";
+// import { IndexeddbPersistence } from "y-indexeddb";
+// import {
+//   FiSquare, FiCircle, FiMinus, FiDownload, FiRefreshCcw,
+//   FiTrash2, FiMove, FiPlus, FiMinusCircle, FiX, FiImage,
+//   FiVideo, FiGlobe, FiFileText, FiMousePointer, FiLink,
+// } from "react-icons/fi";
+// import { FaEraser, FaPaintBrush } from "react-icons/fa";
+// import { toast } from "react-toastify";
+
+// // ─── constants ────────────────────────────────────────────────────────────────
+// const DEFAULT_MEDIA_W = 480;
+// const DEFAULT_MEDIA_H = 270;
+// const FLUSH_INTERVAL  = 50;   // ms — throttle Yjs stroke sync
+// const MIN_MOVE_DIST   = 0.6;  // px — ignore pointer jitter
+
+// // ─── helpers ──────────────────────────────────────────────────────────────────
+// function uid() {
+//   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+// }
+
+// function fileToBase64(file) {
+//   return new Promise((res, rej) => {
+//     const r = new FileReader();
+//     r.onload  = () => res(r.result);
+//     r.onerror = rej;
+//     r.readAsDataURL(file);
+//   });
+// }
+
+// // ─── StreamerWhiteboard ───────────────────────────────────────────────────────
+// const StreamerWhiteboard = memo(
+//   ({
+//     sessionId,
+//     roomCode,
+//     wsToken,
+//     sessionInfo,
+//     isActive,
+//     onClose,
+//     allowViewersToDraw = true,
+//     mainScreenMode     = false,
+//     compact            = false,
+//   }) => {
+//     // ── canvas refs ──
+//     const canvasRef           = useRef(null);
+//     const backgroundCanvasRef = useRef(null);
+//     const ctxRef              = useRef(null);
+//     const bgCtxRef            = useRef(null);
+//     const containerRef        = useRef(null);
+
+//     // ── Yjs refs ──
+//     const yDocRef          = useRef(null);
+//     const yProviderRef     = useRef(null);
+//     const yWhiteboardRef   = useRef(null);
+//     const ySettingsRef     = useRef(null);
+//     const yVideoStateRef   = useRef(null);
+//     const yUndoManagerRef  = useRef(null);
+//     const yObserverCleanup = useRef(null);
+
+//     // ── media caches ──
+//     const imageCacheRef = useRef(new Map());   // id → HTMLImageElement
+//     const videoCacheRef = useRef(new Map());   // id → HTMLVideoElement
+
+//     // ── raf / flush ──
+//     const rafIdRef        = useRef(null);
+//     const pendingObjsRef  = useRef(null);
+//     const flushTimerRef   = useRef(null);
+
+//     // ── stroke state ──
+//     const currentStrokeIdRef  = useRef(null);
+//     const strokeBufferRef     = useRef([]);
+//     const lastLocalPointRef   = useRef(null);
+//     const lastLocalMidRef     = useRef(null);
+//     const pointerIdRef        = useRef(null);
+
+//     // ── pan ──
+//     const lastPanPointRef  = useRef({ x: 0, y: 0 });
+//     const canvasOffsetRef  = useRef({ x: 0, y: 0 });
+//     const lastPointRef     = useRef({ x: 0, y: 0 });
+
+//     // ── selected object (for move/delete) ──
+//     const selectedIdRef = useRef(null);
+//     const dragOffsetRef = useRef({ x: 0, y: 0 });
+//     const isDraggingRef = useRef(false);
+
+//     // ── state ──
+//     const [tool,            setTool]            = useState("pen");
+//     const [color,           setColor]           = useState("#000000");
+//     const [strokeWidth,     setStrokeWidth]     = useState(2);
+//     const [opacity,         setOpacity]         = useState(1);
+//     const [currentZoom,     setCurrentZoom]     = useState(1);
+//     const [isConnected,     setIsConnected]     = useState(false);
+//     const [participants,    setParticipants]     = useState([]);
+//     const [backgroundColor, setBackgroundColor] = useState("#ffffff");
+//     const [isGridVisible,   setIsGridVisible]   = useState(false);
+//     const [isPanning,       setIsPanning]       = useState(false);
+//     const [isDrawing,       setIsDrawing]       = useState(false);
+//     const [selectedId,      setSelectedId]      = useState(null);
+
+//     // ── modals ──
+//     const [showUrlModal,     setShowUrlModal]     = useState(false);
+//     const [urlModalType,     setUrlModalType]     = useState("website"); // "website"|"video"
+//     const [urlInput,         setUrlInput]         = useState("");
+//     const fileInputRef       = useRef(null);
+//     const pdfInputRef        = useRef(null);
+
+//     // ── animation frame for video ──
+//     const videoRafRef = useRef(null);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Helpers
+//     // ═══════════════════════════════════════════════════════
+//     const getTransformedPoint = useCallback((e) => {
+//       if (!canvasRef.current) return { x: 0, y: 0 };
+//       const rect   = canvasRef.current.getBoundingClientRect();
+//       const scaleX = canvasRef.current.width  / rect.width;
+//       const scaleY = canvasRef.current.height / rect.height;
+//       const x = (e.clientX - rect.left) * scaleX;
+//       const y = (e.clientY - rect.top)  * scaleY;
+//       return {
+//         x: (x - canvasOffsetRef.current.x) / currentZoom,
+//         y: (y - canvasOffsetRef.current.y) / currentZoom,
+//       };
+//     }, [currentZoom]);
+
+//     const getCurrentObjects = useCallback(() => {
+//       if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return [];
+//       return (yWhiteboardRef.current.toArray()[0]?.objects) || [];
+//     }, []);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Yjs write helpers
+//     // ═══════════════════════════════════════════════════════
+//     const commitState = useCallback((updater) => {
+//       if (!yWhiteboardRef.current || !yDocRef.current) return;
+//       yDocRef.current.transact(() => {
+//         const cur = yWhiteboardRef.current.toArray()[0] || {
+//           version: "1.0.0", objects: [], background: backgroundColor,
+//           createdAt: new Date().toISOString(),
+//         };
+//         const next = updater(cur);
+//         if (yWhiteboardRef.current.length === 0) {
+//           yWhiteboardRef.current.insert(0, [next]);
+//         } else {
+//           yWhiteboardRef.current.delete(0, 1);
+//           yWhiteboardRef.current.insert(0, [next]);
+//         }
+//       }, "drawing");
+//     }, [backgroundColor]);
+
+//     const addObject = useCallback((obj) => {
+//       commitState((cur) => ({
+//         ...cur,
+//         objects: [...(cur.objects || []), obj],
+//         updatedBy: sessionInfo?.streamerId,
+//         updatedAt: new Date().toISOString(),
+//       }));
+//     }, [commitState, sessionInfo]);
+
+//     const deleteObject = useCallback((id) => {
+//       commitState((cur) => ({
+//         ...cur,
+//         objects: (cur.objects || []).filter((o) => o.id !== id),
+//         updatedBy: sessionInfo?.streamerId,
+//         updatedAt: new Date().toISOString(),
+//       }));
+//       if (selectedIdRef.current === id) {
+//         selectedIdRef.current = null;
+//         setSelectedId(null);
+//       }
+//     }, [commitState, sessionInfo]);
+
+//     const updateObject = useCallback((id, patch) => {
+//       commitState((cur) => ({
+//         ...cur,
+//         objects: (cur.objects || []).map((o) => o.id === id ? { ...o, ...patch } : o),
+//         updatedBy: sessionInfo?.streamerId,
+//         updatedAt: new Date().toISOString(),
+//       }));
+//     }, [commitState, sessionInfo]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Drawing
+//     // ═══════════════════════════════════════════════════════
+//     const drawGrid = useCallback((ctx, w, h) => {
+//       ctx.save();
+//       ctx.strokeStyle = "#e0e0e0";
+//       ctx.lineWidth   = 0.5;
+//       ctx.globalAlpha = 0.3;
+//       const gs = 20;
+//       for (let x = 0; x <= w; x += gs) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
+//       for (let y = 0; y <= h; y += gs) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
+//       ctx.restore();
+//     }, []);
+
+//     const drawObject = useCallback((ctx, obj) => {
+//       if (!obj) return;
+//       ctx.save();
+//       ctx.strokeStyle = obj.color       || "#000000";
+//       ctx.fillStyle   = obj.fillColor   || "transparent";
+//       ctx.lineWidth   = (obj.strokeWidth || 2) / currentZoom;
+//       ctx.globalAlpha = obj.opacity     ?? 1;
+
+//       switch (obj.type) {
+//         case "pen":
+//         case "pencil": {
+//           if (!obj.points?.length) break;
+//           ctx.beginPath();
+//           ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//           obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
+//           ctx.stroke();
+//           break;
+//         }
+//         case "eraser": {
+//           if (!obj.points?.length) break;
+//           ctx.save();
+//           ctx.globalCompositeOperation = "destination-out";
+//           ctx.beginPath();
+//           ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//           obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
+//           ctx.stroke();
+//           ctx.restore();
+//           break;
+//         }
+//         case "line": {
+//           ctx.beginPath(); ctx.moveTo(obj.x1, obj.y1); ctx.lineTo(obj.x2, obj.y2); ctx.stroke();
+//           break;
+//         }
+//         case "rectangle": {
+//           if (obj.fillColor) ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
+//           ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
+//           break;
+//         }
+//         case "circle": {
+//           ctx.beginPath(); ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
+//           if (obj.fillColor) ctx.fill();
+//           ctx.stroke();
+//           break;
+//         }
+//         case "text": {
+//           ctx.font      = `${obj.fontSize || 16}px Arial`;
+//           ctx.fillStyle = obj.color || "#000";
+//           ctx.fillText(obj.text || "", obj.x, obj.y);
+//           break;
+//         }
+
+//         // ── image ──
+//         case "image": {
+//           let img = imageCacheRef.current.get(obj.id);
+//           if (!img) {
+//             img       = new Image();
+//             img.src   = obj.src;
+//             img.onload = () => scheduleRedraw(getCurrentObjects());
+//             imageCacheRef.current.set(obj.id, img);
+//           }
+//           if (img.complete && img.naturalWidth > 0) {
+//             ctx.globalAlpha = obj.opacity ?? 1;
+//             ctx.drawImage(img, obj.x, obj.y, obj.width || DEFAULT_MEDIA_W, obj.height || DEFAULT_MEDIA_H);
+//           } else {
+//             // placeholder while loading
+//             ctx.strokeStyle = "#aaa"; ctx.strokeRect(obj.x, obj.y, obj.width || DEFAULT_MEDIA_W, obj.height || DEFAULT_MEDIA_H);
+//             ctx.fillStyle   = "#eee"; ctx.font = "14px Arial";
+//             ctx.fillText("Loading image…", obj.x + 8, obj.y + 20);
+//           }
+//           break;
+//         }
+
+//         // ── video ──
+//         case "video": {
+//           let vid = videoCacheRef.current.get(obj.id);
+//           if (!vid) {
+//             vid     = document.createElement("video");
+//             vid.src = obj.src;
+//             vid.crossOrigin  = "anonymous";
+//             vid.preload      = "auto";
+//             vid.muted        = false;
+//             vid.playsInline  = true;
+//             videoCacheRef.current.set(obj.id, vid);
+//           }
+//           const w = obj.width  || DEFAULT_MEDIA_W;
+//           const h = obj.height || DEFAULT_MEDIA_H;
+//           if (vid.readyState >= 2) {
+//             ctx.globalAlpha = obj.opacity ?? 1;
+//             ctx.drawImage(vid, obj.x, obj.y, w, h);
+//           } else {
+//             ctx.fillStyle   = "#111"; ctx.fillRect(obj.x, obj.y, w, h);
+//             ctx.fillStyle   = "#fff"; ctx.font = "14px Arial";
+//             ctx.fillText("Loading video…", obj.x + 8, obj.y + h / 2);
+//           }
+//           // selection border
+//           if (selectedIdRef.current === obj.id) {
+//             ctx.strokeStyle = "#3b82f6"; ctx.lineWidth = 2 / currentZoom;
+//             ctx.setLineDash([6 / currentZoom, 3 / currentZoom]);
+//             ctx.strokeRect(obj.x - 2, obj.y - 2, w + 4, h + 4);
+//             ctx.setLineDash([]);
+//           }
+//           break;
+//         }
+
+//         // ── website placeholder on canvas ──
+//         case "website": {
+//           const w = obj.width  || DEFAULT_MEDIA_W;
+//           const h = obj.height || DEFAULT_MEDIA_H;
+//           ctx.fillStyle   = "#f0f4ff"; ctx.fillRect(obj.x, obj.y, w, h);
+//           ctx.strokeStyle = "#93c5fd"; ctx.lineWidth = 1.5 / currentZoom;
+//           ctx.strokeRect(obj.x, obj.y, w, h);
+//           ctx.fillStyle = "#1e40af"; ctx.font = `bold ${14 / currentZoom}px Arial`;
+//           ctx.fillText("🌐 " + (obj.url || "Website"), obj.x + 10, obj.y + 24);
+//           ctx.fillStyle = "#64748b"; ctx.font = `${11 / currentZoom}px Arial`;
+//           ctx.fillText(obj.url || "", obj.x + 10, obj.y + 42);
+//           if (selectedIdRef.current === obj.id) {
+//             ctx.strokeStyle = "#3b82f6"; ctx.lineWidth = 2 / currentZoom;
+//             ctx.setLineDash([6 / currentZoom, 3 / currentZoom]);
+//             ctx.strokeRect(obj.x - 2, obj.y - 2, w + 4, h + 4);
+//             ctx.setLineDash([]);
+//           }
+//           break;
+//         }
+
+//         // ── pdf page ──
+//         case "pdf": {
+//           let img = imageCacheRef.current.get(obj.id);
+//           if (!img) {
+//             img       = new Image();
+//             img.src   = obj.src; // base64 rendered page
+//             img.onload = () => scheduleRedraw(getCurrentObjects());
+//             imageCacheRef.current.set(obj.id, img);
+//           }
+//           const w = obj.width  || DEFAULT_MEDIA_W;
+//           const h = obj.height || DEFAULT_MEDIA_H;
+//           if (img.complete && img.naturalWidth > 0) {
+//             ctx.globalAlpha = obj.opacity ?? 1;
+//             ctx.drawImage(img, obj.x, obj.y, w, h);
+//           } else {
+//             ctx.fillStyle   = "#f9fafb"; ctx.fillRect(obj.x, obj.y, w, h);
+//             ctx.strokeStyle = "#d1d5db"; ctx.strokeRect(obj.x, obj.y, w, h);
+//             ctx.fillStyle   = "#6b7280"; ctx.font = "14px Arial";
+//             ctx.fillText("Rendering PDF…", obj.x + 8, obj.y + h / 2);
+//           }
+//           if (selectedIdRef.current === obj.id) {
+//             ctx.strokeStyle = "#3b82f6"; ctx.lineWidth = 2 / currentZoom;
+//             ctx.setLineDash([6 / currentZoom, 3 / currentZoom]);
+//             ctx.strokeRect(obj.x - 2, obj.y - 2, w + 4, h + 4);
+//             ctx.setLineDash([]);
+//           }
+//           break;
+//         }
+
+//         default: break;
+//       }
+
+//       // selection highlight for image
+//       if (
+//         (obj.type === "image") &&
+//         selectedIdRef.current === obj.id
+//       ) {
+//         ctx.strokeStyle = "#3b82f6"; ctx.lineWidth = 2 / currentZoom;
+//         ctx.setLineDash([6 / currentZoom, 3 / currentZoom]);
+//         ctx.strokeRect(obj.x - 2, obj.y - 2, (obj.width || DEFAULT_MEDIA_W) + 4, (obj.height || DEFAULT_MEDIA_H) + 4);
+//         ctx.setLineDash([]);
+//       }
+
+//       ctx.restore();
+//     // eslint-disable-next-line react-hooks/exhaustive-deps
+//     }, [currentZoom]);
+
+//     const redrawCanvas = useCallback((objects) => {
+//       if (!ctxRef.current || !bgCtxRef.current || !canvasRef.current) return;
+//       const ctx    = ctxRef.current;
+//       const bgCtx  = bgCtxRef.current;
+//       const canvas = canvasRef.current;
+
+//       ctx.clearRect(0, 0, canvas.width, canvas.height);
+//       bgCtx.clearRect(0, 0, canvas.width, canvas.height);
+
+//       bgCtx.fillStyle = backgroundColor;
+//       bgCtx.fillRect(0, 0, canvas.width, canvas.height);
+//       if (isGridVisible) drawGrid(bgCtx, canvas.width, canvas.height);
+
+//       ctx.save();
+//       ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//       ctx.scale(currentZoom, currentZoom);
+//       (objects || []).forEach((obj) => drawObject(ctx, obj));
+//       ctx.restore();
+//     }, [backgroundColor, isGridVisible, currentZoom, drawGrid, drawObject]);
+
+//     const scheduleRedraw = useCallback((objects) => {
+//       pendingObjsRef.current = objects || [];
+//       if (rafIdRef.current) return;
+//       rafIdRef.current = requestAnimationFrame(() => {
+//         rafIdRef.current = null;
+//         redrawCanvas(pendingObjsRef.current || []);
+//         pendingObjsRef.current = null;
+//       });
+//     }, [redrawCanvas]);
+
+//     const loadWhiteboardState = useCallback(() => {
+//       if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return;
+//       try {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         if (state.background) setBackgroundColor(state.background);
+//         if (Array.isArray(state.objects)) scheduleRedraw(state.objects);
+//       } catch (e) { console.error(e); }
+//     }, [scheduleRedraw]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Video RAF loop — keeps video frames painted on canvas
+//     // ═══════════════════════════════════════════════════════
+//     const startVideoLoop = useCallback(() => {
+//       if (videoRafRef.current) return;
+//       const loop = () => {
+//         const hasVideo = getCurrentObjects().some((o) => o.type === "video");
+//         if (!hasVideo) { videoRafRef.current = null; return; }
+//         scheduleRedraw(getCurrentObjects());
+//         videoRafRef.current = requestAnimationFrame(loop);
+//       };
+//       videoRafRef.current = requestAnimationFrame(loop);
+//     }, [getCurrentObjects, scheduleRedraw]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Smooth stroke (local incremental draw)
+//     // ═══════════════════════════════════════════════════════
+//     const drawSmoothStroke = useCallback((prev, next, strokeType) => {
+//       if (!ctxRef.current) return;
+//       const ctx = ctxRef.current;
+//       ctx.save();
+//       ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//       ctx.scale(currentZoom, currentZoom);
+//       ctx.lineCap   = "round";
+//       ctx.lineJoin  = "round";
+//       ctx.globalAlpha = opacity ?? 1;
+//       ctx.lineWidth   = (strokeWidth || 2) / currentZoom;
+
+//       if (strokeType === "eraser") {
+//         ctx.globalCompositeOperation = "destination-out";
+//         ctx.strokeStyle = "rgba(0,0,0,1)";
+//       } else {
+//         ctx.globalCompositeOperation = "source-over";
+//         ctx.strokeStyle = color || "#000000";
+//       }
+
+//       const mid = { x: (prev.x + next.x) / 2, y: (prev.y + next.y) / 2 };
+//       if (!lastLocalMidRef.current) lastLocalMidRef.current = { x: prev.x, y: prev.y };
+//       ctx.beginPath();
+//       ctx.moveTo(lastLocalMidRef.current.x, lastLocalMidRef.current.y);
+//       ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
+//       ctx.stroke();
+//       lastLocalMidRef.current = mid;
+//       ctx.restore();
+//     }, [currentZoom, color, strokeWidth, opacity]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Throttled Yjs stroke flush
+//     // ═══════════════════════════════════════════════════════
+//     const flushStrokeToYjs = useCallback((force = false) => {
+//       const strokeId = currentStrokeIdRef.current;
+//       if (!strokeId) return;
+//       const buffered = strokeBufferRef.current;
+//       if (!buffered.length) return;
+//       const pts = buffered.slice();
+//       strokeBufferRef.current = [];
+
+//       commitState((cur) => {
+//         const objs   = [...(cur.objects || [])];
+//         const idx    = objs.findIndex((o) => o?.id === strokeId);
+//         if (idx === -1) return cur;
+//         const target = { ...objs[idx] };
+//         target.points = [...(target.points || []), ...pts];
+//         objs[idx] = target;
+//         return { ...cur, objects: objs, updatedAt: new Date().toISOString() };
+//       });
+//     }, [commitState]);
+
+//     const scheduleFlush = useCallback(() => {
+//       if (flushTimerRef.current) return;
+//       flushTimerRef.current = setTimeout(() => {
+//         flushTimerRef.current = null;
+//         flushStrokeToYjs(false);
+//       }, FLUSH_INTERVAL);
+//     }, [flushStrokeToYjs]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Hit-test for select tool
+//     // ═══════════════════════════════════════════════════════
+//     const hitTest = useCallback((pt) => {
+//       const objs = getCurrentObjects();
+//       for (let i = objs.length - 1; i >= 0; i--) {
+//         const o = objs[i];
+//         const w = o.width  || DEFAULT_MEDIA_W;
+//         const h = o.height || DEFAULT_MEDIA_H;
+//         if (["image", "video", "website", "pdf"].includes(o.type)) {
+//           if (pt.x >= o.x && pt.x <= o.x + w && pt.y >= o.y && pt.y <= o.y + h) return o;
+//         }
+//       }
+//       return null;
+//     }, [getCurrentObjects]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Yjs init
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       if (!sessionId || !wsToken) return;
+
+//       const initYjs = async () => {
+//         try {
+//           const ydoc    = new Y.Doc();
+//           yDocRef.current = ydoc;
+
+//           const baseWs  = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
+//           const provider = new WebsocketProvider(`${baseWs}/yjs`, sessionId, ydoc, {
+//             WebSocketPolyfill: WebSocket,
+//             params: {
+//               token: wsToken, isStreamer: true, allowViewersToDraw,
+//               roomCode, userId: sessionInfo?.streamerId, userName: sessionInfo?.streamerName,
+//             },
+//           });
+//           yProviderRef.current  = provider;
+
+//           const yWhiteboard     = ydoc.getArray("whiteboard");
+//           yWhiteboardRef.current = yWhiteboard;
+
+//           const ySettings       = ydoc.getMap("room_settings");
+//           ySettingsRef.current  = ySettings;
+
+//           const yVideoState     = ydoc.getMap("video_state");
+//           yVideoStateRef.current = yVideoState;
+
+//           provider.awareness.setLocalState({
+//             userId: sessionInfo?.streamerId || "streamer",
+//             userName: sessionInfo?.streamerName || "Streamer",
+//             role: "STREAMER", isStreamer: true, color, tool, cursor: null,
+//           });
+
+//           provider.awareness.on("change", () => {
+//             const states = Array.from(provider.awareness.getStates().entries());
+//             setParticipants(states.map(([id, s]) => ({ clientId: id, ...s })).filter((p) => p.userId));
+//           });
+
+//           provider.on("sync", (synced) => {
+//             setIsConnected(!!synced);
+//             if (synced) loadWhiteboardState();
+//           });
+
+//           yUndoManagerRef.current = new Y.UndoManager(yWhiteboard, {
+//             captureTimeout: 150, trackedOrigins: new Set(["drawing"]),
+//           });
+
+//           new IndexeddbPersistence(`whiteboard-${sessionId}`, ydoc);
+
+//           const observer = (event) => {
+//             const origin = event?.transaction?.origin;
+//             if (origin === "drawing" && (isDrawing || currentStrokeIdRef.current)) return;
+//             loadWhiteboardState();
+//           };
+//           yWhiteboard.observe(observer);
+//           yObserverCleanup.current = () => { try { yWhiteboard.unobserve(observer); } catch {} };
+
+//           // video state observer — sync play/pause from yjs to all video elements
+//           yVideoState.observe(() => {
+//             const action      = yVideoState.get("action");
+//             const targetId    = yVideoState.get("targetId");
+//             const currentTime = yVideoState.get("currentTime");
+//             const vid         = videoCacheRef.current.get(targetId);
+//             if (!vid) return;
+//             if (typeof currentTime === "number") vid.currentTime = currentTime;
+//             if (action === "play")  vid.play().catch(() => {});
+//             if (action === "pause") vid.pause();
+//           });
+
+//         } catch (err) {
+//           console.error("Failed to init Yjs:", err);
+//           toast.error("Failed to connect to whiteboard server");
+//         }
+//       };
+
+//       initYjs();
+
+//       return () => {
+//         try { flushStrokeToYjs(true); } catch {}
+//         if (yObserverCleanup.current) { yObserverCleanup.current(); yObserverCleanup.current = null; }
+//         if (yProviderRef.current) { try { yProviderRef.current.disconnect(); yProviderRef.current.destroy(); } catch {} }
+//         if (yDocRef.current)      { try { yDocRef.current.destroy(); } catch {} }
+//         yProviderRef.current = yDocRef.current = yWhiteboardRef.current = null;
+//         if (videoRafRef.current) { cancelAnimationFrame(videoRafRef.current); videoRafRef.current = null; }
+//       };
+//       // eslint-disable-next-line react-hooks/exhaustive-deps
+//     }, [sessionId, roomCode, wsToken, allowViewersToDraw, sessionInfo]);
+
+//     // keep awareness fresh
+//     useEffect(() => {
+//       const p = yProviderRef.current;
+//       if (!p) return;
+//       try {
+//         const prev = p.awareness.getLocalState() || {};
+//         p.awareness.setLocalState({ ...prev, color, tool,
+//           userId: sessionInfo?.streamerId || "streamer",
+//           userName: sessionInfo?.streamerName || "Streamer",
+//           role: "STREAMER", isStreamer: true,
+//         });
+//       } catch {}
+//     }, [color, tool, sessionInfo]);
+
+//     // cleanup timers
+//     useEffect(() => () => {
+//       if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+//       if (rafIdRef.current)      cancelAnimationFrame(rafIdRef.current);
+//     }, []);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Canvas init + resize
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       if (!canvasRef.current || !backgroundCanvasRef.current || !containerRef.current) return;
+//       const canvas    = canvasRef.current;
+//       const bgCanvas  = backgroundCanvasRef.current;
+//       const container = containerRef.current;
+
+//       const resize = () => {
+//         canvas.width  = bgCanvas.width  = container.clientWidth;
+//         canvas.height = bgCanvas.height = container.clientHeight;
+//         const ctx   = canvas.getContext("2d");
+//         const bgCtx = bgCanvas.getContext("2d");
+//         ctx.lineCap = "round"; ctx.lineJoin = "round";
+//         ctxRef.current = ctx; bgCtxRef.current = bgCtx;
+//         if (yWhiteboardRef.current) {
+//           const s = yWhiteboardRef.current.toArray()[0] || {};
+//           scheduleRedraw(s.objects || []);
+//         }
+//       };
+
+//       resize();
+//       const ro = new ResizeObserver(resize);
+//       ro.observe(container);
+//       return () => ro.disconnect();
+//     }, [scheduleRedraw]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Paste handler — Ctrl+V image
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       const handlePaste = async (e) => {
+//         for (const item of e.clipboardData.items) {
+//           if (item.type.startsWith("image/")) {
+//             const file   = item.getAsFile();
+//             const b64    = await fileToBase64(file);
+//             const img    = new Image();
+//             img.src      = b64;
+//             img.onload   = () => {
+//               const ratio = img.naturalWidth / img.naturalHeight;
+//               const w     = Math.min(img.naturalWidth, DEFAULT_MEDIA_W);
+//               const h     = w / ratio;
+//               addObject({
+//                 id: uid(), type: "image", src: b64,
+//                 x: 80, y: 80, width: w, height: h,
+//                 opacity: 1, timestamp: Date.now(),
+//               });
+//             };
+//             break;
+//           }
+//         }
+//       };
+//       window.addEventListener("paste", handlePaste);
+//       return () => window.removeEventListener("paste", handlePaste);
+//     }, [addObject]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Keyboard — Delete selected
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       const handleKey = (e) => {
+//         if ((e.key === "Delete" || e.key === "Backspace") && selectedIdRef.current) {
+//           // Don't delete if user is typing in an input
+//           if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+//           deleteObject(selectedIdRef.current);
+//         }
+//         if ((e.ctrlKey || e.metaKey) && e.key === "z") {
+//           e.preventDefault();
+//           yUndoManagerRef.current?.undo();
+//         }
+//         if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.shiftKey && e.key === "z"))) {
+//           e.preventDefault();
+//           yUndoManagerRef.current?.redo();
+//         }
+//       };
+//       window.addEventListener("keydown", handleKey);
+//       return () => window.removeEventListener("keydown", handleKey);
+//     }, [deleteObject]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Media upload handlers
+//     // ═══════════════════════════════════════════════════════
+//     const handleImageUpload = useCallback(async (e) => {
+//       const file = e.target.files?.[0];
+//       if (!file) return;
+//       if (file.size > 10 * 1024 * 1024) { toast.error("Image must be < 10MB"); return; }
+//       const b64  = await fileToBase64(file);
+//       const img  = new Image();
+//       img.src    = b64;
+//       img.onload = () => {
+//         const ratio = img.naturalWidth / img.naturalHeight;
+//         const w     = Math.min(img.naturalWidth, DEFAULT_MEDIA_W);
+//         const h     = w / ratio;
+//         addObject({ id: uid(), type: "image", src: b64, x: 80, y: 80, width: w, height: h, opacity: 1, timestamp: Date.now() });
+//       };
+//       e.target.value = "";
+//     }, [addObject]);
+
+//     const handlePdfUpload = useCallback(async (e) => {
+//       const file = e.target.files?.[0];
+//       if (!file) return;
+
+//       // Dynamically import pdfjs
+//       const pdfjsLib = await import("pdfjs-dist");
+//       pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.js`;
+
+//       const arrayBuffer = await file.arrayBuffer();
+//       const pdfDoc      = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+//       let yPos = 80;
+//       for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+//         const page     = await pdfDoc.getPage(pageNum);
+//         const viewport = page.getViewport({ scale: 1.5 });
+//         const offCanvas = document.createElement("canvas");
+//         offCanvas.width  = viewport.width;
+//         offCanvas.height = viewport.height;
+//         await page.render({ canvasContext: offCanvas.getContext("2d"), viewport }).promise;
+//         const src = offCanvas.toDataURL("image/png");
+//         addObject({
+//           id: uid(), type: "pdf", src,
+//           x: 80, y: yPos,
+//           width: Math.min(viewport.width, DEFAULT_MEDIA_W),
+//           height: Math.min(viewport.width, DEFAULT_MEDIA_W) * (viewport.height / viewport.width),
+//           page: pageNum, opacity: 1, timestamp: Date.now(),
+//         });
+//         yPos += Math.min(viewport.width, DEFAULT_MEDIA_W) * (viewport.height / viewport.width) + 20;
+//       }
+//       toast.success(`PDF loaded — ${pdfDoc.numPages} page(s)`);
+//       e.target.value = "";
+//     }, [addObject]);
+
+//     const handleUrlSubmit = useCallback(() => {
+//       let url = urlInput.trim();
+//       if (!url) return;
+//       if (!url.startsWith("http")) url = "https://" + url;
+
+//       if (urlModalType === "video") {
+//         addObject({
+//           id: uid(), type: "video", src: url,
+//           x: 80, y: 80, width: DEFAULT_MEDIA_W, height: DEFAULT_MEDIA_H,
+//           opacity: 1, timestamp: Date.now(),
+//         });
+//         // Notify video state
+//         if (yVideoStateRef.current) {
+//           yVideoStateRef.current.set("action", "load");
+//           yVideoStateRef.current.set("url", url);
+//         }
+//         startVideoLoop();
+//       } else {
+//         addObject({
+//           id: uid(), type: "website", url,
+//           x: 80, y: 80, width: DEFAULT_MEDIA_W, height: DEFAULT_MEDIA_H,
+//           opacity: 1, timestamp: Date.now(),
+//         });
+//         // Sync URL to viewers via settings
+//         if (ySettingsRef.current) {
+//           ySettingsRef.current.set("activeUrl", url);
+//           ySettingsRef.current.set("urlMode", true);
+//         }
+//       }
+//       setUrlInput("");
+//       setShowUrlModal(false);
+//     }, [urlInput, urlModalType, addObject, startVideoLoop]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Video controls (play/pause/seek broadcast)
+//     // ═══════════════════════════════════════════════════════
+//     const broadcastVideoAction = useCallback((objId, action, currentTime) => {
+//       if (!yVideoStateRef.current) return;
+//       yVideoStateRef.current.set("targetId",   objId);
+//       yVideoStateRef.current.set("action",     action);
+//       yVideoStateRef.current.set("currentTime", currentTime);
+//       yVideoStateRef.current.set("ts",          Date.now());
+//       // also apply locally
+//       const vid = videoCacheRef.current.get(objId);
+//       if (!vid) return;
+//       if (typeof currentTime === "number") vid.currentTime = currentTime;
+//       if (action === "play")  { vid.play().catch(() => {}); startVideoLoop(); }
+//       if (action === "pause") vid.pause();
+//     }, [startVideoLoop]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Pointer events
+//     // ═══════════════════════════════════════════════════════
+//     const handlePointerDown = useCallback((e) => {
+//       e.preventDefault();
+//       if (!canvasRef.current || e.button === 2) return;
+//       try { canvasRef.current.setPointerCapture(e.pointerId); pointerIdRef.current = e.pointerId; } catch {}
+
+//       if (tool === "pan" || e.altKey || e.button === 1) {
+//         setIsPanning(true);
+//         lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+//         canvasRef.current.style.cursor = "grabbing";
+//         return;
+//       }
+
+//       const p = getTransformedPoint(e);
+
+//       // Select tool
+//       if (tool === "select") {
+//         const hit = hitTest(p);
+//         if (hit) {
+//           selectedIdRef.current = hit.id;
+//           setSelectedId(hit.id);
+//           dragOffsetRef.current = { x: p.x - hit.x, y: p.y - hit.y };
+//           isDraggingRef.current = true;
+//         } else {
+//           selectedIdRef.current = null;
+//           setSelectedId(null);
+//         }
+//         scheduleRedraw(getCurrentObjects());
+//         return;
+//       }
+
+//       setIsDrawing(true);
+//       lastPointRef.current      = p;
+//       lastLocalPointRef.current = p;
+//       lastLocalMidRef.current   = null;
+
+//       if (tool === "pen" || tool === "eraser") {
+//         const strokeId = uid();
+//         currentStrokeIdRef.current = strokeId;
+//         strokeBufferRef.current    = [];
+//         addObject({
+//           id: strokeId, type: tool,
+//           points: [{ x: p.x, y: p.y }],
+//           color: tool === "eraser" ? backgroundColor : color,
+//           strokeWidth, opacity, timestamp: Date.now(),
+//         });
+//         drawSmoothStroke(p, { x: p.x + 0.01, y: p.y + 0.01 }, tool);
+//       }
+//     }, [tool, getTransformedPoint, hitTest, addObject, drawSmoothStroke,
+//         scheduleRedraw, getCurrentObjects, backgroundColor, color, strokeWidth, opacity]);
+
+//     const handlePointerMove = useCallback((e) => {
+//       if (!canvasRef.current) return;
+
+//       if (isPanning) {
+//         const dx = e.clientX - lastPanPointRef.current.x;
+//         const dy = e.clientY - lastPanPointRef.current.y;
+//         canvasOffsetRef.current.x += dx;
+//         canvasOffsetRef.current.y += dy;
+//         lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+//         scheduleRedraw(getCurrentObjects());
+//         return;
+//       }
+
+//       // drag media object
+//       if (tool === "select" && isDraggingRef.current && selectedIdRef.current) {
+//         const p = getTransformedPoint(e);
+//         updateObject(selectedIdRef.current, {
+//           x: p.x - dragOffsetRef.current.x,
+//           y: p.y - dragOffsetRef.current.y,
+//         });
+//         return;
+//       }
+
+//       if (!isDrawing || (tool !== "pen" && tool !== "eraser")) return;
+
+//       const events = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
+//       for (const evt of events) {
+//         const next = getTransformedPoint(evt);
+//         const prev = lastLocalPointRef.current || lastPointRef.current;
+//         const dist = prev ? Math.hypot(next.x - prev.x, next.y - prev.y) : 999;
+//         if (dist < MIN_MOVE_DIST) continue;
+//         if (prev) drawSmoothStroke(prev, next, tool);
+//         strokeBufferRef.current.push(next);
+//         scheduleFlush();
+//         lastLocalPointRef.current = next;
+//         lastPointRef.current      = next;
+//       }
+//     }, [isDrawing, isPanning, tool, getTransformedPoint, drawSmoothStroke,
+//         scheduleFlush, scheduleRedraw, getCurrentObjects, updateObject]);
+
+//     const endStrokeCleanup = useCallback(() => {
+//       flushStrokeToYjs(true);
+//       currentStrokeIdRef.current = null;
+//       strokeBufferRef.current    = [];
+//       lastLocalPointRef.current  = null;
+//       lastLocalMidRef.current    = null;
+//       isDraggingRef.current      = false;
+//       if (canvasRef.current && pointerIdRef.current != null) {
+//         try { canvasRef.current.releasePointerCapture(pointerIdRef.current); } catch {}
+//       }
+//       pointerIdRef.current = null;
+//     }, [flushStrokeToYjs]);
+
+//     const handlePointerUp   = useCallback(() => { setIsDrawing(false); setIsPanning(false); endStrokeCleanup(); if (canvasRef.current) canvasRef.current.style.cursor = tool === "pan" ? "grab" : tool === "select" ? "default" : "crosshair"; }, [tool, endStrokeCleanup]);
+//     const handlePointerLeave = useCallback(() => { setIsDrawing(false); setIsPanning(false); endStrokeCleanup(); }, [endStrokeCleanup]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Zoom + wheel
+//     // ═══════════════════════════════════════════════════════
+//     const handleWheel = useCallback((e) => {
+//       e.preventDefault();
+//       if (!canvasRef.current) return;
+//       const rect   = canvasRef.current.getBoundingClientRect();
+//       const mx     = e.clientX - rect.left;
+//       const my     = e.clientY - rect.top;
+//       const factor = e.deltaY > 0 ? 0.9 : 1.1;
+//       const newZ   = Math.max(0.5, Math.min(3, currentZoom * factor));
+//       const change = newZ / currentZoom;
+//       canvasOffsetRef.current.x = mx - (mx - canvasOffsetRef.current.x) * change;
+//       canvasOffsetRef.current.y = my - (my - canvasOffsetRef.current.y) * change;
+//       setCurrentZoom(newZ);
+//       scheduleRedraw(getCurrentObjects());
+//     }, [currentZoom, scheduleRedraw, getCurrentObjects]);
+
+//     const handleZoomIn    = useCallback(() => { setCurrentZoom((p) => Math.min(p + 0.1, 3));  scheduleRedraw(getCurrentObjects()); }, [scheduleRedraw, getCurrentObjects]);
+//     const handleZoomOut   = useCallback(() => { setCurrentZoom((p) => Math.max(p - 0.1, 0.5)); scheduleRedraw(getCurrentObjects()); }, [scheduleRedraw, getCurrentObjects]);
+//     const handleZoomReset = useCallback(() => { setCurrentZoom(1); canvasOffsetRef.current = { x: 0, y: 0 }; scheduleRedraw(getCurrentObjects()); }, [scheduleRedraw, getCurrentObjects]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Whiteboard actions
+//     // ═══════════════════════════════════════════════════════
+//     const handleClearWhiteboard = useCallback(() => {
+//       if (!yWhiteboardRef.current || !yDocRef.current) return;
+//       if (!window.confirm("Clear entire whiteboard?")) return;
+//       yDocRef.current.transact(() => {
+//         yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
+//         yWhiteboardRef.current.insert(0, [{
+//           version: "1.0.0", objects: [], background: backgroundColor,
+//           clearedAt: new Date().toISOString(), clearedBy: sessionInfo?.streamerId,
+//         }]);
+//       }, "drawing");
+//       imageCacheRef.current.clear();
+//       videoCacheRef.current.forEach((v) => { v.pause(); v.src = ""; });
+//       videoCacheRef.current.clear();
+//       if (videoRafRef.current) { cancelAnimationFrame(videoRafRef.current); videoRafRef.current = null; }
+//       scheduleRedraw([]);
+//       toast.success("Whiteboard cleared");
+//     }, [backgroundColor, sessionInfo, scheduleRedraw]);
+
+//     const handleExport = useCallback(() => {
+//       if (!canvasRef.current || !backgroundCanvasRef.current) return;
+//       const exp = document.createElement("canvas");
+//       exp.width  = canvasRef.current.width;
+//       exp.height = canvasRef.current.height;
+//       const ctx  = exp.getContext("2d");
+//       ctx.drawImage(backgroundCanvasRef.current, 0, 0);
+//       ctx.drawImage(canvasRef.current,           0, 0);
+//       const link     = document.createElement("a");
+//       link.download  = `whiteboard-${sessionId}-${Date.now()}.png`;
+//       link.href      = exp.toDataURL("image/png");
+//       link.click();
+//       toast.success("Whiteboard exported");
+//     }, [sessionId]);
+
+//     const handleUndo = useCallback(() => yUndoManagerRef.current?.undo(), []);
+//     const handleRedo = useCallback(() => yUndoManagerRef.current?.redo(), []);
+
+//     const handleDeleteSelected = useCallback(() => {
+//       if (selectedIdRef.current) deleteObject(selectedIdRef.current);
+//     }, [deleteObject]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Render
+//     // ═══════════════════════════════════════════════════════
+//     const cursorStyle = tool === "pan" ? "grab" : tool === "select" ? "default" : "crosshair";
+
+//     return (
+//       <div
+//         ref={containerRef}
+//         className={`absolute inset-0 z-20 w-full h-full bg-gray-900 overflow-hidden ${isActive ? "block" : "hidden"}`}
+//         onWheel={handleWheel}
+//       >
+//         {/* Hidden file inputs */}
+//         <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+//         <input ref={pdfInputRef}  type="file" accept=".pdf,.doc,.docx" className="hidden" onChange={handlePdfUpload} />
+
+//         {/* Background canvas */}
+//         <canvas ref={backgroundCanvasRef} className="absolute top-0 left-0 w-full h-full" style={{ pointerEvents: "none" }} />
+
+//         {/* Website iframes — rendered as overlays, positioned per object */}
+//         {getCurrentObjects()
+//           .filter((o) => o.type === "website")
+//           .map((obj) => (
+//             <div
+//               key={obj.id}
+//               style={{
+//                 position:  "absolute",
+//                 left:      (obj.x * currentZoom + canvasOffsetRef.current.x) + "px",
+//                 top:       (obj.y * currentZoom + canvasOffsetRef.current.y) + "px",
+//                 width:     (obj.width  || DEFAULT_MEDIA_W) * currentZoom + "px",
+//                 height:    (obj.height || DEFAULT_MEDIA_H) * currentZoom + "px",
+//                 zIndex:    15,
+//                 pointerEvents: tool === "select" ? "all" : "none",
+//                 border:    selectedId === obj.id ? "2px dashed #3b82f6" : "1px solid #93c5fd",
+//                 borderRadius: 4,
+//                 overflow:  "hidden",
+//               }}
+//             >
+//               <iframe
+//                 src={obj.url}
+//                 title={obj.url}
+//                 style={{ width: "100%", height: "100%", border: "none" }}
+//                 sandbox="allow-scripts allow-same-origin allow-forms"
+//               />
+//             </div>
+//           ))
+//         }
+
+//         {/* Video overlays — for play/pause/seek controls */}
+//         {getCurrentObjects()
+//           .filter((o) => o.type === "video")
+//           .map((obj) => {
+//             const vid = videoCacheRef.current.get(obj.id);
+//             const isPlaying = vid && !vid.paused;
+//             return (
+//               <div
+//                 key={obj.id}
+//                 style={{
+//                   position: "absolute",
+//                   left:   (obj.x * currentZoom + canvasOffsetRef.current.x) + "px",
+//                   top:    (obj.y * currentZoom + canvasOffsetRef.current.y) + "px",
+//                   width:  (obj.width  || DEFAULT_MEDIA_W) * currentZoom + "px",
+//                   height: (obj.height || DEFAULT_MEDIA_H) * currentZoom + "px",
+//                   zIndex: 16, pointerEvents: "none",
+//                 }}
+//               >
+//                 {/* Control bar at bottom */}
+//                 <div style={{
+//                   position: "absolute", bottom: 0, left: 0, right: 0,
+//                   background: "rgba(0,0,0,0.6)", display: "flex",
+//                   alignItems: "center", gap: 8, padding: "4px 8px",
+//                   pointerEvents: "all", zIndex: 17,
+//                 }}>
+//                   <button
+//                     onClick={() => broadcastVideoAction(obj.id, isPlaying ? "pause" : "play", vid?.currentTime || 0)}
+//                     style={{ color: "#fff", background: "none", border: "none", cursor: "pointer", fontSize: 16 }}
+//                   >
+//                     {isPlaying ? "⏸" : "▶"}
+//                   </button>
+//                   <input
+//                     type="range" min={0} max={vid?.duration || 100} step={0.1}
+//                     value={vid?.currentTime || 0}
+//                     onChange={(e) => broadcastVideoAction(obj.id, "seek", parseFloat(e.target.value))}
+//                     style={{ flex: 1, accentColor: "#3b82f6" }}
+//                   />
+//                   <button
+//                     onClick={() => deleteObject(obj.id)}
+//                     style={{ color: "#f87171", background: "none", border: "none", cursor: "pointer", fontSize: 14 }}
+//                   >✕</button>
+//                 </div>
+//               </div>
+//             );
+//           })
+//         }
+
+//         {/* Main drawing canvas */}
+//         <canvas
+//           ref={canvasRef}
+//           className={`absolute top-0 left-0 w-full h-full`}
+//           style={{ touchAction: "none", cursor: cursorStyle, zIndex: 20 }}
+//           onPointerDown={handlePointerDown}
+//           onPointerMove={handlePointerMove}
+//           onPointerUp={handlePointerUp}
+//           onPointerLeave={handlePointerLeave}
+//           onContextMenu={(e) => e.preventDefault()}
+//         />
+
+//         {/* ── URL Modal ── */}
+//         {showUrlModal && (
+//           <div
+//             className="absolute inset-0 flex items-center justify-center z-50"
+//             style={{ background: "rgba(0,0,0,0.6)" }}
+//           >
+//             <div className="bg-gray-800 border border-gray-600 rounded-xl p-6 w-96 shadow-2xl">
+//               <h3 className="text-white text-lg font-semibold mb-4">
+//                 {urlModalType === "video" ? "Add Video URL" : "Add Website URL"}
+//               </h3>
+//               <input
+//                 type="url"
+//                 autoFocus
+//                 value={urlInput}
+//                 onChange={(e) => setUrlInput(e.target.value)}
+//                 onKeyDown={(e) => { if (e.key === "Enter") handleUrlSubmit(); if (e.key === "Escape") setShowUrlModal(false); }}
+//                 placeholder={urlModalType === "video" ? "https://example.com/video.mp4" : "https://example.com"}
+//                 className="w-full bg-gray-700 text-white border border-gray-500 rounded-lg px-3 py-2 mb-4 outline-none focus:border-blue-500"
+//               />
+//               {urlModalType === "website" && (
+//                 <p className="text-yellow-400 text-xs mb-3">Note: Some websites block embedding (e.g. Google, YouTube). Use direct .mp4 links for video.</p>
+//               )}
+//               <div className="flex gap-3">
+//                 <button onClick={handleUrlSubmit} className="flex-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg py-2 font-medium transition-colors">Add</button>
+//                 <button onClick={() => setShowUrlModal(false)} className="flex-1 bg-gray-600 hover:bg-gray-500 text-white rounded-lg py-2 transition-colors">Cancel</button>
+//               </div>
+//             </div>
+//           </div>
+//         )}
+
+//         {/* ── Top Toolbar ── */}
+//         <div className="absolute top-2 left-1/2 transform -translate-x-1/2 z-30">
+//           <div className="bg-gray-800/95 backdrop-blur-sm rounded-xl shadow-2xl border border-gray-700 px-2 py-1.5 flex items-center gap-1.5 flex-wrap">
+
+//             {/* Connection status */}
+//             <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isConnected ? "bg-green-500 animate-pulse" : "bg-red-500"}`} />
+//             <span className="text-white text-xs mr-1">{isConnected ? "Live" : "Offline"}</span>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Draw tools */}
+//             {[
+//               { t: "pen",       icon: <FaPaintBrush className="w-3.5 h-3.5" />,   title: "Pen" },
+//               { t: "eraser",    icon: <FaEraser     className="w-3.5 h-3.5" />,   title: "Eraser" },
+//               { t: "line",      icon: <FiMinus      className="w-3.5 h-3.5" />,   title: "Line" },
+//               { t: "rectangle", icon: <FiSquare     className="w-3.5 h-3.5" />,   title: "Rectangle" },
+//               { t: "circle",    icon: <FiCircle     className="w-3.5 h-3.5" />,   title: "Circle" },
+//               { t: "select",    icon: <FiMousePointer className="w-3.5 h-3.5" />, title: "Select / Move (media)" },
+//               { t: "pan",       icon: <FiMove       className="w-3.5 h-3.5" />,   title: "Pan (Alt+Drag)" },
+//             ].map(({ t, icon, title }) => (
+//               <button key={t} onClick={() => setTool(t)} title={title}
+//                 className={`p-1.5 rounded-lg transition-colors ${tool === t ? "bg-blue-600 text-white" : "bg-gray-700 hover:bg-gray-600 text-gray-300"}`}>
+//                 {icon}
+//               </button>
+//             ))}
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Color + stroke */}
+//             <input type="color" value={color} onChange={(e) => setColor(e.target.value)}
+//               className="w-6 h-6 rounded cursor-pointer border border-gray-600" title="Color" />
+//             <select value={strokeWidth} onChange={(e) => setStrokeWidth(Number(e.target.value))}
+//               className="bg-gray-700 text-white text-xs rounded px-1.5 py-1 border border-gray-600 w-14">
+//               {[1,2,3,5,8].map((v) => <option key={v} value={v}>{v}px</option>)}
+//             </select>
+//             <select value={opacity} onChange={(e) => setOpacity(Number(e.target.value))}
+//               className="bg-gray-700 text-white text-xs rounded px-1.5 py-1 border border-gray-600 w-14">
+//               {[1,0.8,0.6,0.4].map((v) => <option key={v} value={v}>{v*100}%</option>)}
+//             </select>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Media insert buttons */}
+//             <button onClick={() => fileInputRef.current?.click()} title="Upload Image"
+//               className="p-1.5 bg-gray-700 hover:bg-green-700 rounded-lg transition-colors text-gray-300 hover:text-white">
+//               <FiImage className="w-3.5 h-3.5" />
+//             </button>
+//             <button onClick={() => { setUrlModalType("video"); setShowUrlModal(true); }} title="Add Video URL"
+//               className="p-1.5 bg-gray-700 hover:bg-purple-700 rounded-lg transition-colors text-gray-300 hover:text-white">
+//               <FiVideo className="w-3.5 h-3.5" />
+//             </button>
+//             <button onClick={() => { setUrlModalType("website"); setShowUrlModal(true); }} title="Embed Website"
+//               className="p-1.5 bg-gray-700 hover:bg-blue-700 rounded-lg transition-colors text-gray-300 hover:text-white">
+//               <FiGlobe className="w-3.5 h-3.5" />
+//             </button>
+//             <button onClick={() => pdfInputRef.current?.click()} title="Upload PDF / Document"
+//               className="p-1.5 bg-gray-700 hover:bg-orange-700 rounded-lg transition-colors text-gray-300 hover:text-white">
+//               <FiFileText className="w-3.5 h-3.5" />
+//             </button>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Delete selected */}
+//             {selectedId && (
+//               <button onClick={handleDeleteSelected} title="Delete selected (Del)"
+//                 className="p-1.5 bg-red-700 hover:bg-red-600 rounded-lg transition-colors text-white">
+//                 <FiTrash2 className="w-3.5 h-3.5" />
+//               </button>
+//             )}
+
+//             {/* Zoom */}
+//             <button onClick={handleZoomOut}   title="Zoom Out"  className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiMinusCircle className="w-3.5 h-3.5 text-white"/></button>
+//             <span className="text-white text-xs min-w-[44px] text-center">{Math.round(currentZoom * 100)}%</span>
+//             <button onClick={handleZoomIn}    title="Zoom In"   className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiPlus className="w-3.5 h-3.5 text-white"/></button>
+//             <button onClick={handleZoomReset} title="Reset Zoom" className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiRefreshCcw className="w-3.5 h-3.5 text-white"/></button>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Undo/Redo */}
+//             <button onClick={handleUndo} title="Undo (Ctrl+Z)"             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiRefreshCcw className="w-3.5 h-3.5 text-white"/></button>
+//             <button onClick={handleRedo} title="Redo (Ctrl+Y)"             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiRefreshCcw className="w-3.5 h-3.5 text-white transform scale-x-[-1]"/></button>
+
+//             {/* Grid */}
+//             <button onClick={() => setIsGridVisible((v) => !v)} title="Toggle Grid"
+//               className={`p-1.5 rounded-lg transition-colors ${isGridVisible ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-300 hover:bg-gray-600"}`}>
+//               <FiSquare className="w-3.5 h-3.5" />
+//             </button>
+
+//             {/* Clear + Export */}
+//             <button onClick={handleClearWhiteboard} title="Clear All" className="p-1.5 bg-red-900 hover:bg-red-800 rounded-lg"><FiTrash2   className="w-3.5 h-3.5 text-white"/></button>
+//             <button onClick={handleExport}          title="Export PNG" className="p-1.5 bg-blue-900 hover:bg-blue-800 rounded-lg"><FiDownload className="w-3.5 h-3.5 text-white"/></button>
+
+//             <div className="w-px h-5 bg-gray-600" />
+//             <button onClick={onClose} title="Close" className="p-1.5 bg-red-600 hover:bg-red-700 rounded-lg"><FiX className="w-3.5 h-3.5 text-white"/></button>
+//           </div>
+//         </div>
+
+//         {/* ── Bottom status bar ── */}
+//         <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded-lg backdrop-blur-sm border border-gray-700">
+//           <div className="flex items-center gap-3">
+//             <span>Tool: <span className="font-bold capitalize">{tool}</span></span>
+//             <span className="w-1 h-1 bg-gray-500 rounded-full" />
+//             <span>Zoom: <span className="font-bold">{Math.round(currentZoom * 100)}%</span></span>
+//             <span className="w-1 h-1 bg-gray-500 rounded-full" />
+//             <span>Viewers: <span className="font-bold">{participants.length}</span></span>
+//             {selectedId && <><span className="w-1 h-1 bg-gray-500 rounded-full" /><span className="text-blue-400">Object selected — Del to remove</span></>}
+//             <span className="w-1 h-1 bg-gray-500 rounded-full" />
+//             <span className="text-gray-400">Ctrl+V to paste image</span>
+//           </div>
+//         </div>
+
+//         {/* ── Viewers list ── */}
+//         <div className="absolute top-2 right-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded-lg backdrop-blur-sm border border-gray-700">
+//           <div className="flex items-center gap-2">
+//             <span>{participants.length} viewer{participants.length !== 1 ? "s" : ""}</span>
+//             {participants.map((p) => (
+//               <div key={p.clientId} className="w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-medium" title={p.userName || "User"}>
+//                 {(p.userName || "U").charAt(0)}
+//               </div>
+//             ))}
+//           </div>
+//         </div>
+
+//         {isPanning && (
+//           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-black/70 text-white px-4 py-2 rounded-lg backdrop-blur-sm border border-gray-600 flex items-center gap-2 pointer-events-none">
+//             <FiMove className="w-4 h-4" /> <span>Panning…</span>
+//           </div>
+//         )}
+//       </div>
+//     );
+//   },
+//   (prev, next) => {
+//     if (prev.sessionId         !== next.sessionId)         return false;
+//     if (prev.roomCode          !== next.roomCode)          return false;
+//     if (prev.wsToken           !== next.wsToken)           return false;
+//     if (prev.isActive          !== next.isActive)          return false;
+//     if (prev.allowViewersToDraw !== next.allowViewersToDraw) return false;
+//     if (prev.mainScreenMode    !== next.mainScreenMode)    return false;
+//     if (prev.compact           !== next.compact)           return false;
+//     if (prev.sessionInfo?.streamerId   !== next.sessionInfo?.streamerId)   return false;
+//     if (prev.sessionInfo?.streamerName !== next.sessionInfo?.streamerName) return false;
+//     return true;
+//   }
+// );
+
+// StreamerWhiteboard.displayName = "StreamerWhiteboard";
+// export default StreamerWhiteboard;
+
+
+
+
+
+// import React, {
+//   useState, useEffect, useRef, useCallback, memo,
+// } from "react";
+// import * as Y from "yjs";
+// import { WebsocketProvider } from "y-websocket";
+// import { IndexeddbPersistence } from "y-indexeddb";
+// import {
+//   FiSquare, FiCircle, FiMinus, FiDownload, FiRefreshCcw,
+//   FiTrash2, FiMove, FiPlus, FiMinusCircle, FiX, FiImage,
+//   FiVideo, FiGlobe, FiFileText, FiMousePointer, FiLink,
+// } from "react-icons/fi";
+// import { FaEraser, FaPaintBrush } from "react-icons/fa";
+// import { toast } from "react-toastify";
+
+// // ─── constants ────────────────────────────────────────────────────────────────
+// const DEFAULT_MEDIA_W = 480;
+// const DEFAULT_MEDIA_H = 270;
+// const FLUSH_INTERVAL  = 50;   // ms — throttle Yjs stroke sync
+// const MIN_MOVE_DIST   = 0.6;  // px — ignore pointer jitter
+
+// // ─── helpers ──────────────────────────────────────────────────────────────────
+// function uid() {
+//   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+// }
+
+// function fileToBase64(file) {
+//   return new Promise((res, rej) => {
+//     const r = new FileReader();
+//     r.onload  = () => res(r.result);
+//     r.onerror = rej;
+//     r.readAsDataURL(file);
+//   });
+// }
+
+// // ─── StreamerWhiteboard ───────────────────────────────────────────────────────
+// const StreamerWhiteboard = memo(
+//   ({
+//     sessionId,
+//     roomCode,
+//     wsToken,
+//     sessionInfo,
+//     isActive,
+//     onClose,
+//     allowViewersToDraw = true,
+//     mainScreenMode     = false,
+//     compact            = false,
+//   }) => {
+//     // ── canvas refs ──
+//     const canvasRef           = useRef(null);
+//     const backgroundCanvasRef = useRef(null);
+//     const ctxRef              = useRef(null);
+//     const bgCtxRef            = useRef(null);
+//     const containerRef        = useRef(null);
+
+//     // ── Yjs refs ──
+//     const yDocRef          = useRef(null);
+//     const yProviderRef     = useRef(null);
+//     const yWhiteboardRef   = useRef(null);
+//     const ySettingsRef     = useRef(null);
+//     const yVideoStateRef   = useRef(null);
+//     const yUndoManagerRef  = useRef(null);
+//     const yObserverCleanup = useRef(null);
+
+//     // ── media caches ──
+//     const imageCacheRef = useRef(new Map());   // id → HTMLImageElement
+//     const videoCacheRef = useRef(new Map());   // id → HTMLVideoElement
+
+//     // ── raf / flush ──
+//     const rafIdRef        = useRef(null);
+//     const pendingObjsRef  = useRef(null);
+//     const flushTimerRef   = useRef(null);
+
+//     // ── stroke state ──
+//     const currentStrokeIdRef  = useRef(null);
+//     const strokeBufferRef     = useRef([]);
+//     const lastLocalPointRef   = useRef(null);
+//     const lastLocalMidRef     = useRef(null);
+//     const pointerIdRef        = useRef(null);
+
+//     // ── pan ──
+//     const lastPanPointRef  = useRef({ x: 0, y: 0 });
+//     const canvasOffsetRef  = useRef({ x: 0, y: 0 });
+//     const lastPointRef     = useRef({ x: 0, y: 0 });
+
+//     // ── selected object (for move/delete) ──
+//     const selectedIdRef = useRef(null);
+//     const dragOffsetRef = useRef({ x: 0, y: 0 });
+//     const isDraggingRef = useRef(false);
+
+//     // ── state ──
+//     const [tool,            setTool]            = useState("pen");
+//     const [color,           setColor]           = useState("#000000");
+//     const [strokeWidth,     setStrokeWidth]     = useState(2);
+//     const [opacity,         setOpacity]         = useState(1);
+//     const [currentZoom,     setCurrentZoom]     = useState(1);
+//     const [isConnected,     setIsConnected]     = useState(false);
+//     const [participants,    setParticipants]     = useState([]);
+//     const [backgroundColor, setBackgroundColor] = useState("#ffffff");
+//     const [isGridVisible,   setIsGridVisible]   = useState(false);
+//     const [isPanning,       setIsPanning]       = useState(false);
+//     const [isDrawing,       setIsDrawing]       = useState(false);
+//     const [selectedId,      setSelectedId]      = useState(null);
+
+//     // ── modals ──
+//     const [showUrlModal,     setShowUrlModal]     = useState(false);
+//     const [urlModalType,     setUrlModalType]     = useState("website"); // "website"|"video"
+//     const [urlInput,         setUrlInput]         = useState("");
+//     const fileInputRef       = useRef(null);
+//     const pdfInputRef        = useRef(null);
+
+//     // ── animation frame for video ──
+//     const videoRafRef = useRef(null);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Helpers
+//     // ═══════════════════════════════════════════════════════
+//     const getTransformedPoint = useCallback((e) => {
+//       if (!canvasRef.current) return { x: 0, y: 0 };
+//       const rect   = canvasRef.current.getBoundingClientRect();
+//       const scaleX = canvasRef.current.width  / rect.width;
+//       const scaleY = canvasRef.current.height / rect.height;
+//       const x = (e.clientX - rect.left) * scaleX;
+//       const y = (e.clientY - rect.top)  * scaleY;
+//       return {
+//         x: (x - canvasOffsetRef.current.x) / currentZoom,
+//         y: (y - canvasOffsetRef.current.y) / currentZoom,
+//       };
+//     }, [currentZoom]);
+
+//     const getCurrentObjects = useCallback(() => {
+//       if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return [];
+//       return (yWhiteboardRef.current.toArray()[0]?.objects) || [];
+//     }, []);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Yjs write helpers
+//     // ═══════════════════════════════════════════════════════
+//     const commitState = useCallback((updater) => {
+//       if (!yWhiteboardRef.current || !yDocRef.current) return;
+//       yDocRef.current.transact(() => {
+//         const cur = yWhiteboardRef.current.toArray()[0] || {
+//           version: "1.0.0", objects: [], background: backgroundColor,
+//           createdAt: new Date().toISOString(),
+//         };
+//         const next = updater(cur);
+//         if (yWhiteboardRef.current.length === 0) {
+//           yWhiteboardRef.current.insert(0, [next]);
+//         } else {
+//           yWhiteboardRef.current.delete(0, 1);
+//           yWhiteboardRef.current.insert(0, [next]);
+//         }
+//       }, "drawing");
+//     }, [backgroundColor]);
+
+//     const addObject = useCallback((obj) => {
+//       commitState((cur) => ({
+//         ...cur,
+//         objects: [...(cur.objects || []), obj],
+//         updatedBy: sessionInfo?.streamerId,
+//         updatedAt: new Date().toISOString(),
+//       }));
+//     }, [commitState, sessionInfo]);
+
+//     const deleteObject = useCallback((id) => {
+//       commitState((cur) => ({
+//         ...cur,
+//         objects: (cur.objects || []).filter((o) => o.id !== id),
+//         updatedBy: sessionInfo?.streamerId,
+//         updatedAt: new Date().toISOString(),
+//       }));
+//       if (selectedIdRef.current === id) {
+//         selectedIdRef.current = null;
+//         setSelectedId(null);
+//       }
+//     }, [commitState, sessionInfo]);
+
+//     const updateObject = useCallback((id, patch) => {
+//       commitState((cur) => ({
+//         ...cur,
+//         objects: (cur.objects || []).map((o) => o.id === id ? { ...o, ...patch } : o),
+//         updatedBy: sessionInfo?.streamerId,
+//         updatedAt: new Date().toISOString(),
+//       }));
+//     }, [commitState, sessionInfo]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Drawing
+//     // ═══════════════════════════════════════════════════════
+//     const drawGrid = useCallback((ctx, w, h) => {
+//       ctx.save();
+//       ctx.strokeStyle = "#e0e0e0";
+//       ctx.lineWidth   = 0.5;
+//       ctx.globalAlpha = 0.3;
+//       const gs = 20;
+//       for (let x = 0; x <= w; x += gs) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
+//       for (let y = 0; y <= h; y += gs) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
+//       ctx.restore();
+//     }, []);
+
+//     const drawObject = useCallback((ctx, obj) => {
+//       if (!obj) return;
+//       ctx.save();
+//       ctx.strokeStyle = obj.color       || "#000000";
+//       ctx.fillStyle   = obj.fillColor   || "transparent";
+//       ctx.lineWidth   = (obj.strokeWidth || 2) / currentZoom;
+//       ctx.globalAlpha = obj.opacity     ?? 1;
+
+//       switch (obj.type) {
+//         case "pen":
+//         case "pencil": {
+//           if (!obj.points?.length) break;
+//           ctx.beginPath();
+//           ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//           obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
+//           ctx.stroke();
+//           break;
+//         }
+//         case "eraser": {
+//           if (!obj.points?.length) break;
+//           ctx.save();
+//           ctx.globalCompositeOperation = "destination-out";
+//           ctx.beginPath();
+//           ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//           obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
+//           ctx.stroke();
+//           ctx.restore();
+//           break;
+//         }
+//         case "line": {
+//           ctx.beginPath(); ctx.moveTo(obj.x1, obj.y1); ctx.lineTo(obj.x2, obj.y2); ctx.stroke();
+//           break;
+//         }
+//         case "rectangle": {
+//           if (obj.fillColor) ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
+//           ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
+//           break;
+//         }
+//         case "circle": {
+//           ctx.beginPath(); ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
+//           if (obj.fillColor) ctx.fill();
+//           ctx.stroke();
+//           break;
+//         }
+//         case "text": {
+//           ctx.font      = `${obj.fontSize || 16}px Arial`;
+//           ctx.fillStyle = obj.color || "#000";
+//           ctx.fillText(obj.text || "", obj.x, obj.y);
+//           break;
+//         }
+
+//         // ── image ──
+//         case "image": {
+//           let img = imageCacheRef.current.get(obj.id);
+//           if (!img) {
+//             img       = new Image();
+//             img.src   = obj.src;
+//             img.onload = () => scheduleRedraw(getCurrentObjects());
+//             imageCacheRef.current.set(obj.id, img);
+//           }
+//           if (img.complete && img.naturalWidth > 0) {
+//             ctx.globalAlpha = obj.opacity ?? 1;
+//             ctx.drawImage(img, obj.x, obj.y, obj.width || DEFAULT_MEDIA_W, obj.height || DEFAULT_MEDIA_H);
+//           } else {
+//             // placeholder while loading
+//             ctx.strokeStyle = "#aaa"; ctx.strokeRect(obj.x, obj.y, obj.width || DEFAULT_MEDIA_W, obj.height || DEFAULT_MEDIA_H);
+//             ctx.fillStyle   = "#eee"; ctx.font = "14px Arial";
+//             ctx.fillText("Loading image…", obj.x + 8, obj.y + 20);
+//           }
+//           break;
+//         }
+
+//         // ── video ──
+//         case "video": {
+//           let vid = videoCacheRef.current.get(obj.id);
+//           if (!vid) {
+//             vid     = document.createElement("video");
+//             vid.src = obj.src;
+//             vid.crossOrigin  = "anonymous";
+//             vid.preload      = "auto";
+//             vid.muted        = false;
+//             vid.playsInline  = true;
+//             videoCacheRef.current.set(obj.id, vid);
+//           }
+//           const w = obj.width  || DEFAULT_MEDIA_W;
+//           const h = obj.height || DEFAULT_MEDIA_H;
+//           if (vid.readyState >= 2) {
+//             ctx.globalAlpha = obj.opacity ?? 1;
+//             ctx.drawImage(vid, obj.x, obj.y, w, h);
+//           } else {
+//             ctx.fillStyle   = "#111"; ctx.fillRect(obj.x, obj.y, w, h);
+//             ctx.fillStyle   = "#fff"; ctx.font = "14px Arial";
+//             ctx.fillText("Loading video…", obj.x + 8, obj.y + h / 2);
+//           }
+//           // selection border
+//           if (selectedIdRef.current === obj.id) {
+//             ctx.strokeStyle = "#3b82f6"; ctx.lineWidth = 2 / currentZoom;
+//             ctx.setLineDash([6 / currentZoom, 3 / currentZoom]);
+//             ctx.strokeRect(obj.x - 2, obj.y - 2, w + 4, h + 4);
+//             ctx.setLineDash([]);
+//           }
+//           break;
+//         }
+
+//         // ── website placeholder on canvas ──
+//         case "website": {
+//           const w = obj.width  || DEFAULT_MEDIA_W;
+//           const h = obj.height || DEFAULT_MEDIA_H;
+//           ctx.fillStyle   = "#f0f4ff"; ctx.fillRect(obj.x, obj.y, w, h);
+//           ctx.strokeStyle = "#93c5fd"; ctx.lineWidth = 1.5 / currentZoom;
+//           ctx.strokeRect(obj.x, obj.y, w, h);
+//           ctx.fillStyle = "#1e40af"; ctx.font = `bold ${14 / currentZoom}px Arial`;
+//           ctx.fillText("🌐 " + (obj.url || "Website"), obj.x + 10, obj.y + 24);
+//           ctx.fillStyle = "#64748b"; ctx.font = `${11 / currentZoom}px Arial`;
+//           ctx.fillText(obj.url || "", obj.x + 10, obj.y + 42);
+//           if (selectedIdRef.current === obj.id) {
+//             ctx.strokeStyle = "#3b82f6"; ctx.lineWidth = 2 / currentZoom;
+//             ctx.setLineDash([6 / currentZoom, 3 / currentZoom]);
+//             ctx.strokeRect(obj.x - 2, obj.y - 2, w + 4, h + 4);
+//             ctx.setLineDash([]);
+//           }
+//           break;
+//         }
+
+//         // ── pdf page ──
+//         case "pdf": {
+//           let img = imageCacheRef.current.get(obj.id);
+//           if (!img) {
+//             img       = new Image();
+//             img.src   = obj.src; // base64 rendered page
+//             img.onload = () => scheduleRedraw(getCurrentObjects());
+//             imageCacheRef.current.set(obj.id, img);
+//           }
+//           const w = obj.width  || DEFAULT_MEDIA_W;
+//           const h = obj.height || DEFAULT_MEDIA_H;
+//           if (img.complete && img.naturalWidth > 0) {
+//             ctx.globalAlpha = obj.opacity ?? 1;
+//             ctx.drawImage(img, obj.x, obj.y, w, h);
+//           } else {
+//             ctx.fillStyle   = "#f9fafb"; ctx.fillRect(obj.x, obj.y, w, h);
+//             ctx.strokeStyle = "#d1d5db"; ctx.strokeRect(obj.x, obj.y, w, h);
+//             ctx.fillStyle   = "#6b7280"; ctx.font = "14px Arial";
+//             ctx.fillText("Rendering PDF…", obj.x + 8, obj.y + h / 2);
+//           }
+//           if (selectedIdRef.current === obj.id) {
+//             ctx.strokeStyle = "#3b82f6"; ctx.lineWidth = 2 / currentZoom;
+//             ctx.setLineDash([6 / currentZoom, 3 / currentZoom]);
+//             ctx.strokeRect(obj.x - 2, obj.y - 2, w + 4, h + 4);
+//             ctx.setLineDash([]);
+//           }
+//           break;
+//         }
+
+//         default: break;
+//       }
+
+//       // selection highlight for image
+//       if (
+//         (obj.type === "image") &&
+//         selectedIdRef.current === obj.id
+//       ) {
+//         ctx.strokeStyle = "#3b82f6"; ctx.lineWidth = 2 / currentZoom;
+//         ctx.setLineDash([6 / currentZoom, 3 / currentZoom]);
+//         ctx.strokeRect(obj.x - 2, obj.y - 2, (obj.width || DEFAULT_MEDIA_W) + 4, (obj.height || DEFAULT_MEDIA_H) + 4);
+//         ctx.setLineDash([]);
+//       }
+
+//       ctx.restore();
+//     // eslint-disable-next-line react-hooks/exhaustive-deps
+//     }, [currentZoom]);
+
+//     const redrawCanvas = useCallback((objects) => {
+//       if (!ctxRef.current || !bgCtxRef.current || !canvasRef.current) return;
+//       const ctx    = ctxRef.current;
+//       const bgCtx  = bgCtxRef.current;
+//       const canvas = canvasRef.current;
+
+//       ctx.clearRect(0, 0, canvas.width, canvas.height);
+//       bgCtx.clearRect(0, 0, canvas.width, canvas.height);
+
+//       bgCtx.fillStyle = backgroundColor;
+//       bgCtx.fillRect(0, 0, canvas.width, canvas.height);
+//       if (isGridVisible) drawGrid(bgCtx, canvas.width, canvas.height);
+
+//       ctx.save();
+//       ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//       ctx.scale(currentZoom, currentZoom);
+//       (objects || []).forEach((obj) => drawObject(ctx, obj));
+//       ctx.restore();
+//     }, [backgroundColor, isGridVisible, currentZoom, drawGrid, drawObject]);
+
+//     const scheduleRedraw = useCallback((objects) => {
+//       pendingObjsRef.current = objects || [];
+//       if (rafIdRef.current) return;
+//       rafIdRef.current = requestAnimationFrame(() => {
+//         rafIdRef.current = null;
+//         redrawCanvas(pendingObjsRef.current || []);
+//         pendingObjsRef.current = null;
+//       });
+//     }, [redrawCanvas]);
+
+//     const loadWhiteboardState = useCallback(() => {
+//       if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return;
+//       try {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         if (state.background) setBackgroundColor(state.background);
+//         if (Array.isArray(state.objects)) scheduleRedraw(state.objects);
+//       } catch (e) { console.error(e); }
+//     }, [scheduleRedraw]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Video RAF loop — keeps video frames painted on canvas
+//     // ═══════════════════════════════════════════════════════
+//     const startVideoLoop = useCallback(() => {
+//       if (videoRafRef.current) return;
+//       const loop = () => {
+//         const hasVideo = getCurrentObjects().some((o) => o.type === "video");
+//         if (!hasVideo) { videoRafRef.current = null; return; }
+//         scheduleRedraw(getCurrentObjects());
+//         videoRafRef.current = requestAnimationFrame(loop);
+//       };
+//       videoRafRef.current = requestAnimationFrame(loop);
+//     }, [getCurrentObjects, scheduleRedraw]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Smooth stroke (local incremental draw)
+//     // ═══════════════════════════════════════════════════════
+//     const drawSmoothStroke = useCallback((prev, next, strokeType) => {
+//       if (!ctxRef.current) return;
+//       const ctx = ctxRef.current;
+//       ctx.save();
+//       ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//       ctx.scale(currentZoom, currentZoom);
+//       ctx.lineCap   = "round";
+//       ctx.lineJoin  = "round";
+//       ctx.globalAlpha = opacity ?? 1;
+//       ctx.lineWidth   = (strokeWidth || 2) / currentZoom;
+
+//       if (strokeType === "eraser") {
+//         ctx.globalCompositeOperation = "destination-out";
+//         ctx.strokeStyle = "rgba(0,0,0,1)";
+//       } else {
+//         ctx.globalCompositeOperation = "source-over";
+//         ctx.strokeStyle = color || "#000000";
+//       }
+
+//       const mid = { x: (prev.x + next.x) / 2, y: (prev.y + next.y) / 2 };
+//       if (!lastLocalMidRef.current) lastLocalMidRef.current = { x: prev.x, y: prev.y };
+//       ctx.beginPath();
+//       ctx.moveTo(lastLocalMidRef.current.x, lastLocalMidRef.current.y);
+//       ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
+//       ctx.stroke();
+//       lastLocalMidRef.current = mid;
+//       ctx.restore();
+//     }, [currentZoom, color, strokeWidth, opacity]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Throttled Yjs stroke flush
+//     // ═══════════════════════════════════════════════════════
+//     const flushStrokeToYjs = useCallback((force = false) => {
+//       const strokeId = currentStrokeIdRef.current;
+//       if (!strokeId) return;
+//       const buffered = strokeBufferRef.current;
+//       if (!buffered.length) return;
+//       const pts = buffered.slice();
+//       strokeBufferRef.current = [];
+
+//       commitState((cur) => {
+//         const objs   = [...(cur.objects || [])];
+//         const idx    = objs.findIndex((o) => o?.id === strokeId);
+//         if (idx === -1) return cur;
+//         const target = { ...objs[idx] };
+//         target.points = [...(target.points || []), ...pts];
+//         objs[idx] = target;
+//         return { ...cur, objects: objs, updatedAt: new Date().toISOString() };
+//       });
+//     }, [commitState]);
+
+//     const scheduleFlush = useCallback(() => {
+//       if (flushTimerRef.current) return;
+//       flushTimerRef.current = setTimeout(() => {
+//         flushTimerRef.current = null;
+//         flushStrokeToYjs(false);
+//       }, FLUSH_INTERVAL);
+//     }, [flushStrokeToYjs]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Hit-test for select tool
+//     // ═══════════════════════════════════════════════════════
+//     const hitTest = useCallback((pt) => {
+//       const objs = getCurrentObjects();
+//       for (let i = objs.length - 1; i >= 0; i--) {
+//         const o = objs[i];
+//         const w = o.width  || DEFAULT_MEDIA_W;
+//         const h = o.height || DEFAULT_MEDIA_H;
+//         if (["image", "video", "website", "pdf"].includes(o.type)) {
+//           if (pt.x >= o.x && pt.x <= o.x + w && pt.y >= o.y && pt.y <= o.y + h) return o;
+//         }
+//       }
+//       return null;
+//     }, [getCurrentObjects]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Yjs init
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       if (!sessionId || !wsToken) return;
+
+//       const initYjs = async () => {
+//         try {
+//           const ydoc    = new Y.Doc();
+//           yDocRef.current = ydoc;
+
+//           const baseWs  = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
+//           const provider = new WebsocketProvider(`${baseWs}/yjs`, sessionId, ydoc, {
+//             WebSocketPolyfill: WebSocket,
+//             params: {
+//               token: wsToken, isStreamer: true, allowViewersToDraw,
+//               roomCode, userId: sessionInfo?.streamerId, userName: sessionInfo?.streamerName,
+//             },
+//           });
+//           yProviderRef.current  = provider;
+
+//           const yWhiteboard     = ydoc.getArray("whiteboard");
+//           yWhiteboardRef.current = yWhiteboard;
+
+//           const ySettings       = ydoc.getMap("room_settings");
+//           ySettingsRef.current  = ySettings;
+
+//           const yVideoState     = ydoc.getMap("video_state");
+//           yVideoStateRef.current = yVideoState;
+
+//           provider.awareness.setLocalState({
+//             userId: sessionInfo?.streamerId || "streamer",
+//             userName: sessionInfo?.streamerName || "Streamer",
+//             role: "STREAMER", isStreamer: true, color, tool, cursor: null,
+//           });
+
+//           provider.awareness.on("change", () => {
+//             const states = Array.from(provider.awareness.getStates().entries());
+//             setParticipants(states.map(([id, s]) => ({ clientId: id, ...s })).filter((p) => p.userId));
+//           });
+
+//           provider.on("sync", (synced) => {
+//             setIsConnected(!!synced);
+//             if (synced) loadWhiteboardState();
+//           });
+
+//           yUndoManagerRef.current = new Y.UndoManager(yWhiteboard, {
+//             captureTimeout: 150, trackedOrigins: new Set(["drawing"]),
+//           });
+
+//           new IndexeddbPersistence(`whiteboard-${sessionId}`, ydoc);
+
+//           const observer = (event) => {
+//             const origin = event?.transaction?.origin;
+//             if (origin === "drawing" && (isDrawing || currentStrokeIdRef.current)) return;
+//             loadWhiteboardState();
+//           };
+//           yWhiteboard.observe(observer);
+//           yObserverCleanup.current = () => { try { yWhiteboard.unobserve(observer); } catch {} };
+
+//           // video state observer — sync play/pause from yjs to all video elements
+//           yVideoState.observe(() => {
+//             const action      = yVideoState.get("action");
+//             const targetId    = yVideoState.get("targetId");
+//             const currentTime = yVideoState.get("currentTime");
+//             const vid         = videoCacheRef.current.get(targetId);
+//             if (!vid) return;
+//             if (typeof currentTime === "number") vid.currentTime = currentTime;
+//             if (action === "play")  vid.play().catch(() => {});
+//             if (action === "pause") vid.pause();
+//           });
+
+//         } catch (err) {
+//           console.error("Failed to init Yjs:", err);
+//           toast.error("Failed to connect to whiteboard server");
+//         }
+//       };
+
+//       initYjs();
+
+//       return () => {
+//         try { flushStrokeToYjs(true); } catch {}
+//         if (yObserverCleanup.current) { yObserverCleanup.current(); yObserverCleanup.current = null; }
+//         if (yProviderRef.current) { try { yProviderRef.current.disconnect(); yProviderRef.current.destroy(); } catch {} }
+//         if (yDocRef.current)      { try { yDocRef.current.destroy(); } catch {} }
+//         yProviderRef.current = yDocRef.current = yWhiteboardRef.current = null;
+//         if (videoRafRef.current) { cancelAnimationFrame(videoRafRef.current); videoRafRef.current = null; }
+//       };
+//       // eslint-disable-next-line react-hooks/exhaustive-deps
+//     }, [sessionId, roomCode, wsToken, allowViewersToDraw, sessionInfo]);
+
+//     // keep awareness fresh
+//     useEffect(() => {
+//       const p = yProviderRef.current;
+//       if (!p) return;
+//       try {
+//         const prev = p.awareness.getLocalState() || {};
+//         p.awareness.setLocalState({ ...prev, color, tool,
+//           userId: sessionInfo?.streamerId || "streamer",
+//           userName: sessionInfo?.streamerName || "Streamer",
+//           role: "STREAMER", isStreamer: true,
+//         });
+//       } catch {}
+//     }, [color, tool, sessionInfo]);
+
+//     // cleanup timers
+//     useEffect(() => () => {
+//       if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+//       if (rafIdRef.current)      cancelAnimationFrame(rafIdRef.current);
+//     }, []);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Canvas init + resize
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       if (!canvasRef.current || !backgroundCanvasRef.current || !containerRef.current) return;
+//       const canvas    = canvasRef.current;
+//       const bgCanvas  = backgroundCanvasRef.current;
+//       const container = containerRef.current;
+
+//       const resize = () => {
+//         canvas.width  = bgCanvas.width  = container.clientWidth;
+//         canvas.height = bgCanvas.height = container.clientHeight;
+//         const ctx   = canvas.getContext("2d");
+//         const bgCtx = bgCanvas.getContext("2d");
+//         ctx.lineCap = "round"; ctx.lineJoin = "round";
+//         ctxRef.current = ctx; bgCtxRef.current = bgCtx;
+//         if (yWhiteboardRef.current) {
+//           const s = yWhiteboardRef.current.toArray()[0] || {};
+//           scheduleRedraw(s.objects || []);
+//         }
+//       };
+
+//       resize();
+//       const ro = new ResizeObserver(resize);
+//       ro.observe(container);
+//       return () => ro.disconnect();
+//     }, [scheduleRedraw]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Paste handler — Ctrl+V image
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       const handlePaste = async (e) => {
+//         for (const item of e.clipboardData.items) {
+//           if (item.type.startsWith("image/")) {
+//             const file   = item.getAsFile();
+//             const b64    = await fileToBase64(file);
+//             const img    = new Image();
+//             img.src      = b64;
+//             img.onload   = () => {
+//               const ratio = img.naturalWidth / img.naturalHeight;
+//               const w     = Math.min(img.naturalWidth, DEFAULT_MEDIA_W);
+//               const h     = w / ratio;
+//               addObject({
+//                 id: uid(), type: "image", src: b64,
+//                 x: 80, y: 80, width: w, height: h,
+//                 opacity: 1, timestamp: Date.now(),
+//               });
+//             };
+//             break;
+//           }
+//         }
+//       };
+//       window.addEventListener("paste", handlePaste);
+//       return () => window.removeEventListener("paste", handlePaste);
+//     }, [addObject]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Keyboard — Delete selected
+//     // ═══════════════════════════════════════════════════════
+//     useEffect(() => {
+//       const handleKey = (e) => {
+//         if ((e.key === "Delete" || e.key === "Backspace") && selectedIdRef.current) {
+//           // Don't delete if user is typing in an input
+//           if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+//           deleteObject(selectedIdRef.current);
+//         }
+//         if ((e.ctrlKey || e.metaKey) && e.key === "z") {
+//           e.preventDefault();
+//           yUndoManagerRef.current?.undo();
+//         }
+//         if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.shiftKey && e.key === "z"))) {
+//           e.preventDefault();
+//           yUndoManagerRef.current?.redo();
+//         }
+//       };
+//       window.addEventListener("keydown", handleKey);
+//       return () => window.removeEventListener("keydown", handleKey);
+//     }, [deleteObject]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Media upload handlers
+//     // ═══════════════════════════════════════════════════════
+//     const handleImageUpload = useCallback(async (e) => {
+//       const file = e.target.files?.[0];
+//       if (!file) return;
+//       if (file.size > 10 * 1024 * 1024) { toast.error("Image must be < 10MB"); return; }
+//       const b64  = await fileToBase64(file);
+//       const img  = new Image();
+//       img.src    = b64;
+//       img.onload = () => {
+//         const ratio = img.naturalWidth / img.naturalHeight;
+//         const w     = Math.min(img.naturalWidth, DEFAULT_MEDIA_W);
+//         const h     = w / ratio;
+//         addObject({ id: uid(), type: "image", src: b64, x: 80, y: 80, width: w, height: h, opacity: 1, timestamp: Date.now() });
+//       };
+//       e.target.value = "";
+//     }, [addObject]);
+
+//     const handlePdfUpload = useCallback(async (e) => {
+//       const file = e.target.files?.[0];
+//       if (!file) return;
+
+//       // Dynamically import pdfjs
+//       const pdfjsLib = await import("pdfjs-dist");
+//       pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.js`;
+
+//       const arrayBuffer = await file.arrayBuffer();
+//       const pdfDoc      = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+//       let yPos = 80;
+//       for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+//         const page     = await pdfDoc.getPage(pageNum);
+//         const viewport = page.getViewport({ scale: 1.5 });
+//         const offCanvas = document.createElement("canvas");
+//         offCanvas.width  = viewport.width;
+//         offCanvas.height = viewport.height;
+//         await page.render({ canvasContext: offCanvas.getContext("2d"), viewport }).promise;
+//         const src = offCanvas.toDataURL("image/png");
+//         addObject({
+//           id: uid(), type: "pdf", src,
+//           x: 80, y: yPos,
+//           width: Math.min(viewport.width, DEFAULT_MEDIA_W),
+//           height: Math.min(viewport.width, DEFAULT_MEDIA_W) * (viewport.height / viewport.width),
+//           page: pageNum, opacity: 1, timestamp: Date.now(),
+//         });
+//         yPos += Math.min(viewport.width, DEFAULT_MEDIA_W) * (viewport.height / viewport.width) + 20;
+//       }
+//       toast.success(`PDF loaded — ${pdfDoc.numPages} page(s)`);
+//       e.target.value = "";
+//     }, [addObject]);
+
+//     const handleUrlSubmit = useCallback(() => {
+//       let url = urlInput.trim();
+//       if (!url) return;
+//       if (!url.startsWith("http")) url = "https://" + url;
+
+//       if (urlModalType === "video") {
+//         addObject({
+//           id: uid(), type: "video", src: url,
+//           x: 80, y: 80, width: DEFAULT_MEDIA_W, height: DEFAULT_MEDIA_H,
+//           opacity: 1, timestamp: Date.now(),
+//         });
+//         // Notify video state
+//         if (yVideoStateRef.current) {
+//           yVideoStateRef.current.set("action", "load");
+//           yVideoStateRef.current.set("url", url);
+//         }
+//         startVideoLoop();
+//       } else {
+//         addObject({
+//           id: uid(), type: "website", url,
+//           x: 80, y: 80, width: DEFAULT_MEDIA_W, height: DEFAULT_MEDIA_H,
+//           opacity: 1, timestamp: Date.now(),
+//         });
+//         // Sync URL to viewers via settings
+//         if (ySettingsRef.current) {
+//           ySettingsRef.current.set("activeUrl", url);
+//           ySettingsRef.current.set("urlMode", true);
+//         }
+//       }
+//       setUrlInput("");
+//       setShowUrlModal(false);
+//     }, [urlInput, urlModalType, addObject, startVideoLoop]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Video controls (play/pause/seek broadcast)
+//     // ═══════════════════════════════════════════════════════
+//     const broadcastVideoAction = useCallback((objId, action, currentTime) => {
+//       if (!yVideoStateRef.current) return;
+//       yVideoStateRef.current.set("targetId",   objId);
+//       yVideoStateRef.current.set("action",     action);
+//       yVideoStateRef.current.set("currentTime", currentTime);
+//       yVideoStateRef.current.set("ts",          Date.now());
+//       // also apply locally
+//       const vid = videoCacheRef.current.get(objId);
+//       if (!vid) return;
+//       if (typeof currentTime === "number") vid.currentTime = currentTime;
+//       if (action === "play")  { vid.play().catch(() => {}); startVideoLoop(); }
+//       if (action === "pause") vid.pause();
+//     }, [startVideoLoop]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Pointer events
+//     // ═══════════════════════════════════════════════════════
+//     const handlePointerDown = useCallback((e) => {
+//       e.preventDefault();
+//       if (!canvasRef.current || e.button === 2) return;
+//       try { canvasRef.current.setPointerCapture(e.pointerId); pointerIdRef.current = e.pointerId; } catch {}
+
+//       if (tool === "pan" || e.altKey || e.button === 1) {
+//         setIsPanning(true);
+//         lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+//         canvasRef.current.style.cursor = "grabbing";
+//         return;
+//       }
+
+//       const p = getTransformedPoint(e);
+
+//       // Select tool
+//       if (tool === "select") {
+//         const hit = hitTest(p);
+//         if (hit) {
+//           selectedIdRef.current = hit.id;
+//           setSelectedId(hit.id);
+//           dragOffsetRef.current = { x: p.x - hit.x, y: p.y - hit.y };
+//           isDraggingRef.current = true;
+//         } else {
+//           selectedIdRef.current = null;
+//           setSelectedId(null);
+//         }
+//         scheduleRedraw(getCurrentObjects());
+//         return;
+//       }
+
+//       setIsDrawing(true);
+//       lastPointRef.current      = p;
+//       lastLocalPointRef.current = p;
+//       lastLocalMidRef.current   = null;
+
+//       if (tool === "pen" || tool === "eraser") {
+//         const strokeId = uid();
+//         currentStrokeIdRef.current = strokeId;
+//         strokeBufferRef.current    = [];
+//         addObject({
+//           id: strokeId, type: tool,
+//           points: [{ x: p.x, y: p.y }],
+//           color: tool === "eraser" ? backgroundColor : color,
+//           strokeWidth, opacity, timestamp: Date.now(),
+//         });
+//         drawSmoothStroke(p, { x: p.x + 0.01, y: p.y + 0.01 }, tool);
+//       }
+//     }, [tool, getTransformedPoint, hitTest, addObject, drawSmoothStroke,
+//         scheduleRedraw, getCurrentObjects, backgroundColor, color, strokeWidth, opacity]);
+
+//     const handlePointerMove = useCallback((e) => {
+//       if (!canvasRef.current) return;
+
+//       if (isPanning) {
+//         const dx = e.clientX - lastPanPointRef.current.x;
+//         const dy = e.clientY - lastPanPointRef.current.y;
+//         canvasOffsetRef.current.x += dx;
+//         canvasOffsetRef.current.y += dy;
+//         lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+//         scheduleRedraw(getCurrentObjects());
+//         return;
+//       }
+
+//       // drag media object
+//       if (tool === "select" && isDraggingRef.current && selectedIdRef.current) {
+//         const p = getTransformedPoint(e);
+//         updateObject(selectedIdRef.current, {
+//           x: p.x - dragOffsetRef.current.x,
+//           y: p.y - dragOffsetRef.current.y,
+//         });
+//         return;
+//       }
+
+//       if (!isDrawing || (tool !== "pen" && tool !== "eraser")) return;
+
+//       const events = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
+//       for (const evt of events) {
+//         const next = getTransformedPoint(evt);
+//         const prev = lastLocalPointRef.current || lastPointRef.current;
+//         const dist = prev ? Math.hypot(next.x - prev.x, next.y - prev.y) : 999;
+//         if (dist < MIN_MOVE_DIST) continue;
+//         if (prev) drawSmoothStroke(prev, next, tool);
+//         strokeBufferRef.current.push(next);
+//         scheduleFlush();
+//         lastLocalPointRef.current = next;
+//         lastPointRef.current      = next;
+//       }
+//     }, [isDrawing, isPanning, tool, getTransformedPoint, drawSmoothStroke,
+//         scheduleFlush, scheduleRedraw, getCurrentObjects, updateObject]);
+
+//     const endStrokeCleanup = useCallback(() => {
+//       flushStrokeToYjs(true);
+//       currentStrokeIdRef.current = null;
+//       strokeBufferRef.current    = [];
+//       lastLocalPointRef.current  = null;
+//       lastLocalMidRef.current    = null;
+//       isDraggingRef.current      = false;
+//       if (canvasRef.current && pointerIdRef.current != null) {
+//         try { canvasRef.current.releasePointerCapture(pointerIdRef.current); } catch {}
+//       }
+//       pointerIdRef.current = null;
+//     }, [flushStrokeToYjs]);
+
+//     const handlePointerUp   = useCallback(() => { setIsDrawing(false); setIsPanning(false); endStrokeCleanup(); if (canvasRef.current) canvasRef.current.style.cursor = tool === "pan" ? "grab" : tool === "select" ? "default" : "crosshair"; }, [tool, endStrokeCleanup]);
+//     const handlePointerLeave = useCallback(() => { setIsDrawing(false); setIsPanning(false); endStrokeCleanup(); }, [endStrokeCleanup]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Zoom + wheel
+//     // ═══════════════════════════════════════════════════════
+//     const handleWheel = useCallback((e) => {
+//       e.preventDefault();
+//       if (!canvasRef.current) return;
+//       const rect   = canvasRef.current.getBoundingClientRect();
+//       const mx     = e.clientX - rect.left;
+//       const my     = e.clientY - rect.top;
+//       const factor = e.deltaY > 0 ? 0.9 : 1.1;
+//       const newZ   = Math.max(0.5, Math.min(3, currentZoom * factor));
+//       const change = newZ / currentZoom;
+//       canvasOffsetRef.current.x = mx - (mx - canvasOffsetRef.current.x) * change;
+//       canvasOffsetRef.current.y = my - (my - canvasOffsetRef.current.y) * change;
+//       setCurrentZoom(newZ);
+//       scheduleRedraw(getCurrentObjects());
+//     }, [currentZoom, scheduleRedraw, getCurrentObjects]);
+
+//     const handleZoomIn    = useCallback(() => { setCurrentZoom((p) => Math.min(p + 0.1, 3));  scheduleRedraw(getCurrentObjects()); }, [scheduleRedraw, getCurrentObjects]);
+//     const handleZoomOut   = useCallback(() => { setCurrentZoom((p) => Math.max(p - 0.1, 0.5)); scheduleRedraw(getCurrentObjects()); }, [scheduleRedraw, getCurrentObjects]);
+//     const handleZoomReset = useCallback(() => { setCurrentZoom(1); canvasOffsetRef.current = { x: 0, y: 0 }; scheduleRedraw(getCurrentObjects()); }, [scheduleRedraw, getCurrentObjects]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Whiteboard actions
+//     // ═══════════════════════════════════════════════════════
+//     const handleClearWhiteboard = useCallback(() => {
+//       if (!yWhiteboardRef.current || !yDocRef.current) return;
+//       if (!window.confirm("Clear entire whiteboard?")) return;
+//       yDocRef.current.transact(() => {
+//         yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
+//         yWhiteboardRef.current.insert(0, [{
+//           version: "1.0.0", objects: [], background: backgroundColor,
+//           clearedAt: new Date().toISOString(), clearedBy: sessionInfo?.streamerId,
+//         }]);
+//       }, "drawing");
+//       imageCacheRef.current.clear();
+//       videoCacheRef.current.forEach((v) => { v.pause(); v.src = ""; });
+//       videoCacheRef.current.clear();
+//       if (videoRafRef.current) { cancelAnimationFrame(videoRafRef.current); videoRafRef.current = null; }
+//       scheduleRedraw([]);
+//       toast.success("Whiteboard cleared");
+//     }, [backgroundColor, sessionInfo, scheduleRedraw]);
+
+//     const handleExport = useCallback(() => {
+//       if (!canvasRef.current || !backgroundCanvasRef.current) return;
+//       const exp = document.createElement("canvas");
+//       exp.width  = canvasRef.current.width;
+//       exp.height = canvasRef.current.height;
+//       const ctx  = exp.getContext("2d");
+//       ctx.drawImage(backgroundCanvasRef.current, 0, 0);
+//       ctx.drawImage(canvasRef.current,           0, 0);
+//       const link     = document.createElement("a");
+//       link.download  = `whiteboard-${sessionId}-${Date.now()}.png`;
+//       link.href      = exp.toDataURL("image/png");
+//       link.click();
+//       toast.success("Whiteboard exported");
+//     }, [sessionId]);
+
+//     const handleUndo = useCallback(() => yUndoManagerRef.current?.undo(), []);
+//     const handleRedo = useCallback(() => yUndoManagerRef.current?.redo(), []);
+
+//     const handleDeleteSelected = useCallback(() => {
+//       if (selectedIdRef.current) deleteObject(selectedIdRef.current);
+//     }, [deleteObject]);
+
+//     // ═══════════════════════════════════════════════════════
+//     // Render
+//     // ═══════════════════════════════════════════════════════
+//     const cursorStyle = tool === "pan" ? "grab" : tool === "select" ? "default" : "crosshair";
+
+//     return (
+//       <div
+//         ref={containerRef}
+//         className={`absolute inset-0 z-20 w-full h-full bg-gray-900 overflow-hidden ${isActive ? "block" : "hidden"}`}
+//         onWheel={handleWheel}
+//       >
+//         {/* Hidden file inputs */}
+//         <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+//         <input ref={pdfInputRef}  type="file" accept=".pdf,.doc,.docx" className="hidden" onChange={handlePdfUpload} />
+
+//         {/* Background canvas */}
+//         <canvas ref={backgroundCanvasRef} className="absolute top-0 left-0 w-full h-full" style={{ pointerEvents: "none" }} />
+
+//         {/* Website iframes — rendered as overlays, positioned per object */}
+//         {getCurrentObjects()
+//           .filter((o) => o.type === "website")
+//           .map((obj) => (
+//             <div
+//               key={obj.id}
+//               style={{
+//                 position:  "absolute",
+//                 left:      (obj.x * currentZoom + canvasOffsetRef.current.x) + "px",
+//                 top:       (obj.y * currentZoom + canvasOffsetRef.current.y) + "px",
+//                 width:     (obj.width  || DEFAULT_MEDIA_W) * currentZoom + "px",
+//                 height:    (obj.height || DEFAULT_MEDIA_H) * currentZoom + "px",
+//                 zIndex:    15,
+//                 pointerEvents: tool === "select" ? "all" : "none",
+//                 border:    selectedId === obj.id ? "2px dashed #3b82f6" : "1px solid #93c5fd",
+//                 borderRadius: 4,
+//                 overflow:  "hidden",
+//               }}
+//             >
+//               <iframe
+//                 src={obj.url}
+//                 title={obj.url}
+//                 style={{ width: "100%", height: "100%", border: "none" }}
+//                 sandbox="allow-scripts allow-same-origin allow-forms"
+//               />
+//             </div>
+//           ))
+//         }
+
+//         {/* Video overlays — for play/pause/seek controls */}
+//         {getCurrentObjects()
+//           .filter((o) => o.type === "video")
+//           .map((obj) => {
+//             const vid = videoCacheRef.current.get(obj.id);
+//             const isPlaying = vid && !vid.paused;
+//             return (
+//               <div
+//                 key={obj.id}
+//                 style={{
+//                   position: "absolute",
+//                   left:   (obj.x * currentZoom + canvasOffsetRef.current.x) + "px",
+//                   top:    (obj.y * currentZoom + canvasOffsetRef.current.y) + "px",
+//                   width:  (obj.width  || DEFAULT_MEDIA_W) * currentZoom + "px",
+//                   height: (obj.height || DEFAULT_MEDIA_H) * currentZoom + "px",
+//                   zIndex: 16, pointerEvents: "none",
+//                 }}
+//               >
+//                 {/* Control bar at bottom */}
+//                 <div style={{
+//                   position: "absolute", bottom: 0, left: 0, right: 0,
+//                   background: "rgba(0,0,0,0.6)", display: "flex",
+//                   alignItems: "center", gap: 8, padding: "4px 8px",
+//                   pointerEvents: "all", zIndex: 17,
+//                 }}>
+//                   <button
+//                     onClick={() => broadcastVideoAction(obj.id, isPlaying ? "pause" : "play", vid?.currentTime || 0)}
+//                     style={{ color: "#fff", background: "none", border: "none", cursor: "pointer", fontSize: 16 }}
+//                   >
+//                     {isPlaying ? "⏸" : "▶"}
+//                   </button>
+//                   <input
+//                     type="range" min={0} max={vid?.duration || 100} step={0.1}
+//                     value={vid?.currentTime || 0}
+//                     onChange={(e) => broadcastVideoAction(obj.id, "seek", parseFloat(e.target.value))}
+//                     style={{ flex: 1, accentColor: "#3b82f6" }}
+//                   />
+//                   <button
+//                     onClick={() => deleteObject(obj.id)}
+//                     style={{ color: "#f87171", background: "none", border: "none", cursor: "pointer", fontSize: 14 }}
+//                   >✕</button>
+//                 </div>
+//               </div>
+//             );
+//           })
+//         }
+
+//         {/* Main drawing canvas */}
+//         <canvas
+//           ref={canvasRef}
+//           className={`absolute top-0 left-0 w-full h-full`}
+//           style={{ touchAction: "none", cursor: cursorStyle, zIndex: 20 }}
+//           onPointerDown={handlePointerDown}
+//           onPointerMove={handlePointerMove}
+//           onPointerUp={handlePointerUp}
+//           onPointerLeave={handlePointerLeave}
+//           onContextMenu={(e) => e.preventDefault()}
+//         />
+
+//         {/* ── URL Modal ── */}
+//         {showUrlModal && (
+//           <div
+//             className="absolute inset-0 flex items-center justify-center z-50"
+//             style={{ background: "rgba(0,0,0,0.6)" }}
+//           >
+//             <div className="bg-gray-800 border border-gray-600 rounded-xl p-6 w-96 shadow-2xl">
+//               <h3 className="text-white text-lg font-semibold mb-4">
+//                 {urlModalType === "video" ? "Add Video URL" : "Add Website URL"}
+//               </h3>
+//               <input
+//                 type="url"
+//                 autoFocus
+//                 value={urlInput}
+//                 onChange={(e) => setUrlInput(e.target.value)}
+//                 onKeyDown={(e) => { if (e.key === "Enter") handleUrlSubmit(); if (e.key === "Escape") setShowUrlModal(false); }}
+//                 placeholder={urlModalType === "video" ? "https://example.com/video.mp4" : "https://example.com"}
+//                 className="w-full bg-gray-700 text-white border border-gray-500 rounded-lg px-3 py-2 mb-4 outline-none focus:border-blue-500"
+//               />
+//               {urlModalType === "website" && (
+//                 <p className="text-yellow-400 text-xs mb-3">Note: Some websites block embedding (e.g. Google, YouTube). Use direct .mp4 links for video.</p>
+//               )}
+//               <div className="flex gap-3">
+//                 <button onClick={handleUrlSubmit} className="flex-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg py-2 font-medium transition-colors">Add</button>
+//                 <button onClick={() => setShowUrlModal(false)} className="flex-1 bg-gray-600 hover:bg-gray-500 text-white rounded-lg py-2 transition-colors">Cancel</button>
+//               </div>
+//             </div>
+//           </div>
+//         )}
+
+//         {/* ── Top Toolbar ── */}
+//         <div className="absolute top-2 left-1/2 transform -translate-x-1/2 z-30">
+//           <div className="bg-gray-800/95 backdrop-blur-sm rounded-xl shadow-2xl border border-gray-700 px-2 py-1.5 flex items-center gap-1.5 flex-wrap">
+
+//             {/* Connection status */}
+//             <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isConnected ? "bg-green-500 animate-pulse" : "bg-red-500"}`} />
+//             <span className="text-white text-xs mr-1">{isConnected ? "Live" : "Offline"}</span>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Draw tools */}
+//             {[
+//               { t: "pen",       icon: <FaPaintBrush className="w-3.5 h-3.5" />,   title: "Pen" },
+//               { t: "eraser",    icon: <FaEraser     className="w-3.5 h-3.5" />,   title: "Eraser" },
+//               { t: "line",      icon: <FiMinus      className="w-3.5 h-3.5" />,   title: "Line" },
+//               { t: "rectangle", icon: <FiSquare     className="w-3.5 h-3.5" />,   title: "Rectangle" },
+//               { t: "circle",    icon: <FiCircle     className="w-3.5 h-3.5" />,   title: "Circle" },
+//               { t: "select",    icon: <FiMousePointer className="w-3.5 h-3.5" />, title: "Select / Move (media)" },
+//               { t: "pan",       icon: <FiMove       className="w-3.5 h-3.5" />,   title: "Pan (Alt+Drag)" },
+//             ].map(({ t, icon, title }) => (
+//               <button key={t} onClick={() => setTool(t)} title={title}
+//                 className={`p-1.5 rounded-lg transition-colors ${tool === t ? "bg-blue-600 text-white" : "bg-gray-700 hover:bg-gray-600 text-gray-300"}`}>
+//                 {icon}
+//               </button>
+//             ))}
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Color + stroke */}
+//             <input type="color" value={color} onChange={(e) => setColor(e.target.value)}
+//               className="w-6 h-6 rounded cursor-pointer border border-gray-600" title="Color" />
+//             <select value={strokeWidth} onChange={(e) => setStrokeWidth(Number(e.target.value))}
+//               className="bg-gray-700 text-white text-xs rounded px-1.5 py-1 border border-gray-600 w-14">
+//               {[1,2,3,5,8].map((v) => <option key={v} value={v}>{v}px</option>)}
+//             </select>
+//             <select value={opacity} onChange={(e) => setOpacity(Number(e.target.value))}
+//               className="bg-gray-700 text-white text-xs rounded px-1.5 py-1 border border-gray-600 w-14">
+//               {[1,0.8,0.6,0.4].map((v) => <option key={v} value={v}>{v*100}%</option>)}
+//             </select>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Media insert buttons */}
+//             <button onClick={() => fileInputRef.current?.click()} title="Upload Image"
+//               className="p-1.5 bg-gray-700 hover:bg-green-700 rounded-lg transition-colors text-gray-300 hover:text-white">
+//               <FiImage className="w-3.5 h-3.5" />
+//             </button>
+//             <button onClick={() => { setUrlModalType("video"); setShowUrlModal(true); }} title="Add Video URL"
+//               className="p-1.5 bg-gray-700 hover:bg-purple-700 rounded-lg transition-colors text-gray-300 hover:text-white">
+//               <FiVideo className="w-3.5 h-3.5" />
+//             </button>
+//             <button onClick={() => { setUrlModalType("website"); setShowUrlModal(true); }} title="Embed Website"
+//               className="p-1.5 bg-gray-700 hover:bg-blue-700 rounded-lg transition-colors text-gray-300 hover:text-white">
+//               <FiGlobe className="w-3.5 h-3.5" />
+//             </button>
+//             <button onClick={() => pdfInputRef.current?.click()} title="Upload PDF / Document"
+//               className="p-1.5 bg-gray-700 hover:bg-orange-700 rounded-lg transition-colors text-gray-300 hover:text-white">
+//               <FiFileText className="w-3.5 h-3.5" />
+//             </button>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Delete selected */}
+//             {selectedId && (
+//               <button onClick={handleDeleteSelected} title="Delete selected (Del)"
+//                 className="p-1.5 bg-red-700 hover:bg-red-600 rounded-lg transition-colors text-white">
+//                 <FiTrash2 className="w-3.5 h-3.5" />
+//               </button>
+//             )}
+
+//             {/* Zoom */}
+//             <button onClick={handleZoomOut}   title="Zoom Out"  className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiMinusCircle className="w-3.5 h-3.5 text-white"/></button>
+//             <span className="text-white text-xs min-w-[44px] text-center">{Math.round(currentZoom * 100)}%</span>
+//             <button onClick={handleZoomIn}    title="Zoom In"   className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiPlus className="w-3.5 h-3.5 text-white"/></button>
+//             <button onClick={handleZoomReset} title="Reset Zoom" className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiRefreshCcw className="w-3.5 h-3.5 text-white"/></button>
+
+//             <div className="w-px h-5 bg-gray-600" />
+
+//             {/* Undo/Redo */}
+//             <button onClick={handleUndo} title="Undo (Ctrl+Z)"             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiRefreshCcw className="w-3.5 h-3.5 text-white"/></button>
+//             <button onClick={handleRedo} title="Redo (Ctrl+Y)"             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg"><FiRefreshCcw className="w-3.5 h-3.5 text-white transform scale-x-[-1]"/></button>
+
+//             {/* Grid */}
+//             <button onClick={() => setIsGridVisible((v) => !v)} title="Toggle Grid"
+//               className={`p-1.5 rounded-lg transition-colors ${isGridVisible ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-300 hover:bg-gray-600"}`}>
+//               <FiSquare className="w-3.5 h-3.5" />
+//             </button>
+
+//             {/* Clear + Export */}
+//             <button onClick={handleClearWhiteboard} title="Clear All" className="p-1.5 bg-red-900 hover:bg-red-800 rounded-lg"><FiTrash2   className="w-3.5 h-3.5 text-white"/></button>
+//             <button onClick={handleExport}          title="Export PNG" className="p-1.5 bg-blue-900 hover:bg-blue-800 rounded-lg"><FiDownload className="w-3.5 h-3.5 text-white"/></button>
+
+//             <div className="w-px h-5 bg-gray-600" />
+//             <button onClick={onClose} title="Close" className="p-1.5 bg-red-600 hover:bg-red-700 rounded-lg"><FiX className="w-3.5 h-3.5 text-white"/></button>
+//           </div>
+//         </div>
+
+//         {/* ── Bottom status bar ── */}
+//         <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded-lg backdrop-blur-sm border border-gray-700">
+//           <div className="flex items-center gap-3">
+//             <span>Tool: <span className="font-bold capitalize">{tool}</span></span>
+//             <span className="w-1 h-1 bg-gray-500 rounded-full" />
+//             <span>Zoom: <span className="font-bold">{Math.round(currentZoom * 100)}%</span></span>
+//             <span className="w-1 h-1 bg-gray-500 rounded-full" />
+//             <span>Viewers: <span className="font-bold">{participants.length}</span></span>
+//             {selectedId && <><span className="w-1 h-1 bg-gray-500 rounded-full" /><span className="text-blue-400">Object selected — Del to remove</span></>}
+//             <span className="w-1 h-1 bg-gray-500 rounded-full" />
+//             <span className="text-gray-400">Ctrl+V to paste image</span>
+//           </div>
+//         </div>
+
+//         {/* ── Viewers list ── */}
+//         <div className="absolute top-2 right-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded-lg backdrop-blur-sm border border-gray-700">
+//           <div className="flex items-center gap-2">
+//             <span>{participants.length} viewer{participants.length !== 1 ? "s" : ""}</span>
+//             {participants.map((p) => (
+//               <div key={p.clientId} className="w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-medium" title={p.userName || "User"}>
+//                 {(p.userName || "U").charAt(0)}
+//               </div>
+//             ))}
+//           </div>
+//         </div>
+
+//         {isPanning && (
+//           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-black/70 text-white px-4 py-2 rounded-lg backdrop-blur-sm border border-gray-600 flex items-center gap-2 pointer-events-none">
+//             <FiMove className="w-4 h-4" /> <span>Panning…</span>
+//           </div>
+//         )}
+//       </div>
+//     );
+//   },
+//   (prev, next) => {
+//     if (prev.sessionId         !== next.sessionId)         return false;
+//     if (prev.roomCode          !== next.roomCode)          return false;
+//     if (prev.wsToken           !== next.wsToken)           return false;
+//     if (prev.isActive          !== next.isActive)          return false;
+//     if (prev.allowViewersToDraw !== next.allowViewersToDraw) return false;
+//     if (prev.mainScreenMode    !== next.mainScreenMode)    return false;
+//     if (prev.compact           !== next.compact)           return false;
+//     if (prev.sessionInfo?.streamerId   !== next.sessionInfo?.streamerId)   return false;
+//     if (prev.sessionInfo?.streamerName !== next.sessionInfo?.streamerName) return false;
+//     return true;
+//   }
+// );
+
+// StreamerWhiteboard.displayName = "StreamerWhiteboard";
+// export default StreamerWhiteboard;
+
+
+
+
+
+// working
+// import React, { useState, useEffect, useRef, useCallback, memo } from "react";
+// import * as Y from "yjs";
+// import { WebsocketProvider } from "y-websocket";
+// import { IndexeddbPersistence } from "y-indexeddb";
+
+// import {
+//   FiSquare,
+//   FiCircle,
+//   FiMinus,
+//   FiDownload,
+//   FiRefreshCcw,
+//   FiTrash2,
+//   FiMove,
+//   FiPlus,
+//   FiMinusCircle,
+//   FiX,
+// } from "react-icons/fi";
+// import { FaEraser, FaPaintBrush } from "react-icons/fa";
+// import { toast } from "react-toastify";
+
+// // ✅ Memoized StreamerWhiteboard component with custom comparison
+// const StreamerWhiteboard = memo(
+//   ({
+//     sessionId,
+//     roomCode,
+//     wsToken,
+//     sessionInfo,
+//     isActive,
+//     onClose,
+//     allowViewersToDraw = true,
+//     mainScreenMode = false,
+//     compact = false,
+//   }) => {
+//     // Canvas refs
+//     const canvasRef = useRef(null);
+//     const backgroundCanvasRef = useRef(null);
+//     const ctxRef = useRef(null);
+//     const bgCtxRef = useRef(null);
+//     const containerRef = useRef(null);
+
+//     // Yjs refs
+//     const yDocRef = useRef(null);
+//     const yProviderRef = useRef(null);
+//     const yWhiteboardRef = useRef(null);
+//     const ySettingsRef = useRef(null);
+//     const yUndoManagerRef = useRef(null);
+
+//     // ✅ observer cleanup refs
+//     const yWhiteboardObserverCleanupRef = useRef(null);
+
+//     // ✅ raf redraw scheduler refs (for fast remote updates)
+//     const rafIdRef = useRef(null);
+//     const pendingObjectsRef = useRef(null);
+
+//     // State
+//     const [isDrawing, setIsDrawing] = useState(false);
+//     const [tool, setTool] = useState("pen");
+//     const [color, setColor] = useState("#000000");
+//     const [strokeWidth, setStrokeWidth] = useState(2);
+//     const [opacity, setOpacity] = useState(1);
+//     const [currentZoom, setCurrentZoom] = useState(1);
+//     const [isConnected, setIsConnected] = useState(false);
+//     const [participants, setParticipants] = useState([]);
+//     const [isLocalDrawing, setIsLocalDrawing] = useState(false);
+//     const [backgroundColor, setBackgroundColor] = useState("#ffffff");
+//     const [isGridVisible, setIsGridVisible] = useState(false);
+//     const [isPanning, setIsPanning] = useState(false);
+//     const [showControls, setShowControls] = useState(!compact); // (kept for compatibility)
+
+//     // Canvas state refs
+//     const lastPointRef = useRef({ x: 0, y: 0 });
+//     const canvasOffsetRef = useRef({ x: 0, y: 0 });
+//     const lastPanPointRef = useRef({ x: 0, y: 0 });
+
+//     // =========================
+//     // ✅ Performance refs (smooth drawing during recording)
+//     // =========================
+//     const currentStrokeIdRef = useRef(null); // active pen/eraser stroke id
+//     const strokeBufferRef = useRef([]); // buffered points for Yjs sync
+//     const flushTimerRef = useRef(null); // throttle timer
+
+//     const lastLocalPointRef = useRef(null); // last point drawn locally
+//     const lastLocalMidRef = useRef(null); // last midpoint for smoothing
+//     const pointerIdRef = useRef(null); // pointer capture id
+
+//     // =========================
+//     // Helpers
+//     // =========================
+//     const getTransformedPoint = useCallback(
+//       (evt) => {
+//         if (!canvasRef.current) return { x: 0, y: 0 };
+
+//         const rect = canvasRef.current.getBoundingClientRect();
+//         const scaleX = canvasRef.current.width / rect.width;
+//         const scaleY = canvasRef.current.height / rect.height;
+
+//         const x = (evt.clientX - rect.left) * scaleX;
+//         const y = (evt.clientY - rect.top) * scaleY;
+
+//         return {
+//           x: (x - canvasOffsetRef.current.x) / currentZoom,
+//           y: (y - canvasOffsetRef.current.y) / currentZoom,
+//         };
+//       },
+//       [currentZoom]
+//     );
+
+//     // Draw grid (memoized)
+//     const drawGrid = useCallback((ctx, width, height) => {
+//       ctx.save();
+//       ctx.strokeStyle = "#e0e0e0";
+//       ctx.lineWidth = 0.5;
+//       ctx.globalAlpha = 0.3;
+
+//       const gridSize = 20;
+
+//       for (let x = 0; x <= width; x += gridSize) {
+//         ctx.beginPath();
+//         ctx.moveTo(x, 0);
+//         ctx.lineTo(x, height);
+//         ctx.stroke();
+//       }
+
+//       for (let y = 0; y <= height; y += gridSize) {
+//         ctx.beginPath();
+//         ctx.moveTo(0, y);
+//         ctx.lineTo(width, y);
+//         ctx.stroke();
+//       }
+
+//       ctx.restore();
+//     }, []);
+
+//     // Draw individual object (memoized)
+//     const drawObject = useCallback(
+//       (ctx, obj) => {
+//         if (!obj) return;
+
+//         ctx.save();
+//         ctx.strokeStyle = obj.color || "#000000";
+//         ctx.fillStyle = obj.fillColor || "transparent";
+//         ctx.lineWidth = (obj.strokeWidth || 2) / currentZoom;
+//         ctx.globalAlpha = obj.opacity ?? 1;
+
+//         switch (obj.type) {
+//           case "pen":
+//           case "pencil": {
+//             if (!obj.points || obj.points.length < 1) break;
+//             ctx.beginPath();
+//             ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//             obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
+//             ctx.stroke();
+//             break;
+//           }
+
+//           case "line": {
+//             ctx.beginPath();
+//             ctx.moveTo(obj.x1, obj.y1);
+//             ctx.lineTo(obj.x2, obj.y2);
+//             ctx.stroke();
+//             break;
+//           }
+
+//           case "rectangle": {
+//             if (obj.fillColor) ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
+//             ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
+//             break;
+//           }
+
+//           case "circle": {
+//             ctx.beginPath();
+//             ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
+//             if (obj.fillColor) ctx.fill();
+//             ctx.stroke();
+//             break;
+//           }
+
+//           case "text": {
+//             ctx.font = `${obj.fontSize || 16}px Arial`;
+//             ctx.fillStyle = obj.color || "#000";
+//             ctx.fillText(obj.text || "", obj.x, obj.y);
+//             break;
+//           }
+
+//           case "eraser": {
+//             if (!obj.points || obj.points.length < 1) break;
+//             ctx.save();
+//             ctx.globalCompositeOperation = "destination-out";
+//             ctx.beginPath();
+//             ctx.moveTo(obj.points[0].x, obj.points[0].y);
+//             obj.points.forEach((p) => ctx.lineTo(p.x, p.y));
+//             ctx.stroke();
+//             ctx.restore();
+//             break;
+//           }
+
+//           default:
+//             break;
+//         }
+
+//         ctx.restore();
+//       },
+//       [currentZoom]
+//     );
+
+//     // Redraw canvas from objects (memoized)
+//     const redrawCanvas = useCallback(
+//       (objects) => {
+//         if (!ctxRef.current || !bgCtxRef.current || !canvasRef.current) return;
+
+//         const ctx = ctxRef.current;
+//         const bgCtx = bgCtxRef.current;
+//         const canvas = canvasRef.current;
+
+//         ctx.clearRect(0, 0, canvas.width, canvas.height);
+//         bgCtx.clearRect(0, 0, canvas.width, canvas.height);
+
+//         // Background
+//         bgCtx.fillStyle = backgroundColor;
+//         bgCtx.fillRect(0, 0, canvas.width, canvas.height);
+
+//         // Grid
+//         if (isGridVisible) {
+//           drawGrid(bgCtx, canvas.width, canvas.height);
+//         }
+
+//         // Apply zoom/pan and draw
+//         ctx.save();
+//         ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//         ctx.scale(currentZoom, currentZoom);
+
+//         (objects || []).forEach((obj) => drawObject(ctx, obj));
+
+//         ctx.restore();
+//       },
+//       [backgroundColor, isGridVisible, currentZoom, drawGrid, drawObject]
+//     );
+
+//     // ✅ schedule redraw on next animation frame (fast remote updates, avoids spamming)
+//     const scheduleRedraw = useCallback(
+//       (objects) => {
+//         pendingObjectsRef.current = objects || [];
+//         if (rafIdRef.current) return;
+
+//         rafIdRef.current = requestAnimationFrame(() => {
+//           rafIdRef.current = null;
+//           const objs = pendingObjectsRef.current || [];
+//           pendingObjectsRef.current = null;
+//           redrawCanvas(objs);
+//         });
+//       },
+//       [redrawCanvas]
+//     );
+
+//     // Load whiteboard state from Yjs (memoized)
+//     const loadWhiteboardState = useCallback(() => {
+//       if (!yWhiteboardRef.current || yWhiteboardRef.current.length === 0) return;
+
+//       try {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         if (state.background) setBackgroundColor(state.background);
+
+//         if (Array.isArray(state.objects)) {
+//           // ✅ use scheduler for quick UI update
+//           scheduleRedraw(state.objects);
+//         }
+//       } catch (error) {
+//         console.error("Error loading whiteboard state:", error);
+//       }
+//     }, [scheduleRedraw]);
+
+//     // Add object to Yjs document (memoized)
+//     const addObject = useCallback(
+//       (obj) => {
+//         if (!yWhiteboardRef.current || !yDocRef.current) return;
+
+//         setIsLocalDrawing(true);
+
+//         try {
+//           yDocRef.current.transact(() => {
+//             const currentState = yWhiteboardRef.current.toArray()[0] || {
+//               version: "1.0.0",
+//               objects: [],
+//               background: backgroundColor,
+//               createdAt: new Date().toISOString(),
+//             };
+
+//             const updatedState = {
+//               ...currentState,
+//               objects: [...(currentState.objects || []), obj],
+//               updatedBy: sessionInfo?.streamerId,
+//               updatedAt: new Date().toISOString(),
+//             };
+
+//             if (yWhiteboardRef.current.length === 0) {
+//               yWhiteboardRef.current.insert(0, [updatedState]);
+//             } else {
+//               yWhiteboardRef.current.delete(0, 1);
+//               yWhiteboardRef.current.insert(0, [updatedState]);
+//             }
+//           }, "drawing");
+//         } catch (error) {
+//           console.error("Error adding object:", error);
+//         } finally {
+//           setIsLocalDrawing(false);
+//         }
+//       },
+//       [backgroundColor, sessionInfo]
+//     );
+
+//     // =========================
+//     // ✅ Incremental local draw (SMOOTH CURVE)
+//     // =========================
+//     const drawSmoothStroke = useCallback(
+//       (prev, next, strokeType) => {
+//         if (!ctxRef.current) return;
+//         const ctx = ctxRef.current;
+
+//         ctx.save();
+//         ctx.translate(canvasOffsetRef.current.x, canvasOffsetRef.current.y);
+//         ctx.scale(currentZoom, currentZoom);
+
+//         ctx.lineCap = "round";
+//         ctx.lineJoin = "round";
+//         ctx.globalAlpha = opacity ?? 1;
+//         ctx.lineWidth = (strokeWidth || 2) / currentZoom;
+
+//         const isEraser = strokeType === "eraser";
+//         if (isEraser) {
+//           ctx.globalCompositeOperation = "destination-out";
+//           ctx.strokeStyle = "rgba(0,0,0,1)";
+//         } else {
+//           ctx.globalCompositeOperation = "source-over";
+//           ctx.strokeStyle = color || "#000000";
+//         }
+
+//         const mid = { x: (prev.x + next.x) / 2, y: (prev.y + next.y) / 2 };
+
+//         if (!lastLocalMidRef.current) {
+//           lastLocalMidRef.current = { x: prev.x, y: prev.y };
+//         }
+
+//         ctx.beginPath();
+//         ctx.moveTo(lastLocalMidRef.current.x, lastLocalMidRef.current.y);
+//         ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
+//         ctx.stroke();
+
+//         lastLocalMidRef.current = mid;
+
+//         ctx.restore();
+//       },
+//       [currentZoom, color, strokeWidth, opacity]
+//     );
+
+//     // =========================
+//     // ✅ Throttled Yjs sync (batch points)
+//     // =========================
+//     const flushStrokeToYjs = useCallback(
+//       (force = false) => {
+//         if (!yWhiteboardRef.current || !yDocRef.current) return;
+
+//         const strokeId = currentStrokeIdRef.current;
+//         if (!strokeId) return;
+
+//         const buffered = strokeBufferRef.current;
+//         if (!force && buffered.length === 0) return;
+//         if (buffered.length === 0) return;
+
+//         const pointsToAdd = buffered.slice();
+//         strokeBufferRef.current = [];
+
+//         try {
+//           yDocRef.current.transact(() => {
+//             const currentState = yWhiteboardRef.current.toArray()[0] || {
+//               version: "1.0.0",
+//               objects: [],
+//               background: backgroundColor,
+//               createdAt: new Date().toISOString(),
+//             };
+
+//             const objects = [...(currentState.objects || [])];
+
+//             let idx = objects.length - 1;
+//             const found = objects.findIndex((o) => o && o.id === strokeId);
+//             if (found !== -1) idx = found;
+
+//             const target = objects[idx];
+//             if (!target || (target.type !== "pen" && target.type !== "eraser")) return;
+
+//             target.points = [...(target.points || []), ...pointsToAdd];
+
+//             const updatedState = {
+//               ...currentState,
+//               objects,
+//               updatedBy: sessionInfo?.streamerId,
+//               updatedAt: new Date().toISOString(),
+//             };
+
+//             if (yWhiteboardRef.current.length === 0) {
+//               yWhiteboardRef.current.insert(0, [updatedState]);
+//             } else {
+//               yWhiteboardRef.current.delete(0, 1);
+//               yWhiteboardRef.current.insert(0, [updatedState]);
+//             }
+//           }, "drawing");
+//         } catch (error) {
+//           console.error("Error flushing stroke points:", error);
+//         }
+//       },
+//       [backgroundColor, sessionInfo]
+//     );
+
+//     const scheduleFlush = useCallback(() => {
+//       if (flushTimerRef.current) return;
+//       flushTimerRef.current = setTimeout(() => {
+//         flushTimerRef.current = null;
+//         flushStrokeToYjs(false);
+//       }, 50);
+//     }, [flushStrokeToYjs]);
+
+//     useEffect(() => {
+//       return () => {
+//         if (flushTimerRef.current) {
+//           clearTimeout(flushTimerRef.current);
+//           flushTimerRef.current = null;
+//         }
+//         if (rafIdRef.current) {
+//           cancelAnimationFrame(rafIdRef.current);
+//           rafIdRef.current = null;
+//         }
+//       };
+//     }, []);
+
+//     // =========================
+//     // ✅ Initialize Yjs document and WebSocket provider
+//     // =========================
+//     useEffect(() => {
+//       if (!sessionId || !wsToken) return;
+
+//       const initYjs = async () => {
+//         try {
+//           const ydoc = new Y.Doc();
+//           yDocRef.current = ydoc;
+
+//           const baseWs = import.meta.env.VITE_WS_URL || "ws://localhost:9090";
+//           const url = `${baseWs}/yjs`;
+
+//           const provider = new WebsocketProvider(url, sessionId, ydoc, {
+//             WebSocketPolyfill: WebSocket,
+//             params: {
+//               token: wsToken,
+//               isStreamer: true,
+//               allowViewersToDraw,
+//               roomCode,
+//               userId: sessionInfo?.streamerId,
+//               userName: sessionInfo?.streamerName,
+//             },
+//           });
+
+//           yProviderRef.current = provider;
+
+//           const yWhiteboard = ydoc.getArray("whiteboard");
+//           yWhiteboardRef.current = yWhiteboard;
+
+//           const ySettings = ydoc.getMap("room_settings");
+//           ySettingsRef.current = ySettings;
+
+//           provider.awareness.setLocalState({
+//             userId: sessionInfo?.streamerId || "streamer",
+//             userName: sessionInfo?.streamerName || "Streamer",
+//             role: "STREAMER",
+//             isStreamer: true,
+//             color,
+//             tool,
+//             cursor: null,
+//           });
+
+//           provider.awareness.on("change", () => {
+//             const states = Array.from(provider.awareness.getStates().entries());
+//             const participantsList = states
+//               .map(([clientId, state]) => ({ clientId, ...state }))
+//               .filter((p) => p.userId);
+
+//             setParticipants(participantsList);
+//           });
+
+//           provider.on("sync", (synced) => {
+//             setIsConnected(!!synced);
+//             if (synced) loadWhiteboardState();
+//           });
+
+//           // ✅ Undo manager tracks our transact origin ("drawing")
+//           yUndoManagerRef.current = new Y.UndoManager(yWhiteboard, {
+//             captureTimeout: 150,
+//             trackedOrigins: new Set(["drawing"]),
+//           });
+
+//           // ✅ Local persistence
+//           new IndexeddbPersistence(`whiteboard-${sessionId}`, ydoc);
+
+//           // =========================================================
+//           // ✅ IMPORTANT FIX:
+//           // Streamer should listen remote changes & redraw quickly
+//           // =========================================================
+//           const observer = (event) => {
+//             try {
+//               const origin = event?.transaction?.origin;
+
+//               // If it's our own drawing updates and we're actively drawing,
+//               // skip full redraw (we already draw incrementally).
+//               if (origin === "drawing" && (isDrawing || currentStrokeIdRef.current)) return;
+
+//               // Otherwise (viewer draw / remote update), load & redraw ASAP
+//               loadWhiteboardState();
+//             } catch (e) {
+//               // fallback
+//               loadWhiteboardState();
+//             }
+//           };
+
+//           yWhiteboard.observe(observer);
+
+//           // store cleanup
+//           yWhiteboardObserverCleanupRef.current = () => {
+//             try {
+//               yWhiteboard.unobserve(observer);
+//             } catch {}
+//           };
+//         } catch (error) {
+//           console.error("Failed to initialize Yjs:", error);
+//           toast.error("Failed to connect to whiteboard server");
+//         }
+//       };
+
+//       initYjs();
+
+//       return () => {
+//         // flush pending stroke safely before teardown
+//         try {
+//           flushStrokeToYjs(true);
+//         } catch {}
+
+//         // ✅ detach observer
+//         if (yWhiteboardObserverCleanupRef.current) {
+//           try {
+//             yWhiteboardObserverCleanupRef.current();
+//           } catch {}
+//           yWhiteboardObserverCleanupRef.current = null;
+//         }
+
+//         if (yProviderRef.current) {
+//           try {
+//             yProviderRef.current.disconnect();
+//             yProviderRef.current.destroy();
+//           } catch {}
+//         }
+//         if (yDocRef.current) {
+//           try {
+//             yDocRef.current.destroy();
+//           } catch {}
+//         }
+//         yProviderRef.current = null;
+//         yDocRef.current = null;
+//         yWhiteboardRef.current = null;
+//         ySettingsRef.current = null;
+//         yUndoManagerRef.current = null;
+//       };
+//       // eslint-disable-next-line react-hooks/exhaustive-deps
+//     }, [sessionId, roomCode, wsToken, allowViewersToDraw, sessionInfo, loadWhiteboardState]);
+
+//     // ✅ Keep awareness updated without reconnecting
+//     useEffect(() => {
+//       const provider = yProviderRef.current;
+//       if (!provider) return;
+
+//       try {
+//         const prevState = provider.awareness.getLocalState() || {};
+//         provider.awareness.setLocalState({
+//           ...prevState,
+//           userId: sessionInfo?.streamerId || "streamer",
+//           userName: sessionInfo?.streamerName || "Streamer",
+//           role: "STREAMER",
+//           isStreamer: true,
+//           color,
+//           tool,
+//         });
+//       } catch {}
+//     }, [color, tool, sessionInfo]);
+
+//     // =========================
+//     // ✅ Initialize canvas
+//     // =========================
+//     useEffect(() => {
+//       if (!canvasRef.current || !backgroundCanvasRef.current || !containerRef.current) return;
+
+//       const canvas = canvasRef.current;
+//       const bgCanvas = backgroundCanvasRef.current;
+//       const container = containerRef.current;
+
+//       const resizeCanvas = () => {
+//         const containerWidth = container.clientWidth;
+//         const containerHeight = container.clientHeight;
+
+//         canvas.width = containerWidth;
+//         canvas.height = containerHeight;
+//         bgCanvas.width = containerWidth;
+//         bgCanvas.height = containerHeight;
+
+//         const ctx = canvas.getContext("2d");
+//         const bgCtx = bgCanvas.getContext("2d");
+
+//         ctxRef.current = ctx;
+//         bgCtxRef.current = bgCtx;
+
+//         ctx.lineCap = "round";
+//         ctx.lineJoin = "round";
+
+//         if (yWhiteboardRef.current) {
+//           const state = yWhiteboardRef.current.toArray()[0] || {};
+//           scheduleRedraw(state.objects || []);
+//         }
+//       };
+
+//       resizeCanvas();
+
+//       const resizeObserver = new ResizeObserver(() => resizeCanvas());
+//       resizeObserver.observe(container);
+
+//       return () => resizeObserver.disconnect();
+//     }, [scheduleRedraw]);
+
+//     // =========================
+//     // ✅ Pointer Events + coalesced events
+//     // =========================
+//     const handlePointerDown = useCallback(
+//       (e) => {
+//         e.preventDefault();
+//         if (!canvasRef.current) return;
+
+//         if (e.button === 2) return;
+
+//         try {
+//           canvasRef.current.setPointerCapture(e.pointerId);
+//           pointerIdRef.current = e.pointerId;
+//         } catch {}
+
+//         if (tool === "pan" || e.altKey || e.button === 1) {
+//           setIsPanning(true);
+//           lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+//           canvasRef.current.style.cursor = "grabbing";
+//           return;
+//         }
+
+//         setIsDrawing(true);
+
+//         const p = getTransformedPoint(e);
+//         lastPointRef.current = p;
+//         lastLocalPointRef.current = p;
+//         lastLocalMidRef.current = null;
+
+//         if (tool === "pen" || tool === "eraser") {
+//           const strokeId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+//           currentStrokeIdRef.current = strokeId;
+//           strokeBufferRef.current = [];
+
+//           addObject({
+//             id: strokeId,
+//             type: tool,
+//             points: [{ x: p.x, y: p.y }],
+//             color: tool === "eraser" ? backgroundColor : color,
+//             strokeWidth,
+//             opacity,
+//             timestamp: Date.now(),
+//           });
+
+//           // dot for click-without-move
+//           drawSmoothStroke(p, { x: p.x + 0.01, y: p.y + 0.01 }, tool);
+//         }
+//       },
+//       [tool, getTransformedPoint, addObject, backgroundColor, color, strokeWidth, opacity, drawSmoothStroke]
+//     );
+
+//     const handlePointerMove = useCallback(
+//       (e) => {
+//         if (!canvasRef.current) return;
+
+//         if (isPanning) {
+//           const dx = e.clientX - lastPanPointRef.current.x;
+//           const dy = e.clientY - lastPanPointRef.current.y;
+//           canvasOffsetRef.current.x += dx;
+//           canvasOffsetRef.current.y += dy;
+//           lastPanPointRef.current = { x: e.clientX, y: e.clientY };
+
+//           if (yWhiteboardRef.current) {
+//             const state = yWhiteboardRef.current.toArray()[0] || {};
+//             scheduleRedraw(state.objects || []);
+//           }
+//           return;
+//         }
+
+//         if (!isDrawing) return;
+//         if (tool !== "pen" && tool !== "eraser") return;
+
+//         const events =
+//           typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
+
+//         for (const evt of events) {
+//           const next = getTransformedPoint(evt);
+//           const prev = lastLocalPointRef.current || lastPointRef.current;
+
+//           const dist = prev ? Math.hypot(next.x - prev.x, next.y - prev.y) : 999;
+
+//           const minDist = 0.6;
+//           if (dist < minDist) continue;
+
+//           if (prev) drawSmoothStroke(prev, next, tool);
+
+//           strokeBufferRef.current.push(next);
+//           scheduleFlush();
+
+//           lastLocalPointRef.current = next;
+//           lastPointRef.current = next;
+//         }
+//       },
+//       [isDrawing, isPanning, tool, getTransformedPoint, drawSmoothStroke, scheduleFlush, scheduleRedraw]
+//     );
+
+//     const endStrokeCleanup = useCallback(() => {
+//       flushStrokeToYjs(true);
+
+//       currentStrokeIdRef.current = null;
+//       strokeBufferRef.current = [];
+//       lastLocalPointRef.current = null;
+//       lastLocalMidRef.current = null;
+
+//       if (canvasRef.current && pointerIdRef.current != null) {
+//         try {
+//           canvasRef.current.releasePointerCapture(pointerIdRef.current);
+//         } catch {}
+//       }
+//       pointerIdRef.current = null;
+//     }, [flushStrokeToYjs]);
+
+//     const handlePointerUp = useCallback(() => {
+//       setIsDrawing(false);
+//       setIsPanning(false);
+
+//       endStrokeCleanup();
+
+//       if (canvasRef.current) {
+//         canvasRef.current.style.cursor = tool === "pan" ? "grab" : "crosshair";
+//       }
+//     }, [tool, endStrokeCleanup]);
+
+//     const handlePointerLeave = useCallback(() => {
+//       setIsDrawing(false);
+//       setIsPanning(false);
+//       endStrokeCleanup();
+//     }, [endStrokeCleanup]);
+
+//     // =========================
+//     // Wheel Zoom
+//     // =========================
+//     const handleWheel = useCallback(
+//       (e) => {
+//         e.preventDefault();
+//         if (!canvasRef.current) return;
+
+//         const rect = canvasRef.current.getBoundingClientRect();
+//         const mouseX = e.clientX - rect.left;
+//         const mouseY = e.clientY - rect.top;
+
+//         const scaleFactor = e.deltaY > 0 ? 0.9 : 1.1;
+//         const newZoom = Math.max(0.5, Math.min(3, currentZoom * scaleFactor));
+
+//         const zoomChange = newZoom / currentZoom;
+
+//         canvasOffsetRef.current.x =
+//           mouseX - (mouseX - canvasOffsetRef.current.x) * zoomChange;
+//         canvasOffsetRef.current.y =
+//           mouseY - (mouseY - canvasOffsetRef.current.y) * zoomChange;
+
+//         setCurrentZoom(newZoom);
+
+//         if (yWhiteboardRef.current) {
+//           const state = yWhiteboardRef.current.toArray()[0] || {};
+//           scheduleRedraw(state.objects || []);
+//         }
+//       },
+//       [currentZoom, scheduleRedraw]
+//     );
+
+//     // Zoom controls (memoized)
+//     const handleZoomIn = useCallback(() => {
+//       setCurrentZoom((prev) => Math.min(prev + 0.1, 3));
+//       if (yWhiteboardRef.current) {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         scheduleRedraw(state.objects || []);
+//       }
+//     }, [scheduleRedraw]);
+
+//     const handleZoomOut = useCallback(() => {
+//       setCurrentZoom((prev) => Math.max(prev - 0.1, 0.5));
+//       if (yWhiteboardRef.current) {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         scheduleRedraw(state.objects || []);
+//       }
+//     }, [scheduleRedraw]);
+
+//     const handleZoomReset = useCallback(() => {
+//       setCurrentZoom(1);
+//       canvasOffsetRef.current = { x: 0, y: 0 };
+
+//       if (yWhiteboardRef.current) {
+//         const state = yWhiteboardRef.current.toArray()[0] || {};
+//         scheduleRedraw(state.objects || []);
+//       }
+//     }, [scheduleRedraw]);
+
+//     // Clear whiteboard (memoized)
+//     const handleClearWhiteboard = useCallback(() => {
+//       if (!yWhiteboardRef.current || !yDocRef.current) return;
+
+//       if (window.confirm("Clear entire whiteboard?")) {
+//         const emptyState = {
+//           version: "1.0.0",
+//           objects: [],
+//           background: backgroundColor,
+//           clearedAt: new Date().toISOString(),
+//           clearedBy: sessionInfo?.streamerId,
+//         };
+
+//         yDocRef.current.transact(() => {
+//           yWhiteboardRef.current.delete(0, yWhiteboardRef.current.length);
+//           yWhiteboardRef.current.insert(0, [emptyState]);
+//         }, "drawing");
+
+//         scheduleRedraw([]);
+//         toast.success("Whiteboard cleared");
+//       }
+//     }, [backgroundColor, sessionInfo, scheduleRedraw]);
+
+//     // Export as image (memoized)
+//     const handleExport = useCallback(() => {
+//       if (!canvasRef.current || !backgroundCanvasRef.current) return;
+
+//       const canvas = canvasRef.current;
+//       const bgCanvas = backgroundCanvasRef.current;
+
+//       const exportCanvas = document.createElement("canvas");
+//       exportCanvas.width = canvas.width;
+//       exportCanvas.height = canvas.height;
+
+//       const exportCtx = exportCanvas.getContext("2d");
+//       exportCtx.drawImage(bgCanvas, 0, 0);
+//       exportCtx.drawImage(canvas, 0, 0);
+
+//       const link = document.createElement("a");
+//       link.download = `whiteboard-${sessionId}-${Date.now()}.png`;
+//       link.href = exportCanvas.toDataURL("image/png");
+//       link.click();
+
+//       toast.success("Whiteboard exported");
+//     }, [sessionId]);
+
+//     // Undo/Redo (memoized)
+//     const handleUndo = useCallback(() => {
+//       if (yUndoManagerRef.current) yUndoManagerRef.current.undo();
+//     }, []);
+
+//     const handleRedo = useCallback(() => {
+//       if (yUndoManagerRef.current) yUndoManagerRef.current.redo();
+//     }, []);
+
+//     return (
+//       <div
+//         ref={containerRef}
+//         className={`absolute inset-0 z-20 w-full h-full bg-gray-900 overflow-hidden ${
+//           isActive ? "block" : "hidden"
+//         }`}
+//         onWheel={handleWheel}
+//       >
+//         {/* Background canvas */}
+//         <canvas
+//           ref={backgroundCanvasRef}
+//           className="absolute top-0 left-0 w-full h-full"
+//           style={{ pointerEvents: "none" }}
+//         />
+
+//         {/* Main drawing canvas */}
+//         <canvas
+//           ref={canvasRef}
+//           className={`absolute top-0 left-0 w-full h-full ${
+//             tool === "pan" ? "cursor-grab" : "cursor-crosshair"
+//           }`}
+//           style={{ touchAction: "none" }}
+//           onPointerDown={handlePointerDown}
+//           onPointerMove={handlePointerMove}
+//           onPointerUp={handlePointerUp}
+//           onPointerLeave={handlePointerLeave}
+//           onContextMenu={(e) => e.preventDefault()}
+//         />
+
+//         {/* Floating Controls - Always Visible */}
+//         <div className="absolute top-2 left-1/2 transform -translate-x-1/2 z-10">
+//           <div className="bg-gray-800/95 backdrop-blur-sm rounded-lg shadow-lg border border-gray-700 p-2 flex items-center space-x-2">
+//             {/* Connection status */}
+//             <div
+//               className={`w-2 h-2 rounded-full ${
+//                 isConnected ? "bg-green-500 animate-pulse" : "bg-red-500"
+//               }`}
+//             />
+//             <span className="text-white text-xs mr-2">
+//               {isConnected ? "Connected" : "Disconnected"}
+//             </span>
+
+//             <div className="w-px h-6 bg-gray-600"></div>
+
+//             {/* Drawing tools */}
+//             <div className="flex items-center space-x-1">
+//               <button
+//                 onClick={() => setTool("pen")}
+//                 className={`p-1.5 rounded-lg transition-colors ${
+//                   tool === "pen"
+//                     ? "bg-blue-600 text-white"
+//                     : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+//                 }`}
+//                 title="Pen"
+//               >
+//                 <FaPaintBrush className="w-4 h-4" />
+//               </button>
+
+//               <button
+//                 onClick={() => setTool("eraser")}
+//                 className={`p-1.5 rounded-lg transition-colors ${
+//                   tool === "eraser"
+//                     ? "bg-blue-600 text-white"
+//                     : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+//                 }`}
+//                 title="Eraser"
+//               >
+//                 <FaEraser className="w-4 h-4" />
+//               </button>
+
+//               <button
+//                 onClick={() => setTool("line")}
+//                 className={`p-1.5 rounded-lg transition-colors ${
+//                   tool === "line"
+//                     ? "bg-blue-600 text-white"
+//                     : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+//                 }`}
+//                 title="Line"
+//               >
+//                 <FiMinus className="w-4 h-4" />
+//               </button>
+
+//               <button
+//                 onClick={() => setTool("rectangle")}
+//                 className={`p-1.5 rounded-lg transition-colors ${
+//                   tool === "rectangle"
+//                     ? "bg-blue-600 text-white"
+//                     : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+//                 }`}
+//                 title="Rectangle"
+//               >
+//                 <FiSquare className="w-4 h-4" />
+//               </button>
+
+//               <button
+//                 onClick={() => setTool("circle")}
+//                 className={`p-1.5 rounded-lg transition-colors ${
+//                   tool === "circle"
+//                     ? "bg-blue-600 text-white"
+//                     : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+//                 }`}
+//                 title="Circle"
+//               >
+//                 <FiCircle className="w-4 h-4" />
+//               </button>
+
+//               <button
+//                 onClick={() => setTool("pan")}
+//                 className={`p-1.5 rounded-lg transition-colors ${
+//                   tool === "pan"
+//                     ? "bg-blue-600 text-white"
+//                     : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+//                 }`}
+//                 title="Pan (Alt + Drag)"
+//               >
+//                 <FiMove className="w-4 h-4" />
+//               </button>
+//             </div>
+
+//             <div className="w-px h-6 bg-gray-600"></div>
+
+//             {/* Color picker */}
+//             <input
+//               type="color"
+//               value={color}
+//               onChange={(e) => setColor(e.target.value)}
+//               className="w-7 h-7 rounded cursor-pointer border border-gray-600"
+//               title="Color"
+//             />
+
+//             <select
+//               value={strokeWidth}
+//               onChange={(e) => setStrokeWidth(Number(e.target.value))}
+//               className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
+//               title="Stroke Width"
+//             >
+//               <option value="1">1px</option>
+//               <option value="2">2px</option>
+//               <option value="3">3px</option>
+//               <option value="5">5px</option>
+//               <option value="8">8px</option>
+//             </select>
+
+//             <select
+//               value={opacity}
+//               onChange={(e) => setOpacity(Number(e.target.value))}
+//               className="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600 w-16"
+//               title="Opacity"
+//             >
+//               <option value="1">100%</option>
+//               <option value="0.8">80%</option>
+//               <option value="0.6">60%</option>
+//               <option value="0.4">40%</option>
+//             </select>
+
+//             <div className="w-px h-6 bg-gray-600"></div>
+
+//             {/* Zoom controls */}
+//             <button
+//               onClick={handleZoomOut}
+//               className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//               title="Zoom Out"
+//             >
+//               <FiMinusCircle className="w-4 h-4 text-white" />
+//             </button>
+//             <span className="text-white text-sm min-w-[50px] text-center font-medium">
+//               {Math.round(currentZoom * 100)}%
+//             </span>
+//             <button
+//               onClick={handleZoomIn}
+//               className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//               title="Zoom In"
+//             >
+//               <FiPlus className="w-4 h-4 text-white" />
+//             </button>
+//             <button
+//               onClick={handleZoomReset}
+//               className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//               title="Reset Zoom"
+//             >
+//               <FiRefreshCcw className="w-4 h-4 text-white" />
+//             </button>
+
+//             <div className="w-px h-6 bg-gray-600"></div>
+
+//             {/* Undo/Redo */}
+//             <button
+//               onClick={handleUndo}
+//               className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//               title="Undo"
+//             >
+//               <FiRefreshCcw className="w-4 h-4 text-white" />
+//             </button>
+//             <button
+//               onClick={handleRedo}
+//               className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+//               title="Redo"
+//             >
+//               <FiRefreshCcw className="w-4 h-4 text-white transform scale-x-[-1]" />
+//             </button>
+
+//             {/* Clear/Export */}
+//             <button
+//               onClick={handleClearWhiteboard}
+//               className="p-1.5 bg-red-900 hover:bg-red-800 rounded-lg transition-colors"
+//               title="Clear Whiteboard"
+//             >
+//               <FiTrash2 className="w-4 h-4 text-white" />
+//             </button>
+//             <button
+//               onClick={handleExport}
+//               className="p-1.5 bg-blue-900 hover:bg-blue-800 rounded-lg transition-colors"
+//               title="Export as PNG"
+//             >
+//               <FiDownload className="w-4 h-4 text-white" />
+//             </button>
+
+//             {/* Grid toggle */}
+//             <button
+//               onClick={() => setIsGridVisible(!isGridVisible)}
+//               className={`p-1.5 rounded-lg transition-colors ${
+//                 isGridVisible
+//                   ? "bg-blue-600 text-white"
+//                   : "bg-gray-700 text-gray-300 hover:bg-gray-600"
+//               }`}
+//               title="Toggle Grid"
+//             >
+//               <FiSquare className="w-4 h-4" />
+//             </button>
+
+//             <div className="w-px h-6 bg-gray-600"></div>
+
+//             {/* Close button */}
+//             <button
+//               onClick={onClose}
+//               className="p-1.5 bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+//               title="Close Whiteboard"
+//             >
+//               <FiX className="w-4 h-4 text-white" />
+//             </button>
+//           </div>
+//         </div>
+
+//         {/* Bottom Info Bar */}
+//         <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
+//           <div className="flex items-center space-x-3">
+//             <span>
+//               Tool: <span className="font-bold capitalize">{tool}</span>
+//             </span>
+//             <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+//             <span>
+//               Zoom:{" "}
+//               <span className="font-bold">{Math.round(currentZoom * 100)}%</span>
+//             </span>
+//             <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+//             <span>
+//               Viewers: <span className="font-bold">{participants.length}</span>
+//             </span>
+//             <span className="w-1 h-1 bg-gray-500 rounded-full"></span>
+//             <span>Alt+Click to pan</span>
+//           </div>
+//         </div>
+
+//         {/* Viewers count in top right */}
+//         <div className="absolute top-2 right-2 bg-black/70 text-white text-xs px-3 py-1.5 rounded backdrop-blur-sm border border-gray-700">
+//           <div className="flex items-center space-x-2">
+//             <span>
+//               {participants.length} active{" "}
+//               {participants.length === 1 ? "viewer" : "viewers"}
+//             </span>
+//             {participants.map((p) => (
+//               <div
+//                 key={p.clientId}
+//                 className="w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-medium"
+//                 title={`${p.userName || "User"}`}
+//               >
+//                 {p.userName?.charAt(0) || "U"}
+//               </div>
+//             ))}
+//           </div>
+//         </div>
+
+//         {/* Panning indicator */}
+//         {isPanning && (
+//           <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/70 text-white px-4 py-2 rounded-lg backdrop-blur-sm border border-gray-600">
+//             <div className="flex items-center space-x-2">
+//               <FiMove className="w-4 h-4" />
+//               <span>Panning...</span>
+//             </div>
+//           </div>
+//         )}
+
+//         {/* Drawing disabled overlay */}
+//         {!allowViewersToDraw && (
+//           <div className="absolute bottom-2 right-2 bg-yellow-900/70 text-yellow-200 px-3 py-1.5 rounded-lg text-xs backdrop-blur-sm border border-yellow-600/30">
+//             Viewers cannot draw
+//           </div>
+//         )}
+//       </div>
+//     );
+//   },
+//   (prevProps, nextProps) => {
+//     if (prevProps.sessionId !== nextProps.sessionId) return false;
+//     if (prevProps.roomCode !== nextProps.roomCode) return false;
+//     if (prevProps.wsToken !== nextProps.wsToken) return false;
+//     if (prevProps.isActive !== nextProps.isActive) return false;
+//     if (prevProps.allowViewersToDraw !== nextProps.allowViewersToDraw) return false;
+//     if (prevProps.mainScreenMode !== nextProps.mainScreenMode) return false;
+//     if (prevProps.compact !== nextProps.compact) return false;
+
+//     if (prevProps.sessionInfo?.streamerId !== nextProps.sessionInfo?.streamerId) return false;
+//     if (prevProps.sessionInfo?.streamerName !== nextProps.sessionInfo?.streamerName) return false;
+
+//     return true;
+//   }
+// );
+
+// StreamerWhiteboard.displayName = "StreamerWhiteboard";
+
+// export default StreamerWhiteboard;
 
 
 

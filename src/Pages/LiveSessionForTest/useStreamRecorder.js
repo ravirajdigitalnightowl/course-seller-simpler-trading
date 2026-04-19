@@ -775,7 +775,7 @@ export const useStreamRecorder = (sessionId, userId, mediaStream, activeScreenSh
       const response = await fetch(`${import.meta.env.VITE_API_URL}/recordings/upload`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
+          'Authorization': `Bearer ${localStorage.getItem('trainertoken')}`
         },
         body: formData
       });

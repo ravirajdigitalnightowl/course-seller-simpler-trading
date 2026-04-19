@@ -912,7 +912,7 @@ const ContentManagementModal = ({ course, onClose, onSuccess }) => {
   }, [activeTab]);
 
   const getAuthToken = () => {
-    return localStorage.getItem('token');
+    return localStorage.getItem('trainertoken');
   };
 
   // Handle duration input change

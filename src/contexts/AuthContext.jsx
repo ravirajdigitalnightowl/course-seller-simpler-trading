@@ -80,8 +80,8 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     const initializeAuth = () => {
       try {
-        const storedToken = localStorage.getItem('token');
-        const storedUser = localStorage.getItem('user');
+        const storedToken = localStorage.getItem('trainertoken');
+        const storedUser = localStorage.getItem('trainer');
         
         if (storedToken && storedUser) {
           setToken(storedToken);
@@ -103,8 +103,8 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   const login = (userData, authToken) => {
-    localStorage.setItem('token', authToken);
-    localStorage.setItem('user', JSON.stringify(userData));
+    localStorage.setItem('trainertoken', authToken);
+    localStorage.setItem('trainer', JSON.stringify(userData));
     setToken(authToken);
     setUser(userData);
     axios.defaults.headers.common['Authorization'] = `Bearer ${authToken}`;
@@ -120,7 +120,7 @@ export const AuthProvider = ({ children }) => {
 
   const updateUser = (updatedUserData) => {
     const newUserData = { ...user, ...updatedUserData };
-    localStorage.setItem('user', JSON.stringify(newUserData));
+    localStorage.setItem('trainer', JSON.stringify(newUserData));
     setUser(newUserData);
   };
 

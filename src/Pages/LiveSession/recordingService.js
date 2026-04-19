@@ -359,7 +359,7 @@ const API_BASE_URL = import.meta.env.VITE_API_URL;
  */
 export const getRecordingUploadUrl = async (sessionId, fileName, fileType, fileSize) => {
   try {
-    const token = localStorage.getItem('token');
+    const token = localStorage.getItem('trainertoken');
     
     console.log("1. Requesting Upload URL... (New API)");
     console.log("Session ID:", sessionId);
@@ -415,7 +415,7 @@ export const getRecordingUploadUrl = async (sessionId, fileName, fileType, fileS
  */
 export const saveRecordingMetadata = async (sessionId, recordingData) => {
   try {
-    const token = localStorage.getItem('token');
+    const token = localStorage.getItem('trainertoken');
     
     console.log("3. Saving Metadata... (New API)");
     console.log("Session ID:", sessionId);
@@ -461,7 +461,7 @@ export const saveRecordingMetadata = async (sessionId, recordingData) => {
  */
 export const getRecordingDownloadUrl = async (sessionId, recordingId) => {
   try {
-    const token = localStorage.getItem('token');
+    const token = localStorage.getItem('trainertoken');
     
     console.log(`Getting download URL for recording: ${recordingId}`);
 

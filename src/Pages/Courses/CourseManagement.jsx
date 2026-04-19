@@ -597,6 +597,46 @@ const CourseManagement = () => {
     fetchCourses();
   }, [fetchCourses]);
 
+  // 🛑 GLOBAL FAILSAFE CLEANUP 🛑
+  // Jab bhi user LiveSession se is page par wapas aaye, background processes kill karein
+  useEffect(() => {
+    const forceStopBackgroundMedia = () => {
+      // 1. Agar socket.io global window object pe reh gaya hai, usay disconnect karein
+      if (window.socket) {
+        window.socket.disconnect();
+        window.socket = null;
+      }
+
+      // 2. DOM mein chhute hue kisi bhi video/audio element ke streams ko band karein
+      document.querySelectorAll('video, audio').forEach(mediaEl => {
+        if (mediaEl.srcObject) {
+          mediaEl.srcObject.getTracks().forEach(track => {
+            track.stop();
+            console.log("🛑 Force stopped lingering media track");
+          });
+          mediaEl.srcObject = null;
+        }
+      });
+
+      // 3. Media Engine Reset Trick: Ek dummy stream call karke turant rok dein
+      // Yeh browser ko purane hardware locks free karne ke liye force karta hai
+      try {
+        navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+          .then(stream => stream.getTracks().forEach(track => track.stop()))
+          .catch(() => {});
+      } catch (e) {}
+    };
+
+    forceStopBackgroundMedia();
+
+    // 🔥 100% BULLETPROOF FIX:
+    // Agar hardware camera light abhi bhi band nahi ho rahi hai, toh hard refresh trigger karein
+    if (sessionStorage.getItem("killMediaOnReturn")) {
+      sessionStorage.removeItem("killMediaOnReturn");
+      window.location.reload(); // Yeh instantly saare sockets aur camera lights band kar dega
+    }
+  }, []);
+
   // Frontend-side search functionality
   useEffect(() => {
     // Ensure courses is an array
